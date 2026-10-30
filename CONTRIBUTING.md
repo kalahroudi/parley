@@ -31,7 +31,7 @@ Go tests run with the race detector (`go test -race ./...`).
 
 ## License headers
 
-Every source file (`.go`, `.ts`) starts with:
+Every source file (`.go`, `.ts`, `.js`, `.sh`, `.yml` and similar) starts with the header below (use `#` instead of `//` for shell, Python and YAML, after any shebang line):
 
 ```
 // Copyright 2026 The Parley Authors
