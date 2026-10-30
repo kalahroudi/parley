@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..");
 const header = (c) =>
@@ -70,4 +71,27 @@ test("package manifests declare Apache-2.0", () => {
     const pkg = JSON.parse(readFileSync(join(root, d, "package.json"), "utf8"));
     assert.equal(pkg.license, "Apache-2.0");
   }
+});
+
+test("CI runs on macOS, Linux and Windows and runs Go directly", () => {
+  const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+  for (const os of ["ubuntu-latest", "macos-latest", "windows-latest"]) {
+    assert.ok(ci.includes(os), `CI matrix missing ${os}`);
+  }
+  assert.ok(ci.includes("go test -race ./..."), "CI must run Go tests directly");
+  assert.ok(!ci.includes("make test-go"), "CI must not use the skipping make target");
+});
+
+test("make test-go fails instead of skipping when Go is missing under CI", { skip: process.platform === "win32" }, () => {
+  const make = spawnSync("sh", ["-c", "command -v make"], { encoding: "utf8" }).stdout.trim();
+  if (!make) return;
+  // An empty PATH hides go; make is invoked by absolute path.
+  const run = (env) =>
+    spawnSync(make, ["-s", "test-go", "SHELL=/bin/sh"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...env, PATH: "/nonexistent" },
+    });
+  assert.notEqual(run({ CI: "true" }).status, 0, "must fail under CI");
+  assert.equal(run({}).status, 0, "must skip locally");
 });
