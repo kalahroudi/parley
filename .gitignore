@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+/bin/
+*.test
+*.out
+coverage/
+.DS_Store

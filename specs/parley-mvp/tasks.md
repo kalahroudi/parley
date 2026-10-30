@@ -12,7 +12,7 @@ Task ids: `T<phase><nn>`. Tests derive from the journeys A to L in spec.md and a
 
 Deliverable: repository, CI on three OSes, local harness that boots a gateway and N daemons, own-key release pipeline, log-redaction wrapper, canary test scaffold.
 
-- [ ] T001 Repository layout (`parleyd`, `parley-cli`, gateway, admin page, tests), license headers, contribution docs
+- [x] T001 Repository layout (`parleyd`, `parley-cli`, gateway, admin page, tests), license headers, contribution docs
 - [ ] T002 CI on macOS, Linux and Windows
 - [ ] T003 Local harness: one command boots the gateway, a mock OIDC server and N daemons (see plan.md, Local-first development)
 - [ ] T004 Own-key release pipeline: reproducible builds, checksums, SBOM, minisign/Ed25519 signing
