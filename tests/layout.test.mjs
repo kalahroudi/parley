@@ -8,8 +8,24 @@ import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..");
-const HEADER =
-  "// Copyright 2026 The Parley Authors\n// SPDX-License-Identifier: Apache-2.0\n";
+const header = (c) =>
+  `${c} Copyright 2026 The Parley Authors\n${c} SPDX-License-Identifier: Apache-2.0\n`;
+// Comment prefix per source extension. A shebang line may precede the header.
+const COMMENT = {
+  ".go": "//",
+  ".ts": "//",
+  ".mts": "//",
+  ".cts": "//",
+  ".tsx": "//",
+  ".js": "//",
+  ".mjs": "//",
+  ".cjs": "//",
+  ".jsx": "//",
+  ".sh": "#",
+  ".py": "#",
+  ".yml": "#",
+  ".yaml": "#",
+};
 const SKIP = new Set(["node_modules", ".git", "dist", ".wrangler"]);
 
 function sources(dir) {
@@ -18,7 +34,7 @@ function sources(dir) {
     if (SKIP.has(name)) continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) out.push(...sources(p));
-    else if ([".go", ".ts", ".mjs"].includes(extname(p))) out.push(p);
+    else if (extname(p) in COMMENT) out.push(p);
   }
   return out;
 }
@@ -44,7 +60,8 @@ test("every source file has the license header", () => {
   const files = sources(root);
   assert.ok(files.length > 0);
   for (const f of files) {
-    assert.ok(readFileSync(f, "utf8").startsWith(HEADER), `no header: ${f}`);
+    const text = readFileSync(f, "utf8").replace(/^#!.*\n/, "");
+    assert.ok(text.startsWith(header(COMMENT[extname(f)])), `no header: ${f}`);
   }
 });
 
