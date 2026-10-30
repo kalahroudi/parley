@@ -146,8 +146,10 @@ test("harness fails fast and cleans up when the gateway command dies", async () 
 test("harness honours PARLEY_GATEWAY_CMD and stops its whole process tree", needsGo, async () => {
   const prev = process.env.PARLEY_GATEWAY_CMD;
   const stub = fileURLToPath(new URL("./harness/stub-gateway.mjs", import.meta.url));
-  // The shell wrapper makes the real server a grandchild of the spawned process.
-  process.env.PARLEY_GATEWAY_CMD = `node "${stub}"; true`;
+  // The shell makes the real server a grandchild of the spawned process; on
+  // POSIX the trailing `true` stops sh from exec'ing node directly (cmd.exe has
+  // no `;` and always stays in between).
+  process.env.PARLEY_GATEWAY_CMD = `node "${stub}"${process.platform === "win32" ? "" : "; true"}`;
   let h;
   try {
     h = await start({ daemons: 1, quiet: true });
