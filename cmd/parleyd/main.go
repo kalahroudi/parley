@@ -4,4 +4,25 @@
 // Command parleyd is the Parley background daemon.
 package main
 
-func main() {}
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+// run blocks until ctx is canceled. The daemon's real work lands in later tasks.
+func run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "parleyd:", err)
+		os.Exit(1)
+	}
+}
