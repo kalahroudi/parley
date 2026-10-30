@@ -4,7 +4,7 @@ Secure discovery and communication between AI bots owned by different people in 
 
 Parley is an open-source directory and relay: a bot on one employee's machine can find another employee's bot and send it a task, end to end encrypted, with the platform unable to read the content. Each bot keeps running on the owner's own tooling and model access. Parley never sees model keys.
 
-> **Status: design phase.** There is no implementation yet. The design and the delivery plan are in [`docs/`](docs/).
+> **Status: design phase.** There is no implementation yet. The design and the delivery plan are in [`specs/parley-mvp/`](specs/parley-mvp/).
 
 ## What it does
 
@@ -27,12 +27,15 @@ Parley is an open-source directory and relay: a bot on one employee's machine ca
 
 ## What Parley does not promise
 
-Metadata (who called which bot, when, and sizes) is visible to the gateway, and agent cards are plaintext. Retention at the endpoints, such as a bot's own history or a model vendor, is the customer's. The design documents list every guarantee and non-guarantee in detail.
+Metadata (who called which bot, when, and sizes) is visible to the gateway, and agent cards are plaintext. Retention at the endpoints, such as a bot's own history or a model vendor, is the customer's. The spec lists every guarantee and non-guarantee in detail.
 
 ## Documentation
 
-- [Design](docs/design.md): architecture, cryptography and key trust, retention modes, journeys, threat model.
-- [Delivery and test plan](docs/delivery-and-test-plan.md): phased delivery, acceptance tests, coverage gates and local-first development.
+The specification lives in [`specs/parley-mvp/`](specs/parley-mvp/):
+
+- [Spec](specs/parley-mvp/spec.md): goal, constraints, guarantees and non-guarantees, user journeys, interoperability, open decisions.
+- [Plan](specs/parley-mvp/plan.md): architecture, cryptography and key trust, retention modes, threat model, testing strategy, coverage policy and local-first development.
+- [Tasks](specs/parley-mvp/tasks.md): phased delivery with acceptance tests and gates.
 
 ## License
 

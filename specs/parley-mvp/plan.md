@@ -1,41 +1,13 @@
-# Parley: Secure Comms + Discovery Design (v4, end-to-end encrypted, no plaintext retention)
+# Parley: Plan (MVP)
 
-Goal: bots owned by different employees find each other and exchange tasks securely on Cloudflare, with task content the platform cannot read and does not keep in readable form. Simple, with nothing a user touches left out.
+How Parley is built. The requirements it satisfies are in [spec.md](spec.md); the phased work and acceptance tests are in [tasks.md](tasks.md).
 
-Decisions carried forward: Cloudflare only (Workers, three Durable Object classes, D1, R2). Daemon = connector and gatekeeper; bots are whatever the customer brings (API, headless CLI, ACP adapters). Vendor terms are the customer's responsibility, with a notice. Flat per-device seats via Stripe, enforced only at enrollment. Open source, with no dependency on any app store or platform signing vendor.
+## Decisions
 
-## 0. What changed from v3
-1. End-to-end encryption is mandatory and always on, using HPKE plus signed transcripts (section 3).
-2. A tenant signing root is in the MVP, so even a malicious gateway cannot substitute device keys. Trust-on-first-use is removed.
-3. Two retention modes: Strict (pass-through, no buffering) and Queued (short-lived ciphertext).
-4. Every caller is a device with keys. Keyless personal tokens are dropped.
-5. Claims are reworded to what we can honestly prove (section 1).
-6. Forward secrecy through on-demand one-time prekeys is in the MVP: tasks already processed stay unreadable even if a device is stolen later.
-7. Offline targets: the sender's daemon waits and retries; the gateway never queues task ciphertext. (A prekey pool at the gateway was rejected after review: more attack surface and no real benefit.)
+Cloudflare only (Workers, three Durable Object classes, D1, R2). Daemon = connector and gatekeeper; bots are whatever the customer brings (API, headless CLI, ACP adapters). Vendor terms are the customer's responsibility, with a notice. Flat per-device seats via Stripe, enforced only at enrollment. Open source, with no dependency on any app store or platform signing vendor.
 
-## 1. Guarantees and non-guarantees
+## Components
 
-**We guarantee (task content = inputs, results, status text, questions, errors, files)**
-- G1: Under the tenant signing root, an active malicious gateway, our staff, or a breach of our storage cannot read or forge task content.
-- G2: We do not store readable task content. Ciphertext is deleted per the retention mode.
-- G3: Only the intended device can decrypt a task, and only a root-approved caller device can have produced it.
-- G4: A revoked or deactivated device receives no new work once the signed revocation list propagates (at most one refresh interval).
-- G5: Forward secrecy for task content. Captured ciphertext of tasks the recipient device has already received and processed cannot be decrypted with keys later stolen from the device, assuming the device erased the keys. Replies are protected per message once their keys are erased.
-
-**We do not guarantee (stated in customer docs)**
-- Metadata is visible to us: who called which bot, when, state codes, padded size bucket.
-- Agent cards (name, description, tags, examples), group names and the audit CSV are plaintext. Owners must not put secrets in them; publishing runs a secrets lint.
-- Group-based visibility is decided by the gateway and is advisory. The target daemon enforces the owner's allowlist by identity from the root-signed binding.
-- Forward secrecy depends on devices actually erasing used keys. Prekeys live in memory only, but erasure in Go is best effort, and backups, VM memory snapshots and hibernation images void it. Our hardening guide requires full-disk encryption and disabled or encrypted hibernation and swap.
-- A prekey that has been issued but not yet used stays valid until it expires (at most the task expiry, default 15 min). A gateway that withholds delivery and keeps captured ciphertext could exploit a device stolen inside that window.
-- Signing keys are long-term: theft allows impersonation until revoked, but no decryption of tasks whose keys were erased.
-- Plaintext already on a device (bot CLI history, logs, temp files, task results) is outside this guarantee.
-- Deleted ciphertext may persist in Cloudflare's 30-day recovery history (verified for SQLite-backed Durable Objects). It is encrypted to keys we never hold, and for processed tasks to keys the device has already erased.
-- Retention at endpoints (the bot, its CLI history, the model vendor) is the customer's.
-- "Zero retention" is a model-vendor term. Our statement is: "no plaintext task data is held by us; ciphertext is deleted within the configured TTL, subject to Cloudflare's recovery window."
-- Anything R2-related is claimed only as "deleted from our bucket" until R2 deletion semantics are verified.
-
-## 2. What we ship
 1. **Daemon `parleyd` and CLI `parley-cli` (Go; macOS, Linux, Windows).** `parleyd` is the background service: outbound WSS only, 1..n bots, verification of bindings, signatures and envelopes, owner policy, adapters, crypto module, local MCP server, local replay table. `parley-cli` is the user-facing command (login, test, doctor, approve, admin init, find and send) and talks to `parleyd` over an OS-user-restricted local socket.
 2. **Gateway Worker (TypeScript).** A2A v1.0 transport and lifecycle, OIDC login (Google, Microsoft Entra, generic OIDC), enrollment queue, admin API, Stripe webhook. Routing metadata only.
 3. **Durable Objects.** Tenant DO (cards, groups, ACLs, binding and revocation lists, seat limit, settings, rate limit), Device DO (hibernating socket, presence), Task DO (state machine, deadlines, metadata audit, ciphertext only when retained).
@@ -44,7 +16,8 @@ Decisions carried forward: Cloudflare only (Workers, three Durable Object classe
 6. **Reference bot template.** Tool-less reviewer.
 7. **Release and distribution (no app-store or signing-vendor dependency).** The daemon is a command-line program distributed through GitHub releases, a Homebrew tap, a Linux package repo, `go install` and source builds. Releases and updates are signed with the project's own key (Ed25519 or minisign), which the daemon pins. Builds are reproducible, with published checksums and an SBOM. macOS and Linux need no vendor account (verify on a fresh Mac early). Windows: published hashes for IT allowlisting, source builds that enterprises can re-sign with their own certificate, and an optional project certificate later, as a convenience rather than a dependency.
 
-## 3. Cryptography and key trust
+
+## Cryptography and key trust
 
 **Rules.** Vetted libraries only (HPKE via the Go standard library or CIRCL, verify availability; libsodium acceptable). No custom primitives. One small crypto module with published test vectors. One fixed suite, no runtime negotiation (no downgrade).
 
@@ -81,32 +54,19 @@ Decisions carried forward: Cloudflare only (Workers, three Durable Object classe
 
 **Key loss or expiry.** If the device restarts and loses its in-memory prekeys, or a prekey expires before use, the task fails with "recipient key unavailable, resend". No admin recovery exists for content because no one but the device holds keys.
 
-## 4. Retention modes (tenant setting)
-- **Task delivery (both modes).** The gateway forwards task frames between live sockets and does not store them. An offline target is handled by the sender's daemon waiting (section 3), not by gateway queueing.
+
+## Retention modes (tenant setting)
+
+- **Task delivery (both modes).** The gateway forwards task frames between live sockets and does not store them. An offline target is handled by the sender's daemon waiting (see "Cryptography and key trust"), not by gateway queueing.
 - **Strict (pass-through).** Results and status messages are also relayed only while the caller is connected and are stored nowhere. If the caller is disconnected, the task fails ("caller disconnected"). Best for pods and always-on bots. We say "not stored by our application", not "never persisted anywhere", because the platform may buffer in transit.
 - **Queued (default).** Result and status ciphertext is stored until the caller acknowledges it, with a TTL (default 1 h, configurable 15 min to 24 h), then deleted, so a caller that briefly disconnects still gets its result. Content is unreadable to us throughout.
 - **Both modes.** Metadata is kept 90 days (configurable) with a "ciphertext deleted at time X" record.
 - **Daemon.** Payloads stay in memory. Each run gets a temp directory (mode 0700) deleted on completion. The local log is metadata only. The daemon turns off CLI history and transcripts where the CLI allows it, and `parley-cli doctor` shows a red warning for each bot that retains data. Cards carry a self-declared, unenforced retention label.
 - **Logging.** `invocation_logs` off, minimal sampling, no task or user ids in URLs (identifiers travel in WebSocket frames and bodies), and a redacting wrapper that allows ids, states, sizes and timestamps only. A build test fails if a payload field reaches a log call.
 
-## 5. A2A interoperability
-Discovery and task lifecycle use A2A v1.0 (card at the well-known path, `TASK_STATE_*` states including INPUT_REQUIRED, list, cancel, subscribe; push notifications unsupported). Message parts are opaque ciphertext parts. A standard third-party A2A client can reach the transport but cannot read content; content requires our daemon or SDK. CI jobs use a headless enrolled device. We claim "A2A v1.0 transport and lifecycle with encrypted message parts", not content interoperability.
 
-## 6. End-to-end journeys
-**A. Admin onboarding (~15 min).** Sign up, connect Google, Microsoft or Okta, run `parley-cli admin init` (root key plus recovery code), add users and groups, choose retention mode, subscribe or stay free (3 devices), share the install command with its root fingerprint.
-**B. Employee enrollment.** Install through Homebrew, the package repo or the install script (checksum and signature verified against the published release key), then `parley-cli login --root <fingerprint>`, SSO, the browser shows a code and device name, keys are generated, the request waits for admin approval (batch approval is one click on the admin's daemon). Background service starts on boot. `parley-cli test` sends a task to your own bot to prove the full path.
-**C. Publish a bot.** Name, description, tags, examples (secrets lint), visibility or allowed groups, owner allowlist, approval mode, concurrency, timeout. Several bots per daemon.
-**D. Discover and call.** The caller's bot uses the daemon's MCP tools or CLI: `find_agents`, `send_task`, `get_task(wait_seconds)`, `cancel_task`, `list_tasks`. The daemon verifies the target's root-signed binding and revocation status before sending, and asks the target for a one-time prekey over the live relay. Users see no key prompts. Results are marked untrusted.
-**E. Long tasks.** SUBMITTED, WORKING (encrypted status text), INPUT_REQUIRED (encrypted question; reply on the same task), COMPLETED, FAILED, CANCELED, REJECTED.
-**F. Not-happy paths.** Offline target (the caller's daemon waits up to the task expiry, then FAILED), busy (queue 5 then REJECTED), not permitted (REJECTED, bot hidden), timeout, recipient restarted and lost its keys (resend), caller disconnected (Strict), revocation list too old.
-**G. Approval.** `none` for tool-less skills; `owner` for tool-using skills via `parley-cli approve <id>`; no answer in 5 min means REJECTED.
-**H. Pods.** Admin-minted single-use token, headless device, named service owner, binding signed by the admin's daemon; ideal for Strict.
-**I. Offboarding.** Deactivation cascades: the root-signed revocation list is updated, sockets close, tasks are canceled, bots hidden. Sessions re-validate against the IdP every 24 h (72 h grace if the IdP is down).
-**J. Updates.** Auto-update verified against the project's own pinned release key, with a pin-to-version option; protocol version in the handshake.
-**K. Billing.** Stripe Checkout and Portal; seat limit enforced only at enrollment; live tunnels are never cut.
-**L. Owner and security-team views.** Per-bot call log (metadata), admin kill-switch with a reason, metadata audit CSV, tenant export and deletion.
+## Threat model
 
-## 7. Threat table
 | Threat | Control |
 |---|---|
 | Gateway, staff or account breach reads content | E2E encryption; no content keys server-side; canary test. |
@@ -120,11 +80,13 @@ Discovery and task lifecycle use A2A v1.0 (card at the well-known path, `TASK_ST
 | Compromised local bot using the caller interface | OS-user socket, sandbox blocks it, rate limits, optional confirm-outbound mode. Residual: a bot running as the user can send as the user. |
 | Abuse and loops | Rate-limit counter in the Tenant DO, concurrency caps, delegation depth 3, timeouts. |
 | Cross-tenant leakage | One Tenant DO per customer; tenant id in every Device and Task DO name. |
-| Accidental plaintext copies | Logging rules in section 4, canary test, secrets lint on cards. |
+| Accidental plaintext copies | Logging rules in "Retention modes", canary test, secrets lint on cards. |
 | Supply chain | Release and update signatures from the project's own pinned key, reproducible builds, checksums, SBOM, minimal dependencies. |
 
-## 8. Build order, spikes and gates
-The build is delivered in phases, each with a demoable deliverable, a functional acceptance suite and coverage gates. See `delivery-and-test-plan.md`: Phase 0 foundation and release pipeline, Phase 1 tunnel and identity, Phase 2 secure messaging core, Phase 3 tasks and discovery, Phase 4 caller interface and adapters, Phase 5 product shell, Phase 6 hardening and pilot. The spikes below are folded into those phases as acceptance tests (spikes 1 and 2 in Phase 1, 3 and 4 in Phase 2, 5 and 6 in Phase 3, 7 and 9 in Phase 4, 8 in Phase 1).
+
+## Spikes and gates
+
+The spikes are delivered inside the phases in [tasks.md](tasks.md): spikes 1, 2 and 8 in Phase 1, spikes 3 and 4 in Phase 2, spikes 5 and 6 in Phase 3, and spikes 7 and 9 in Phase 4.
 
 Spikes (pass criteria)
 1. Hibernation tunnel with a forced deploy and 20 reconnects: no lost or duplicated events.
@@ -138,12 +100,64 @@ Spikes (pass criteria)
 9. Walking skeleton: two machines, a real MCP client finds and calls a bot end to end, including offline, cancel, expiry and INPUT_REQUIRED.
 Gate: spikes 2, 3, 4 and 9 must pass before Phase 5 (product shell) begins.
 
-## 9. Deferred, and what users get instead
-Token streaming (encrypted status text instead). Gateway-side queueing of tasks for offline bots (the sender's daemon waits and retries instead). SCIM and IdP groups (admin-managed groups). Semantic search (name, description and tag filter). Gateway-side content DLP (impossible with E2E; daemon-side hooks later). MDM policy files. A real sandbox for tool-using skills (approval-gated and labeled until proven; unsupported on Windows). Cross-device bot sync (a bot is bound to one device).
 
-## 10. Compliance and operations
-Tenant export and deletion, subprocessor list (Cloudflare, Stripe), data-processing terms, no operator access to content. Counsel reviews every data-handling claim, including the wording in section 1.
+## Testing strategy
 
-## 11. Open decisions
-- Admin approval friction for new devices (default: manual batch approval) versus the labeled auto-approve option.
-- Queued default TTL (1 h proposed).
+### Principles
+
+- **Tests come from the journeys.** Each journey A to L in the design maps to at least one end-to-end test, tracked in `tests/journeys.md` (journey, test id, phase). A journey is done when its test passes.
+- **CI runs on macOS, Linux and Windows** from Phase 0. Platform-specific code is tested on its own platform.
+- **No phase exits** until its acceptance tests pass, its coverage gates hold, and the previous phases' tests still pass.
+- **Test the attacker, not only the user.** Adversarial tests are first-class from Phase 2.
+
+
+### Test layers
+
+1. **Unit tests.** Go (`go test`, with the race detector) for the daemon; TypeScript for the gateway.
+2. **Property and fuzz tests.** Go native fuzzing for transcript parsing, envelope decoding and framing; property tests for the task state machine.
+3. **Workers integration tests.** Durable Object, alarm and hibernation behavior run inside the real Workers runtime (Vitest with the Cloudflare Workers pool; verify current coverage-provider support).
+4. **End-to-end tests.** A local gateway plus several real daemons on separate processes or containers, driven through the CLI and MCP interface. These execute the journeys.
+5. **Adversarial harness.** A malicious-gateway test double that substitutes keys, replays, reorders, drops, swaps replies, withholds and reuses prekeys.
+6. **Conformance.** The official A2A SDK client against the transport.
+7. **Security scans.** Canary test across all storage, logs, URLs and headers; core-dump and swap scans for key bytes; dependency audit; secrets scan.
+8. **Soak and chaos.** Forced deploys, reconnect storms, killed daemons, clock skew, dropped connections.
+
+
+### Coverage policy
+
+"Full coverage" is enforced where it protects security, with numbers that fail the build elsewhere. 100% everywhere is not worth the cost (OS glue and unreachable defensive branches), and coverage alone doesn't prove correctness, so tier 1 also gets mutation testing.
+
+| Tier | What | Gate |
+|---|---|---|
+| 1 | Crypto module, transcript encode/decode, envelope and signature verification, replay table, prekey lifecycle, binding and revocation verification, ACL evaluation, task state machine, deadlines and retention logic, log-redaction wrapper | 100% line and branch, plus mutation testing; no exclusions |
+| 2 | Gateway handlers, Tenant/Device/Task DO logic, daemon core, adapters, caller interface | At least 95% line and 90% branch |
+| 3 | Admin page, OS-specific glue (service install, keychain wrappers) | At least 85%, plus integration tests on each OS |
+
+Every coverage exclusion needs a written reason in the code and review sign-off. CI fails if coverage in any tier drops.
+
+
+## Local-first development
+
+Almost everything runs on one machine, which also lets contributors work without a Cloudflare account.
+
+- The gateway and Durable Objects run in Cloudflare's local runtime (`wrangler dev`), with local stand-ins for D1 and R2. Verify WebSocket hibernation behavior locally early.
+- Several real daemons run as separate processes or containers, driven through the CLI and a real MCP client.
+- A mock OIDC server stands in for Google and Entra. Stripe's test mode with its CLI forwards webhooks to the local gateway.
+- One command (for example `make dev`) boots the gateway, a mock identity provider and N daemons.
+- Two short reality checks on a real Cloudflare account, one in Phase 1 and one in Phase 3: real limits and costs, what Cloudflare retains after deletion (the recovery-bookmark test), R2 deletion behavior, real hibernation timing and deploy-driven disconnects, and real Google and Entra logins.
+- macOS and Windows daemons must be tested on those systems, using CI runners or local VMs.
+
+## Schedule risks
+
+Signing-root approval UX, the A2A SDK possibly needing a custom transport for encrypted parts, and Windows service and key-handling quirks. Each has a test in an early phase so surprises come early.
+
+## Design history: what changed from v3
+
+1. End-to-end encryption is mandatory and always on, using HPKE plus signed transcripts (see "Cryptography and key trust").
+2. A tenant signing root is in the MVP, so even a malicious gateway cannot substitute device keys. Trust-on-first-use is removed.
+3. Two retention modes: Strict (pass-through, no buffering) and Queued (short-lived ciphertext).
+4. Every caller is a device with keys. Keyless personal tokens are dropped.
+5. Claims are reworded to what we can honestly prove (see spec.md, "Guarantees and non-guarantees").
+6. Forward secrecy through on-demand one-time prekeys is in the MVP: tasks already processed stay unreadable even if a device is stolen later.
+7. Offline targets: the sender's daemon waits and retries; the gateway never queues task ciphertext. (A prekey pool at the gateway was rejected after review: more attack surface and no real benefit.)
+
