@@ -1,4 +1,4 @@
-# A2A Secure Comms + Discovery: Design v4 (end-to-end encrypted, no plaintext retention)
+# Parley: Secure Comms + Discovery Design (v4, end-to-end encrypted, no plaintext retention)
 
 Goal: bots owned by different employees find each other and exchange tasks securely on Cloudflare, with task content the platform cannot read and does not keep in readable form. Simple, with nothing a user touches left out.
 
@@ -49,7 +49,7 @@ Decisions carried forward: Cloudflare only (Workers, three Durable Object classe
 **Rules.** Vetted libraries only (HPKE via the Go standard library or CIRCL, verify availability; libsodium acceptable). No custom primitives. One small crypto module with published test vectors. One fixed suite, no runtime negotiation (no downgrade).
 
 **Tenant signing root.**
-- Created by the first admin's daemon (`a2a-daemon admin init`): an Ed25519 root key held in that daemon's keychain, with a recovery code and an encrypted backup. A second root holder can be added.
+- Created by the first admin's daemon (`parley admin init`): an Ed25519 root key held in that daemon's keychain, with a recovery code and an encrypted backup. A second root holder can be added.
 - The root signs, per device, a binding `{tenant, owner identity (user email or named service owner), device id, signing public key, version, not_after (90 days)}`. Encryption keys are one-time prekeys (below), not part of the binding.
 - Daemons pin only the root public key. The admin shares the install command, which carries the root fingerprint, through a channel other than our service (chat or email), so the gateway cannot substitute it.
 - **Enrollment.** The user signs in with SSO and the device generates its keys and requests approval. The admin's daemon lists pending devices (user, device name, fingerprint) and signs on confirm, with a batch option. Pods use the admin-minted single-use token, and the admin's daemon signs the binding. Optional "auto-approve" is off by default and labeled "trusts the gateway for new enrollments".
@@ -86,20 +86,20 @@ Decisions carried forward: Cloudflare only (Workers, three Durable Object classe
 - **Strict (pass-through).** Results and status messages are also relayed only while the caller is connected and are stored nowhere. If the caller is disconnected, the task fails ("caller disconnected"). Best for pods and always-on bots. We say "not stored by our application", not "never persisted anywhere", because the platform may buffer in transit.
 - **Queued (default).** Result and status ciphertext is stored until the caller acknowledges it, with a TTL (default 1 h, configurable 15 min to 24 h), then deleted, so a caller that briefly disconnects still gets its result. Content is unreadable to us throughout.
 - **Both modes.** Metadata is kept 90 days (configurable) with a "ciphertext deleted at time X" record.
-- **Daemon.** Payloads stay in memory. Each run gets a temp directory (mode 0700) deleted on completion. The local log is metadata only. The daemon turns off CLI history and transcripts where the CLI allows it, and `a2a-daemon doctor` shows a red warning for each bot that retains data. Cards carry a self-declared, unenforced retention label.
+- **Daemon.** Payloads stay in memory. Each run gets a temp directory (mode 0700) deleted on completion. The local log is metadata only. The daemon turns off CLI history and transcripts where the CLI allows it, and `parley doctor` shows a red warning for each bot that retains data. Cards carry a self-declared, unenforced retention label.
 - **Logging.** `invocation_logs` off, minimal sampling, no task or user ids in URLs (identifiers travel in WebSocket frames and bodies), and a redacting wrapper that allows ids, states, sizes and timestamps only. A build test fails if a payload field reaches a log call.
 
 ## 5. A2A interoperability
 Discovery and task lifecycle use A2A v1.0 (card at the well-known path, `TASK_STATE_*` states including INPUT_REQUIRED, list, cancel, subscribe; push notifications unsupported). Message parts are opaque ciphertext parts. A standard third-party A2A client can reach the transport but cannot read content; content requires our daemon or SDK. CI jobs use a headless enrolled device. We claim "A2A v1.0 transport and lifecycle with encrypted message parts", not content interoperability.
 
 ## 6. End-to-end journeys
-**A. Admin onboarding (~15 min).** Sign up, connect Google, Microsoft or Okta, run `a2a-daemon admin init` (root key plus recovery code), add users and groups, choose retention mode, subscribe or stay free (3 devices), share the install command with its root fingerprint.
-**B. Employee enrollment.** Install through Homebrew, the package repo or the install script (checksum and signature verified against the published release key), then `a2a-daemon login --root <fingerprint>`, SSO, the browser shows a code and device name, keys are generated, the request waits for admin approval (batch approval is one click on the admin's daemon). Background service starts on boot. `a2a-daemon test` sends a task to your own bot to prove the full path.
+**A. Admin onboarding (~15 min).** Sign up, connect Google, Microsoft or Okta, run `parley admin init` (root key plus recovery code), add users and groups, choose retention mode, subscribe or stay free (3 devices), share the install command with its root fingerprint.
+**B. Employee enrollment.** Install through Homebrew, the package repo or the install script (checksum and signature verified against the published release key), then `parley login --root <fingerprint>`, SSO, the browser shows a code and device name, keys are generated, the request waits for admin approval (batch approval is one click on the admin's daemon). Background service starts on boot. `parley test` sends a task to your own bot to prove the full path.
 **C. Publish a bot.** Name, description, tags, examples (secrets lint), visibility or allowed groups, owner allowlist, approval mode, concurrency, timeout. Several bots per daemon.
 **D. Discover and call.** The caller's bot uses the daemon's MCP tools or CLI: `find_agents`, `send_task`, `get_task(wait_seconds)`, `cancel_task`, `list_tasks`. The daemon verifies the target's root-signed binding and revocation status before sending, and asks the target for a one-time prekey over the live relay. Users see no key prompts. Results are marked untrusted.
 **E. Long tasks.** SUBMITTED, WORKING (encrypted status text), INPUT_REQUIRED (encrypted question; reply on the same task), COMPLETED, FAILED, CANCELED, REJECTED.
 **F. Not-happy paths.** Offline target (the caller's daemon waits up to the task expiry, then FAILED), busy (queue 5 then REJECTED), not permitted (REJECTED, bot hidden), timeout, recipient restarted and lost its keys (resend), caller disconnected (Strict), revocation list too old.
-**G. Approval.** `none` for tool-less skills; `owner` for tool-using skills via `a2a-daemon approve <id>`; no answer in 5 min means REJECTED.
+**G. Approval.** `none` for tool-less skills; `owner` for tool-using skills via `parley approve <id>`; no answer in 5 min means REJECTED.
 **H. Pods.** Admin-minted single-use token, headless device, named service owner, binding signed by the admin's daemon; ideal for Strict.
 **I. Offboarding.** Deactivation cascades: the root-signed revocation list is updated, sockets close, tasks are canceled, bots hidden. Sessions re-validate against the IdP every 24 h (72 h grace if the IdP is down).
 **J. Updates.** Auto-update verified against the project's own pinned release key, with a pin-to-version option; protocol version in the handshake.
