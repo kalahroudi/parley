@@ -1,3 +1,3 @@
-module github.com/parley-dev/parley
+module github.com/kalahroudi/parley
 
 go 1.22
