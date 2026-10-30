@@ -1,4 +1,4 @@
-.PHONY: test test-layout test-go
+.PHONY: test test-layout test-go dev
 
 test: test-layout test-go
 
@@ -11,3 +11,7 @@ test-go:
 	@if command -v go >/dev/null; then go vet ./... && go test -race ./...; \
 	elif [ -n "$$CI" ]; then echo "go not installed in CI" >&2; exit 1; \
 	else echo "go not installed, skipping"; fi
+
+# Boot the gateway, a mock OIDC server and N daemons (default 2): make dev N=3
+dev:
+	N=$(or $(N),2) node tests/harness/harness.mjs
