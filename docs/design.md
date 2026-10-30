@@ -36,7 +36,7 @@ Decisions carried forward: Cloudflare only (Workers, three Durable Object classe
 - Anything R2-related is claimed only as "deleted from our bucket" until R2 deletion semantics are verified.
 
 ## 2. What we ship
-1. **Daemon (Go; macOS, Linux, Windows).** Outbound WSS only, 1..n bots, verification of bindings, signatures and envelopes, owner policy, adapters, crypto module, caller interface (local MCP server and CLI over an OS-user-restricted socket), local replay table.
+1. **Daemon `parleyd` and CLI `parley-cli` (Go; macOS, Linux, Windows).** `parleyd` is the background service: outbound WSS only, 1..n bots, verification of bindings, signatures and envelopes, owner policy, adapters, crypto module, local MCP server, local replay table. `parley-cli` is the user-facing command (login, test, doctor, approve, admin init, find and send) and talks to `parleyd` over an OS-user-restricted local socket.
 2. **Gateway Worker (TypeScript).** A2A v1.0 transport and lifecycle, OIDC login (Google, Microsoft Entra, generic OIDC), enrollment queue, admin API, Stripe webhook. Routing metadata only.
 3. **Durable Objects.** Tenant DO (cards, groups, ACLs, binding and revocation lists, seat limit, settings, rate limit), Device DO (hibernating socket, presence), Task DO (state machine, deadlines, metadata audit, ciphertext only when retained).
 4. **D1 and R2.** D1: tenants, Stripe mapping, no content. R2: encrypted files only.
