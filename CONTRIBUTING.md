@@ -35,7 +35,7 @@ Go tests run with the race detector (`go test -race ./...`).
 make dev N=3
 ```
 
-boots a gateway, a mock OIDC server (stands in for Google and Entra) and N `parleyd` processes, and prints their URLs. The gateway is a placeholder until the real Worker lands; set `PARLEY_GATEWAY_CMD` (for example `npx wrangler dev --port $PORT`) to run another command from `gateway/`, which must serve `/healthz` on `$PORT`. Daemons get `PARLEY_HOME`, `PARLEY_GATEWAY_URL` and `PARLEY_OIDC_ISSUER`. Tests can call `start()` from `tests/harness/harness.mjs`.
+boots a gateway, a mock OIDC server (stands in for Google and Entra) and N `parleyd` processes, and prints their URLs. The gateway is a placeholder until the real Worker lands; set `PARLEY_GATEWAY_CMD` (for example `npx wrangler dev --port $PORT`) to run another command from `gateway/`, which must serve `/healthz` on `$PORT`. Daemons get `PARLEY_HOME`, `PARLEY_GATEWAY_URL` and `PARLEY_OIDC_ISSUER` in their environment (the placeholder daemon does not read them yet). The mock OIDC server is deliberately permissive: it supports PKCE but does not check `redirect_uri` against an allowlist. Tests can call `start()` from `tests/harness/harness.mjs`.
 
 ## License headers
 

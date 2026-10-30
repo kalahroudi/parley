@@ -14,4 +14,4 @@ test-go:
 
 # Boot the gateway, a mock OIDC server and N daemons (default 2): make dev N=3
 dev:
-	N=$(or $(N),2) node tests/harness/harness.mjs
+	node tests/harness/harness.mjs --daemons=$(or $(N),2)
