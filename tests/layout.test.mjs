@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..");
 const header = (c) =>
@@ -60,8 +61,20 @@ test("every source file has the license header", () => {
   const files = sources(root);
   assert.ok(files.length > 0);
   for (const f of files) {
-    const text = readFileSync(f, "utf8").replace(/^#!.*\n/, "");
+    // Normalise CRLF so a Windows checkout with autocrlf still passes.
+    const text = readFileSync(f, "utf8").replace(/\r\n/g, "\n").replace(/^#!.*\n/, "");
     assert.ok(text.startsWith(header(COMMENT[extname(f)])), `no header: ${f}`);
+  }
+});
+
+test(".gitattributes forces LF line endings", () => {
+  const attrs = readFileSync(join(root, ".gitattributes"), "utf8");
+  assert.match(attrs, /^\*\s+.*\beol=lf\b/m);
+});
+
+test("no source file contains CR line endings", () => {
+  for (const f of sources(root)) {
+    assert.ok(!readFileSync(f, "utf8").includes("\r"), `CR in: ${f}`);
   }
 });
 
@@ -70,4 +83,36 @@ test("package manifests declare Apache-2.0", () => {
     const pkg = JSON.parse(readFileSync(join(root, d, "package.json"), "utf8"));
     assert.equal(pkg.license, "Apache-2.0");
   }
+});
+
+test("CI runs on macOS, Linux and Windows and runs Go directly", () => {
+  const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+  const matrix = ci.match(/^\s*os:\s*\[([^\]]*)\]/m);
+  assert.ok(matrix, "CI must define an os matrix");
+  for (const os of ["ubuntu-latest", "macos-latest", "windows-latest"]) {
+    assert.ok(matrix[1].includes(os), `CI matrix missing ${os}`);
+  }
+  assert.match(ci, /^\s*fail-fast:\s*false\s*$/m, "one OS failing must not hide the others");
+  assert.match(ci, /^\s*run:\s*go vet \.\/\.\.\.\s*$/m, "CI must run go vet");
+  assert.match(ci, /^\s*run:\s*go test -race \.\/\.\.\.\s*$/m, "CI must run Go tests directly");
+  assert.match(ci, /^\s*run:\s*node --test\b/m, "CI must run the layout tests");
+  assert.ok(!/^\s*run:.*\bmake\b/m.test(ci), "CI must not use the skipping make target");
+});
+
+test("make test-go fails instead of skipping when Go is missing under CI", { skip: process.platform === "win32" }, (t) => {
+  const make = spawnSync("sh", ["-c", "command -v make"], { encoding: "utf8" }).stdout.trim();
+  if (!make) return t.skip("make not installed");
+  // An empty PATH hides go; make is invoked by absolute path.
+  const run = (env) =>
+    spawnSync(make, ["-s", "test-go", "SHELL=/bin/sh"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...env, PATH: "/nonexistent" },
+    });
+  const ci = run({ CI: "true" });
+  assert.notEqual(ci.status, 0, "must fail under CI");
+  assert.match(ci.stderr, /go not installed in CI/);
+  const local = run({});
+  assert.equal(local.status, 0, "must skip locally");
+  assert.match(local.stdout, /skipping/);
 });
