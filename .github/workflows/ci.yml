@@ -11,10 +11,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -34,4 +39,4 @@ jobs:
       - name: Go test
         run: go test -race ./...
       - name: Layout tests
-        run: node --test tests/
+        run: node --test "tests/**/*.test.mjs"

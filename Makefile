@@ -3,7 +3,7 @@
 test: test-layout test-go
 
 test-layout:
-	node --test tests/
+	node --test "tests/**/*.test.mjs"
 
 # Skips when Go is missing locally, but fails under CI (CI is set by GitHub
 # Actions and most other CI systems) so a missing toolchain can't pass silently.
