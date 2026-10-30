@@ -44,7 +44,7 @@ Every coverage exclusion needs a written reason in the code and review sign-off.
 - Gates: tier 1 at 100%, tier 2 gates met.
 
 **Phase 2: Secure messaging core (about 2 to 3 weeks)**
-- Deliverable: `parley test` sends an end-to-end encrypted echo between two machines.
+- Deliverable: `parley-cli test` sends an end-to-end encrypted echo between two machines.
 - Includes: HPKE plus signed transcripts, on-demand prekeys, replay table, erase-then-ack order, padding, files.
 - Acceptance: test vectors; fuzzing finds no crashes; every attack in the malicious-gateway harness is rejected or detected; crash points (between open and ack, between erase and execute) end in a clean fail and resend; junk frames cannot burn keys; core-dump and swap scans find no key bytes; canary test finds zero hits in all storage.
 - Gates: tier 1 at 100% with mutation testing.
