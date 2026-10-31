@@ -29,19 +29,23 @@ func SBOM(version string, paths []string) ([]byte, error) {
 			return nil, fmt.Errorf("sbom: %w", err)
 		}
 		add := func(name, ver, typ string) {
-			if ver == "" || ver == "(devel)" {
-				ver = version
-			}
 			purl := "pkg:golang/" + name + "@" + ver
 			seen[purl] = bomComponent{Type: typ, Name: name, Version: ver, PURL: purl}
 		}
 		add(bi.Main.Path, version, "application")
 		for _, d := range bi.Deps {
-			if d.Replace != nil {
+			// A versioned replacement is what was actually compiled in; a
+			// local-path replacement has no version, so keep the original.
+			if d.Replace != nil && d.Replace.Version != "" {
 				d = d.Replace
+			}
+			if d.Version == "" || d.Version == "(devel)" {
+				return nil, fmt.Errorf("sbom: %s: dependency %s has no version", p, d.Path)
 			}
 			add(d.Path, d.Version, "library")
 		}
+		// The toolchain is part of what determines the binary bytes.
+		seen["go@"+bi.GoVersion] = bomComponent{Type: "platform", Name: "go", Version: bi.GoVersion}
 	}
 	comps := make([]bomComponent, 0, len(seen))
 	for _, c := range seen {

@@ -5,8 +5,11 @@ package release
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,7 +24,16 @@ func TestSignVerify(t *testing.T) {
 		t.Fatal("Public mismatch")
 	}
 	msg := []byte("hello")
-	sig := sk.Sign(msg, "version=1")
+	sig, err := sk.Sign(msg, "version=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sk.Sign(msg, "a\nb"); err == nil {
+		t.Fatal("multi-line trusted comment accepted")
+	}
+	if _, err := pk.Verify(msg, append(sig, "extra\n"...)); err == nil {
+		t.Fatal("trailing lines accepted")
+	}
 	c, err := pk.Verify(msg, sig)
 	if err != nil || c != "version=1" {
 		t.Fatalf("verify: %q %v", c, err)
@@ -53,13 +65,39 @@ func TestVerifyMalformed(t *testing.T) {
 	}
 }
 
+// RFC 7914 section 11 PBKDF2-HMAC-SHA256 vector (c=1 and c=80000 truncated to 32 bytes).
+func TestPBKDF2Vector(t *testing.T) {
+	got := hex.EncodeToString(pbkdf2([]byte("passwd"), []byte("salt"), 1))
+	if got != "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc" {
+		t.Fatalf("pbkdf2: %s", got)
+	}
+}
+
 func TestKeyFiles(t *testing.T) {
 	sk, pk, _ := GenerateKey()
 	pk2, err := ParsePublicKey(pk.Marshal())
 	if err != nil || !bytes.Equal(pk2.Key, pk.Key) || pk2.ID != pk.ID {
 		t.Fatalf("public round trip: %v", err)
 	}
-	sk2, err := ParseSecretKey(sk.Marshal())
+	kdfIterations = 10 // keep the test fast; the stored count is honoured on parse
+	enc, err := sk.MarshalEncrypted("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(enc, []byte(base64.StdEncoding.EncodeToString(sk.Seed))) {
+		t.Fatal("seed stored in the clear")
+	}
+	if _, err := ParseSecretKey(enc, "wrong"); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	if _, err := sk.MarshalEncrypted(""); err == nil {
+		t.Fatal("empty password accepted")
+	}
+	tampered := []byte(strings.Replace(string(enc), "\n", "\nA", 1)) // corrupts the payload
+	if _, err := ParseSecretKey(tampered, "pw"); err == nil {
+		t.Fatal("tampered key file accepted")
+	}
+	sk2, err := ParseSecretKey(enc, "pw")
 	if err != nil || !bytes.Equal(sk2.Seed, sk.Seed) || sk2.ID != sk.ID {
 		t.Fatalf("secret round trip: %v", err)
 	}
@@ -69,7 +107,7 @@ func TestKeyFiles(t *testing.T) {
 		}
 	}
 	for _, s := range []string{"", "wrong\nAAAA\n", "parley release secret key\n!!!\n"} {
-		if _, err := ParseSecretKey([]byte(s)); err == nil {
+		if _, err := ParseSecretKey([]byte(s), "pw"); err == nil {
 			t.Errorf("secret accepted %q", s)
 		}
 	}
@@ -128,7 +166,56 @@ func TestSBOM(t *testing.T) {
 	if err := json.Unmarshal(a, &doc); err != nil || doc.BOMFormat != "CycloneDX" || len(doc.Components) == 0 {
 		t.Fatalf("bad sbom: %v %s", err, a)
 	}
+	if !strings.Contains(string(a), `"platform"`) || !strings.Contains(string(a), `"go"`) {
+		t.Fatalf("toolchain missing from sbom: %s", a)
+	}
 	if _, err := SBOM("v1", []string{filepath.Join(t.TempDir(), "nope")}); err == nil {
 		t.Fatal("missing binary accepted")
+	}
+}
+
+// TestMinisignInterop checks both directions against the real minisign tool.
+// It is skipped when minisign is not installed; CI installs it.
+func TestMinisignInterop(t *testing.T) {
+	bin, err := exec.LookPath("minisign")
+	if err != nil {
+		t.Skip("minisign not installed")
+	}
+	dir := t.TempDir()
+	msg := filepath.Join(dir, "msg")
+	if err := os.WriteFile(msg, []byte("release bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+			t.Fatalf("minisign %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Ours -> minisign.
+	sk, pk, _ := GenerateKey()
+	pub := filepath.Join(dir, "ours.pub")
+	os.WriteFile(pub, pk.Marshal(), 0o644)
+	sig, err := sk.Sign([]byte("release bytes"), "version=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(msg+".minisig", sig, 0o644)
+	run("-V", "-p", pub, "-m", msg)
+
+	// minisign (legacy, non-prehashed) -> ours.
+	mpub, msec := filepath.Join(dir, "m.pub"), filepath.Join(dir, "m.key")
+	run("-G", "-W", "-f", "-p", mpub, "-s", msec)
+	run("-S", "-l", "-s", msec, "-m", msg, "-t", "trusted-x", "-x", msg+".m.minisig")
+	pubData, _ := os.ReadFile(mpub)
+	mpk, err := ParsePublicKey(pubData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sigData, _ := os.ReadFile(msg + ".m.minisig")
+	c, err := mpk.Verify([]byte("release bytes"), sigData)
+	if err != nil || c != "trusted-x" {
+		t.Fatalf("verify minisign signature: %q %v", c, err)
 	}
 }
