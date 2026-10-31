@@ -5,6 +5,7 @@ package logx
 
 import (
 	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,24 @@ func TestPayloadsRedacted(t *testing.T) {
 		if strings.Contains(out, k) {
 			t.Errorf("non-allowlisted key %q logged: %q", k, out)
 		}
+	}
+}
+
+func TestZeroTimeNilLoggerAndLevel(t *testing.T) {
+	var b bytes.Buffer
+	New(&b).Info("z", Time("at", time.Time{}))
+	if !strings.Contains(b.String(), "at=unset") {
+		t.Errorf("zero time: %q", b.String())
+	}
+	var nilLogger *Logger
+	nilLogger.Info("x", Size("size", 1)) // must not panic
+	nilLogger.Error("x")
+	b.Reset()
+	l := NewLevel(&b, slog.LevelWarn)
+	l.Info("hidden")
+	l.Warn("shown")
+	if strings.Contains(b.String(), "hidden") || !strings.Contains(b.String(), "shown") {
+		t.Errorf("level not applied: %q", b.String())
 	}
 }
 

@@ -65,8 +65,14 @@ func Size(key string, n int64) Field {
 	return mk(key, slog.Int64Value(n))
 }
 
-// Time logs a timestamp in UTC, second resolution.
+// Unset is logged for a zero time.
+const Unset = "unset"
+
+// Time logs a timestamp in UTC, second resolution. A zero time is logged as Unset.
 func Time(key string, t time.Time) Field {
+	if t.IsZero() {
+		return mk(key, slog.StringValue(Unset))
+	}
 	return mk(key, slog.StringValue(t.UTC().Truncate(time.Second).Format(time.RFC3339)))
 }
 
@@ -92,7 +98,7 @@ func safeID(s string) string {
 	return s
 }
 
-// Logger writes redacted structured logs.
+// Logger writes redacted structured logs. A nil *Logger discards everything.
 type Logger struct{ l *slog.Logger }
 
 // Msg is a log message. Untyped string constants convert to it implicitly,
@@ -100,9 +106,12 @@ type Logger struct{ l *slog.Logger }
 // from task data without an explicit (and reviewable) conversion.
 type Msg string
 
-// New returns a logger that writes text lines to w.
-func New(w io.Writer) *Logger {
-	return &Logger{slog.New(slog.NewTextHandler(w, nil))}
+// New returns a logger that writes text lines to w at Info and above.
+func New(w io.Writer) *Logger { return NewLevel(w, slog.LevelInfo) }
+
+// NewLevel is New with a minimum level.
+func NewLevel(w io.Writer, lvl slog.Leveler) *Logger {
+	return &Logger{slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl}))}
 }
 
 // Info logs msg with fields.
@@ -116,6 +125,9 @@ func (l *Logger) Warn(msg Msg, f ...Field) { l.log(slog.LevelWarn, msg, f) }
 func (l *Logger) Error(msg Msg, f ...Field) { l.log(slog.LevelError, msg, f) }
 
 func (l *Logger) log(lvl slog.Level, msg Msg, f []Field) {
+	if l == nil {
+		return
+	}
 	attrs := make([]slog.Attr, len(f))
 	for i, x := range f {
 		attrs[i] = x.attr

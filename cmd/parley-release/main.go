@@ -37,6 +37,7 @@ func password() (string, error) {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		//logx:allow fatal startup/CLI error for the operator's terminal; no task content exists in this process path
 		fmt.Fprintln(os.Stderr, "parley-release:", err)
 		os.Exit(1)
 	}

@@ -29,6 +29,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx); err != nil {
+		//logx:allow fatal startup/CLI error for the operator's terminal; no task content exists in this process path
 		fmt.Fprintln(os.Stderr, "parleyd:", err)
 		os.Exit(1)
 	}
