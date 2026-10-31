@@ -2,7 +2,7 @@
 
 Every journey A to L in [spec.md](../specs/parley-mvp/spec.md) maps to at least one end-to-end test. A journey is done when its tests pass. Phases follow the journey to phase matrix in [tasks.md](../specs/parley-mvp/tasks.md); `tests/journeys.test.mjs` fails if a journey is missing, an id repeats, or a phase disagrees with that matrix.
 
-Status is `planned` until the test exists and passes, then `passing`. Update this file in the same change that adds or fixes a test. Phase 5 rows (T509) run on macOS, Linux and Windows; phase 4 rows run on macOS and Linux.
+Status is `planned` until the test exists and passes, then `passing`. Update this file in the same change that adds or fixes a test. A test names its id (for example in its title) so the status check can find it. Phase 5 rows (T509) run on macOS, Linux and Windows; phase 4 rows (T405) run on macOS and Linux; earlier phases run on the CI matrix of all three.
 
 | Journey | Test id | Phase | Status | Scenario |
 |---|---|---|---|---|
