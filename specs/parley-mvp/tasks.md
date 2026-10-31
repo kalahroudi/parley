@@ -15,7 +15,7 @@ Deliverable: repository, CI on three OSes, local harness that boots a gateway an
 - [x] T001 Repository layout (`parleyd`, `parley-cli`, gateway, admin page, tests), license headers, contribution docs
 - [x] T002 CI on macOS, Linux and Windows
 - [x] T003 Local harness: one command boots the gateway, a mock OIDC server and N daemons (see plan.md, Local-first development)
-- [ ] T004 Own-key release pipeline: reproducible builds, checksums, SBOM, minisign/Ed25519 signing
+- [x] T004 Own-key release pipeline: reproducible builds, checksums, SBOM, minisign/Ed25519 signing
 - [ ] T005 Log-redaction wrapper (ids, states, sizes, timestamps only) with a build test that fails on a leaked payload field
 - [ ] T006 Canary test scaffold
 - [ ] T007 `tests/journeys.md` journey matrix
