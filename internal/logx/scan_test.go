@@ -95,6 +95,11 @@ func scan(name string, src []byte, inLogx bool) []string {
 			case !Keys[k]:
 				bad(call.Pos(), "logx key "+strconv.Quote(k)+" is not allowlisted")
 			}
+			if len(call.Args) > 1 {
+				if name := valueLeak(call.Args[1]); name != "" {
+					bad(call.Pos(), "logx."+sel.Sel.Name+" value references payload field "+strconv.Quote(name))
+				}
+			}
 			if sel.Sel.Name == "State" {
 				if v, ok := lit(1); ok && !States[v] {
 					bad(call.Pos(), "logx.State value "+strconv.Quote(v)+" is not a state code")
@@ -110,6 +115,38 @@ func scan(name string, src []byte, inLogx bool) []string {
 	return out
 }
 
+// valueLeak returns the first identifier or field in a logx value expression
+// whose name is a payload name (case and underscores ignored), so
+// logx.ID("task", res.Text) is caught even though safeID would accept the
+// text. Arguments of len and cap are skipped: a size is not content.
+func valueLeak(e ast.Expr) string {
+	norm := func(s string) string {
+		return strings.ReplaceAll(strings.ToLower(s), "_", "")
+	}
+	bannedNames := map[string]bool{}
+	for k := range payloadNames {
+		bannedNames[norm(k)] = true
+	}
+	found := ""
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			if id, ok := x.Fun.(*ast.Ident); ok && (id.Name == "len" || id.Name == "cap") {
+				return false
+			}
+		case *ast.Ident:
+			if bannedNames[norm(x.Name)] {
+				found = x.Name
+			}
+		}
+		return true
+	})
+	return found
+}
+
 func TestScanFlagsLeaks(t *testing.T) {
 	const p = `package x
 import ("log"; "github.com/kalahroudi/parley/internal/logx")
@@ -119,13 +156,15 @@ func f(l *logx.Logger, task, s string) {
 	l.Info("leak", logx.ID(s, task))
 	l.Info("leak", logx.State("state", "boom"))
 	l.Info(logx.Msg(s))
+	l.Info("leak", logx.ID("task", res.Text))
+	l.Info("ok", logx.Size("size", int64(len(in.Input))))
 	log.Println(s)
 }`
 	got := scan("x.go", []byte(p), false)
-	if len(got) != 5 {
-		t.Fatalf("want 5 violations, got %d: %v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("want 6 violations, got %d: %v", len(got), got)
 	}
-	if v := scan("x.go", []byte(p), true); len(v) != 4 {
+	if v := scan("x.go", []byte(p), true); len(v) != 5 {
 		t.Fatalf("logx package may import log: %v", v)
 	}
 	if v := scan("x.go", []byte("package x\nfunc("), false); len(v) != 1 {
