@@ -39,9 +39,8 @@ type PublicKey struct {
 	Key ed25519.PublicKey
 }
 
-// SecretKey is a release signing key. Its file holds the base64 seed and key
-// id on one line; unlike minisign's own format it is not password-encrypted,
-// so CI must supply it from a secret store.
+// SecretKey is a release signing key. On disk it is always encrypted with a
+// password (see seckey.go); the plain seed only exists in memory.
 type SecretKey struct {
 	ID   KeyID
 	Seed []byte
@@ -88,31 +87,12 @@ func ParsePublicKey(data []byte) (PublicKey, error) {
 	return p, nil
 }
 
-// Marshal encodes the secret key file.
-func (s SecretKey) Marshal() []byte {
-	raw := append(append([]byte(nil), s.ID[:]...), s.Seed...)
-	return []byte("parley release secret key\n" + base64.StdEncoding.EncodeToString(raw) + "\n")
-}
-
-// ParseSecretKey decodes a secret key file.
-func ParseSecretKey(data []byte) (SecretKey, error) {
-	lines := splitLines(data)
-	if len(lines) < 2 || lines[0] != "parley release secret key" {
-		return SecretKey{}, errors.New("secret key: unrecognized file")
-	}
-	raw, err := base64.StdEncoding.DecodeString(lines[1])
-	if err != nil || len(raw) != 8+ed25519.SeedSize {
-		return SecretKey{}, errors.New("secret key: malformed")
-	}
-	var s SecretKey
-	copy(s.ID[:], raw[:8])
-	s.Seed = append([]byte(nil), raw[8:]...)
-	return s, nil
-}
-
 // Sign produces a minisign-format signature file for msg. The trusted comment
 // is covered by a second (global) signature.
-func (s SecretKey) Sign(msg []byte, trustedComment string) []byte {
+func (s SecretKey) Sign(msg []byte, trustedComment string) ([]byte, error) {
+	if strings.ContainsAny(trustedComment, "\r\n") {
+		return nil, errors.New("sign: trusted comment must be a single line")
+	}
 	priv := ed25519.NewKeyFromSeed(s.Seed)
 	sig := ed25519.Sign(priv, msg)
 	global := ed25519.Sign(priv, append(append([]byte(nil), sig...), trustedComment...))
@@ -122,13 +102,13 @@ func (s SecretKey) Sign(msg []byte, trustedComment string) []byte {
 	fmt.Fprintf(&b, "%s\n", base64.StdEncoding.EncodeToString(raw))
 	fmt.Fprintf(&b, "trusted comment: %s\n", trustedComment)
 	fmt.Fprintf(&b, "%s\n", base64.StdEncoding.EncodeToString(global))
-	return b.Bytes()
+	return b.Bytes(), nil
 }
 
 // Verify checks a signature file against msg and returns the trusted comment.
 func (p PublicKey) Verify(msg, sigFile []byte) (string, error) {
 	lines := splitLines(sigFile)
-	if len(lines) < 4 || !strings.HasPrefix(lines[2], "trusted comment: ") {
+	if len(lines) != 4 || !strings.HasPrefix(lines[0], "untrusted comment:") || !strings.HasPrefix(lines[2], "trusted comment: ") {
 		return "", errors.New("signature: malformed file")
 	}
 	raw, err := base64.StdEncoding.DecodeString(lines[1])

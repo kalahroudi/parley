@@ -20,13 +20,40 @@ const usage = `usage:
   parley-release sign <secret-file> <file> <trusted-comment>   (writes <file>.minisig)
   parley-release verify <public-file> <file>                   (reads <file>.minisig)
   parley-release verify-checksums <sums-file>                  (files next to it)
+
+The secret key file is encrypted; keygen and sign read its password from the
+environment variable ` + passwordEnv + ` (never from the command line).
 `
+
+const passwordEnv = "PARLEY_RELEASE_KEY_PASSWORD"
+
+func password() (string, error) {
+	p := os.Getenv(passwordEnv)
+	if p == "" {
+		return "", fmt.Errorf("set %s to the secret key password", passwordEnv)
+	}
+	return p, nil
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "parley-release:", err)
 		os.Exit(1)
 	}
+}
+
+// createFile writes data to a new file and fails if path already exists.
+func createFile(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	return f.Close()
 }
 
 func run(a []string) error {
@@ -36,14 +63,24 @@ func run(a []string) error {
 	cmd, a := a[0], a[1:]
 	switch {
 	case cmd == "keygen" && len(a) == 2:
+		pw, err := password()
+		if err != nil {
+			return err
+		}
 		sk, pk, err := release.GenerateKey()
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(a[0], sk.Marshal(), 0o600); err != nil {
+		enc, err := sk.MarshalEncrypted(pw)
+		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(a[1], pk.Marshal(), 0o644); err != nil {
+		// Never overwrite an existing key: that could destroy the release key.
+		if err := createFile(a[0], enc, 0o600); err != nil {
+			return err
+		}
+		if err := createFile(a[1], pk.Marshal(), 0o644); err != nil {
+			os.Remove(a[0])
 			return err
 		}
 		fmt.Println("key id:", pk.ID)
@@ -61,11 +98,15 @@ func run(a []string) error {
 		}
 		return os.WriteFile(a[1], out, 0o644)
 	case cmd == "sign" && len(a) == 3:
+		pw, err := password()
+		if err != nil {
+			return err
+		}
 		skData, err := os.ReadFile(a[0])
 		if err != nil {
 			return err
 		}
-		sk, err := release.ParseSecretKey(skData)
+		sk, err := release.ParseSecretKey(skData, pw)
 		if err != nil {
 			return err
 		}
@@ -73,7 +114,11 @@ func run(a []string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(a[1]+".minisig", sk.Sign(msg, a[2]), 0o644)
+		sig, err := sk.Sign(msg, a[2])
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(a[1]+".minisig", sig, 0o644)
 	case cmd == "verify" && len(a) == 2:
 		pkData, err := os.ReadFile(a[0])
 		if err != nil {

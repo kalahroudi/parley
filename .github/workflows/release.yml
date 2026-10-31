@@ -1,0 +1,39 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3" # keep in sync with the toolchain line in go.mod
+      - name: Build twice and require identical output
+        run: |
+          set -eu
+          export PARLEY_GO_VERSION=go1.27.3
+          scripts/release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/check"
+          # The encrypted signing key and its password are repository secrets.
+          umask 077
+          printf '%s\n' "$PARLEY_RELEASE_KEY" > "$RUNNER_TEMP/release.key"
+          scripts/release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/dist" "$RUNNER_TEMP/release.key"
+          diff "$RUNNER_TEMP/check/SHA256SUMS" "$RUNNER_TEMP/dist/SHA256SUMS"
+          rm -f "$RUNNER_TEMP/release.key"
+        env:
+          PARLEY_RELEASE_KEY: ${{ secrets.PARLEY_RELEASE_KEY }}
+          PARLEY_RELEASE_KEY_PASSWORD: ${{ secrets.PARLEY_RELEASE_KEY_PASSWORD }}
+      - name: Publish
+        run: gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/dist/* --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

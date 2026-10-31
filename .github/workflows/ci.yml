@@ -32,6 +32,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # The minisign interoperability test skips when minisign is missing, so
+      # install it where a package is available (Windows skips that test).
+      - name: Install minisign
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y minisign; else brew install minisign; fi
       # Run Go directly, not through the Makefile Go target, which skips silently
       # when Go is missing and could let CI pass without running Go tests.
       - name: Go vet
