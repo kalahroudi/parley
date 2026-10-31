@@ -7,7 +7,12 @@
 //
 // Later phases plug real sinks in with scan.path() / scan.text() / scan.bytes():
 // Durable Object storage, R2, D1, daemon and gateway logs, URLs, headers and
-// error messages. A canary is searched for in the encodings a leak could take.
+// error messages. A canary is searched for in these encodings: plain, UTF-16
+// LE/BE, hex (either case), URL, JSON-escaped, base64 and base64url (at every
+// alignment inside a larger stream).
+//
+// Known blind spots: compressed or encrypted data (gunzip first), truncated
+// leaks, and a canary split across two separate bytes()/text() calls.
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
@@ -42,13 +47,24 @@ export function needles(canary) {
   const forms = [
     ["plain", canary],
     ["utf16le", Buffer.from(canary, "utf16le")],
+    ["utf16be", Buffer.from(canary, "utf16le").swap16()],
     ["hex", Buffer.from(canary).toString("hex")],
+    ["hex", Buffer.from(canary).toString("hex").toUpperCase()],
+    // url and json only differ from plain if the canary alphabet ever changes.
     ["url", encodeURIComponent(canary)],
     ["json", JSON.stringify(canary).slice(1, -1)],
     ...b64.map((v) => ["base64", v]),
     ...b64.map((v) => ["base64url", v.replaceAll("+", "-").replaceAll("/", "_")]),
   ];
-  return forms.map(([enc, n]) => [enc, Buffer.from(n)]);
+  const seen = new Set();
+  return forms
+    .map(([enc, n]) => [enc, Buffer.from(n)])
+    .filter(([, n]) => {
+      const key = n.toString("hex");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 export class Scan {
@@ -59,15 +75,24 @@ export class Scan {
     );
     this.hits = [];
     this.sinks = [];
+    this.skipped = [];
+    this.seen = new Set();
   }
 
   // Scans a buffer or string; `sink` names where it came from in the report.
   bytes(sink, data) {
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+    let buf;
+    if (Buffer.isBuffer(data)) buf = data;
+    else if (typeof data === "string") buf = Buffer.from(data);
+    else if (ArrayBuffer.isView(data)) buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    else if (data instanceof ArrayBuffer) buf = Buffer.from(data);
+    else throw new TypeError(`canary scan of ${sink}: unsupported data type ${Object.prototype.toString.call(data)}`);
     if (!this.sinks.includes(sink)) this.sinks.push(sink);
     for (const { field, encoding, needle } of this.table) {
       if (!buf.includes(needle)) continue;
-      if (!this.hits.some((h) => h.sink === sink && h.field === field && h.encoding === encoding)) {
+      const key = `${sink}|${field}|${encoding}`;
+      if (!this.seen.has(key)) {
+        this.seen.add(key);
         this.hits.push({ sink, field, encoding });
       }
     }
@@ -78,7 +103,9 @@ export class Scan {
   }
 
   // Scans a file, or a directory tree: file contents and every path name
-  // (an uploaded file name is itself a canary field).
+  // (an uploaded file name is itself a canary field). Names are scanned
+  // relative to `root`. Symlinks and special files are not followed; they are
+  // listed in `skipped` so a caller can see what was not covered.
   path(root) {
     const walk = (p) => {
       this.bytes(`${root} (names)`, p.slice(root.length));
@@ -87,6 +114,8 @@ export class Scan {
         for (const name of readdirSync(p)) walk(join(p, name));
       } else if (st.isFile()) {
         this.bytes(p, readFileSync(p));
+      } else {
+        this.skipped.push(p);
       }
     };
     walk(root);

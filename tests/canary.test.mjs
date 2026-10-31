@@ -3,7 +3,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FIELDS, Scan, mintCanaries } from "./canary/canary.mjs";
@@ -28,8 +29,15 @@ const encodings = {
   plain: (c) => `x ${c} y`,
   utf16le: (c) => Buffer.from(`x${c}y`, "utf16le"),
   hex: (c) => Buffer.from(c).toString("hex"),
+  utf16be: (c) => Buffer.from(`x${c}y`, "utf16le").swap16(),
+  hexUpper: (c) => Buffer.from(c).toString("hex").toUpperCase(),
   url: (c) => `/tasks?q=${encodeURIComponent(c)}`,
+  urlDouble: (c) => encodeURIComponent(encodeURIComponent(`a=b&${c}/x`)),
   json: (c) => JSON.stringify({ msg: c }),
+  jsonEscaped: (c) => JSON.stringify(`é"${c}"\n`),
+  uint8array: (c) => new Uint8Array(Buffer.from(`..${c}..`)),
+  subarray: (c) => Buffer.from(`..${c}..`).subarray(2),
+  arraybuffer: (c) => new Uint8Array(Buffer.from(`..${c}..`)).buffer,
   base64: (c) => Buffer.from(`k=${c}`).toString("base64"),
   base64url: (c) => Buffer.from(`kk=${c}`).toString("base64url"),
 };
@@ -86,7 +94,59 @@ test("path scan covers file contents and file names", () => {
   }
 });
 
-test("a canary scanned against itself never matches a different run's canary", () => {
+test("unsupported data types throw instead of scanning clean", () => {
+  const scan = new Scan(mintCanaries());
+  assert.throws(() => scan.bytes("s", { a: 1 }), TypeError);
+  assert.throws(() => scan.bytes("s", null), TypeError);
+});
+
+test("mintCanaries honours a custom field list", () => {
+  assert.deepEqual(Object.keys(mintCanaries(["a", "b"])), ["a", "b"]);
+});
+
+test("path scan handles a single file, an empty dir and skips symlinks", () => {
+  const canaries = mintCanaries();
+  const dir = mkdtempSync(join(tmpdir(), "parley-canary-"));
+  try {
+    const empty = new Scan(canaries);
+    empty.path(dir);
+    empty.assertClean();
+
+    const file = join(dir, "one");
+    writeFileSync(file, canaries.input);
+    const single = new Scan(canaries);
+    single.path(file);
+    assert.deepEqual(single.hits.map((h) => h.field), ["input"]);
+
+    const target = join(dir, "target");
+    mkdirSync(target);
+    writeFileSync(join(target, "f"), canaries.error);
+    const linkRoot = mkdtempSync(join(tmpdir(), "parley-canary-link-"));
+    try {
+      symlinkSync(target, join(linkRoot, "link"));
+      const scan = new Scan(canaries);
+      scan.path(linkRoot);
+      scan.assertClean();
+      assert.deepEqual(scan.skipped, [join(linkRoot, "link")]);
+    } finally {
+      rmSync(linkRoot, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("documented blind spots: gzip and a canary split across calls are not detected", () => {
+  const canaries = mintCanaries();
+  const c = canaries.input;
+  const scan = new Scan(canaries);
+  scan.bytes("gz", gzipSync(Buffer.from(c)));
+  scan.bytes("a", c.slice(0, 10));
+  scan.bytes("b", c.slice(10));
+  assert.equal(scan.hits.length, 0);
+});
+
+test("another run's canaries never match", () => {
   const scan = new Scan(mintCanaries());
   scan.text("log", Object.values(mintCanaries()).join(" "));
   scan.assertClean();
