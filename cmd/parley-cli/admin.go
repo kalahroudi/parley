@@ -41,6 +41,10 @@ func adminInit(args []string, out, errw io.Writer, store root.Store, defaultBack
 	}
 	// O_EXCL: never overwrite (or later delete) a backup that belongs to another root.
 	if err := writeNew(*backupPath, r.Backup); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(errw, "error: backup file %s already exists, and no root key is stored on this device.\nIt may belong to an earlier root. Move or delete it, or choose another path with -backup, then run admin init again.\n", *backupPath)
+			return 1
+		}
 		fmt.Fprintln(errw, "error:", err)
 		return 1
 	}

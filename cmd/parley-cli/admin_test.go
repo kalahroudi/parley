@@ -75,6 +75,9 @@ func TestAdminInitErrors(t *testing.T) {
 	if got, _ := os.ReadFile(keep); string(got) != "old" {
 		t.Fatalf("existing backup clobbered: %q", got)
 	}
+	if !strings.Contains(errw.String(), "already exists") || !strings.Contains(errw.String(), "-backup") {
+		t.Fatalf("unhelpful message: %q", errw.String())
+	}
 	// Save fails: backup is removed, nothing printed.
 	b := filepath.Join(dir, "b.json")
 	out.Reset()

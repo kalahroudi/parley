@@ -114,3 +114,29 @@ func TestFileStore(t *testing.T) {
 		t.Fatal("want mkdir error")
 	}
 }
+
+func TestFileStoreSaveFailureLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := New()
+	old := syncFile
+	syncFile = func(*os.File) error { return errors.New("disk full") }
+	err := FileStore{Dir: dir}.Save(r.Private)
+	syncFile = old
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("leftovers: %v", ents)
+	}
+	// An existing key is untouched and no temp file remains.
+	s := FileStore{Dir: dir}
+	if err := s.Save(r.Private); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(r.Private); !errors.Is(err, ErrExists) {
+		t.Fatal(err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("leftovers: %v", ents)
+	}
+}
