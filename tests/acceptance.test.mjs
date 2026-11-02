@@ -130,3 +130,59 @@ test("acceptance: JA-01 root, approval, binding rollback, revocation and recover
   const r = spawnSync("go", ["test", "-race", "-count=1", "./internal/acceptance"], { cwd: root, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });
+
+// Phase 2 acceptance (T207, spike 3): published test vectors pass, fuzzing finds
+// no crashes, and every malicious-gateway attack is rejected or detected. Each
+// check runs the real Go tests and requires the named tests to have actually run,
+// so a renamed or skipped test cannot let the acceptance pass empty.
+const go = (args) => spawnSync("go", args, { cwd: root, encoding: "utf8" });
+const ran = (out, names) => {
+  for (const n of names) assert.match(out, new RegExp(`^--- PASS: ${n} `, "m"), `${n} did not run and pass`);
+};
+
+test("acceptance: T207 published transcript and binding test vectors pass", needsGo, () => {
+  const r = go(["test", "-count=1", "-v", "-run", "^TestPublishedVectors$", "./internal/envelope", "./internal/binding"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^ok\s+\S+\/internal\/envelope/m);
+  assert.match(r.stdout, /^ok\s+\S+\/internal\/binding/m);
+  // One vector test per package: envelope transcripts and root-signed bindings.
+  assert.equal(r.stdout.match(/^--- PASS: TestPublishedVectors /gm)?.length, 2, "both vector tests must run and pass");
+});
+
+// A fuzz target that panics or breaks an invariant exits nonzero and writes the
+// failing input under testdata/fuzz; a clean run over the committed corpus plus a
+// short random run exits zero. Go allows one -fuzz target per invocation.
+for (const [name, fuzzTime] of [
+  ["FuzzMessage", "15s"],
+  ["FuzzUnpad", "8s"],
+  ["FuzzDecryptFile", "8s"],
+]) {
+  test(`acceptance: T207 ${name} finds no crashes`, needsGo, () => {
+    const r = go(["test", "./internal/envelope", "-run", "^$", "-fuzz", `^${name}$`, "-fuzztime", fuzzTime]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /fuzz: elapsed/, "fuzzing did not run");
+  });
+}
+
+test("acceptance: T207 every malicious-gateway attack is rejected or detected", needsGo, () => {
+  const attacks = [
+    "TestHonestGateway",
+    "TestKeySubstitution",
+    "TestReplay",
+    "TestReorder",
+    "TestDrop",
+    "TestSwappedReplies",
+    "TestWithheldPrekeys",
+    "TestReusedPrekeys",
+    "TestJunkFramesBurnNothing",
+    "TestSignedButUnopenableBurnsNothing",
+    "TestClocks",
+    "TestWrongDirection",
+    "TestSenderPolicy",
+    "TestReconnectAndRestart",
+    "TestQuota",
+  ];
+  const r = go(["test", "-race", "-count=1", "-v", "./internal/acceptance"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  ran(r.stdout, attacks);
+});
