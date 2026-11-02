@@ -3,7 +3,7 @@
 test: test-layout test-go test-gateway
 
 test-gateway:
-	cd gateway && npm ci && npm run typecheck && npm test
+	cd gateway && npm ci && npm run typecheck && npm test && npm run test:soak
 
 test-layout:
 	node --test "tests/**/*.test.mjs"

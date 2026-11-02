@@ -20,12 +20,12 @@ const stub = () => env.DEVICE.get(env.DEVICE.idFromName("soak:d1")) as DurableOb
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const snapshot = () =>
   JSON.stringify({ epoch, nextSeq: daemon.nextSeq, outbox: daemon.outbox.length, lastRx: daemon.lastRx, delivered: daemon.delivered.size, nextEvent, retried });
-async function until(cond: () => boolean, what: string, ms = 20_000): Promise<void> {
+async function until(cond: () => boolean, what: string, ms = 90_000): Promise<void> {
   for (const end = Date.now() + ms; !cond(); await sleep(2)) if (Date.now() > end) throw new Error(`timed out: ${what} ${snapshot()}`);
 }
 // Every call into the gateway is bounded, so a stuck socket or object fails with a
 // message naming the step instead of silently consuming the whole test timeout.
-async function bounded<T>(p: Promise<T>, what: string, ms = 20_000): Promise<T> {
+async function bounded<T>(p: Promise<T>, what: string, ms = 90_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -165,7 +165,7 @@ describe("soak (spike 1)", () => {
     // The final connection drains whatever is left.
     const c = await connect();
     expect(c.welcome.resumed).toBe(true);
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + 300_000;
     while (daemon.nextSeq < TOTAL || daemon.outbox.length > 0 || nextEvent < TOTAL || daemon.delivered.size < TOTAL) {
       if (Date.now() > deadline) throw new Error(`final drain made no progress ${snapshot()}`);
       c.sendFrames(BATCH);
@@ -193,5 +193,5 @@ describe("soak (spike 1)", () => {
     expect(counts.every((n) => n === 1)).toBe(true);
     for (let i = 0; i < TOTAL; i++) if (!daemon.delivered.has(`e${i}`)) throw new Error(`event e${i} lost`);
     expect(daemon.eventSeqs.every((s, k) => k === 0 || s > daemon.eventSeqs[k - 1]!)).toBe(true);
-  }, 180_000);
+  }, 600_000);
 });

@@ -53,5 +53,11 @@ jobs:
       - name: Gateway tests
         working-directory: gateway
         run: npm test
+      # The soak is run alone, not beside the other test files: it does ~20k durable
+      # storage writes, which cost ~25ms each on Windows runners (vs ~0.5ms on Linux and
+      # macOS), so beside other files it starves them; its own timeouts are sized for that.
+      - name: Gateway soak (T108)
+        working-directory: gateway
+        run: npm run test:soak
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
