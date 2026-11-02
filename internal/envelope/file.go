@@ -14,6 +14,8 @@ import (
 	"errors"
 	"io"
 	"math/bits"
+	"os"
+	"path/filepath"
 )
 
 // File encryption: a per-file random key, fixed-size chunks sealed with
@@ -150,14 +152,16 @@ func EncryptFile(key []byte, src io.Reader, dst io.Writer) (sum [HashSize]byte, 
 	return sum, size, nil
 }
 
-// DecryptFile streams sealed chunks from src to dst and checks the plaintext
+// decryptFile streams sealed chunks from src to dst and checks the plaintext
 // hash. size is the true plaintext size from the task's `inner`: exactly that
 // many bytes are written, the rest of the bucket must be zeros, and the object
 // must be exactly one bucket long, so extra or missing data is rejected
-// without reading further than the bucket. Plaintext is written chunk by chunk
-// as each chunk authenticates, so on any error the caller must discard what
-// was written; a wrong hash is only detected at the end.
-func DecryptFile(key []byte, src io.Reader, dst io.Writer, want [HashSize]byte, size uint64) error {
+// without reading further than the bucket.
+//
+// It is unexported on purpose: it writes each chunk as that chunk
+// authenticates, so until it returns nil dst holds unauthenticated-as-a-whole
+// plaintext. Use DecryptFileTo, which keeps that out of sight.
+func decryptFile(key []byte, src io.Reader, dst io.Writer, want [HashSize]byte, size uint64) error {
 	aead, err := fileAEAD(key)
 	if err != nil {
 		return err
@@ -202,4 +206,56 @@ func DecryptFile(key []byte, src io.Reader, dst io.Writer, want [HashSize]byte, 
 		return ErrFileHash
 	}
 	return nil
+}
+
+// DecryptFileTo decrypts src into a new file at path, which appears only if the
+// whole file authenticates. The plaintext is written to a private temp file
+// (mode 0600) in path's directory, so the final rename stays on one filesystem;
+// on success it is synced, closed and renamed over path (replacing any file
+// already there) in one step. On any error, whether a bad chunk, truncation,
+// extension, reordering, wrong key or hash, or a read, write, sync or rename
+// failure, the temp file is truncated and removed and path is left as it was.
+// A failed Remove is returned joined to the cause.
+//
+// What is guaranteed: each chunk is authenticated with its index and a final
+// flag, so a chunk that was altered, moved, repeated or taken from another file
+// fails to open, and a stream cut at any point fails too, because the last
+// chunk it holds was sealed as non-final but is read as final. The file is
+// accepted only if every chunk opened, the last one is final, the length is
+// exactly the bucket for size, the padding is zero and the SHA-256 matches.
+// What is not: nothing is promised about the temp file while the call runs (it
+// holds data that passed per-chunk checks but not yet the whole-file ones), and
+// a crash mid-call can leave a ".parley-dec-*" temp file behind; callers
+// should sweep those at startup. The rename is not followed by a directory
+// fsync, so after a power loss the file may be absent but never partial.
+func DecryptFileTo(path string, key []byte, src io.Reader, want [HashSize]byte, size uint64) error {
+	return decryptTo(path, func(w io.Writer) io.Writer { return w }, key, src, want, size)
+}
+
+// decryptTo is DecryptFileTo with a hook on the writer, so tests can fail a
+// write after some plaintext has reached the temp file.
+func decryptTo(path string, wrap func(io.Writer) io.Writer, key []byte, src io.Reader, want [HashSize]byte, size uint64) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".parley-dec-*")
+	if err != nil {
+		return err
+	}
+	err = decryptFile(key, src, wrap(f), want, size)
+	if err == nil {
+		err = f.Sync()
+	}
+	if err == nil {
+		err = f.Close()
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	if err != nil {
+		// Truncate first so nothing is left even if Remove fails; the errors
+		// are dropped because the cause is already in err (and on the rename
+		// path the file is closed, so both fail harmlessly).
+		_ = f.Truncate(0)
+		_ = f.Close()
+		err = errors.Join(err, os.Remove(f.Name()))
+	}
+	return err
 }

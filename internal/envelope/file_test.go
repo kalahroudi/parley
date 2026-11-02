@@ -9,6 +9,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,7 +32,7 @@ func encrypt(t testing.TB, key, pt []byte) sealed {
 }
 
 func (s sealed) open(key []byte, ct []byte) error {
-	return DecryptFile(key, bytes.NewReader(ct), io.Discard, s.sum, s.size)
+	return decryptFile(key, bytes.NewReader(ct), io.Discard, s.sum, s.size)
 }
 
 func fileKey(t testing.TB) []byte {
@@ -71,7 +73,7 @@ func TestFileRoundTripSizes(t *testing.T) {
 			t.Fatalf("n=%d: wrong hash or size %d", n, s.size)
 		}
 		var out bytes.Buffer
-		if err := DecryptFile(key, bytes.NewReader(s.ct), &out, s.sum, s.size); err != nil || !bytes.Equal(out.Bytes(), pt) {
+		if err := decryptFile(key, bytes.NewReader(s.ct), &out, s.sum, s.size); err != nil || !bytes.Equal(out.Bytes(), pt) {
 			t.Fatalf("n=%d: %v", n, err)
 		}
 	}
@@ -152,15 +154,15 @@ func TestFileSizeAndPaddingEnforced(t *testing.T) {
 	s := encrypt(t, key, pt)
 	// A size claiming a different bucket makes the object the wrong length.
 	for name, size := range map[string]uint64{"larger bucket": 9000, "smaller bucket": 100} {
-		if err := DecryptFile(key, bytes.NewReader(s.ct), io.Discard, s.sum, size); !errors.Is(err, ErrFileOpen) {
+		if err := decryptFile(key, bytes.NewReader(s.ct), io.Discard, s.sum, size); !errors.Is(err, ErrFileOpen) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	// Same bucket, wrong size: the hash catches it.
-	if err := DecryptFile(key, bytes.NewReader(s.ct), io.Discard, s.sum, 5001); !errors.Is(err, ErrFileHash) {
+	if err := decryptFile(key, bytes.NewReader(s.ct), io.Discard, s.sum, 5001); !errors.Is(err, ErrFileHash) {
 		t.Errorf("same bucket: %v", err)
 	}
-	if err := DecryptFile(key, bytes.NewReader(s.ct), io.Discard, s.sum, MaxFileSize+1); !errors.Is(err, ErrFileTooLarge) {
+	if err := decryptFile(key, bytes.NewReader(s.ct), io.Discard, s.sum, MaxFileSize+1); !errors.Is(err, ErrFileTooLarge) {
 		t.Errorf("too large: %v", err)
 	}
 	// Nonzero padding is a covert channel: seal a file whose padding is not zero.
@@ -168,7 +170,7 @@ func TestFileSizeAndPaddingEnforced(t *testing.T) {
 	body := make([]byte, MinBucket)
 	body[MinBucket-1] = 1
 	bad := aead.Seal(nil, chunkNonce(0, true), body, chunkAAD(0, true))
-	if err := DecryptFile(key, bytes.NewReader(bad), io.Discard, sha256.Sum256(nil), 0); !errors.Is(err, ErrFileOpen) {
+	if err := decryptFile(key, bytes.NewReader(bad), io.Discard, sha256.Sum256(nil), 0); !errors.Is(err, ErrFileOpen) {
 		t.Errorf("nonzero padding: %v", err)
 	}
 }
@@ -179,7 +181,7 @@ func TestFileReadStopsAtBucket(t *testing.T) {
 	key := fileKey(t)
 	s := encrypt(t, key, make([]byte, 8*FileChunkSize))
 	cr := &countReader{r: bytes.NewReader(s.ct)}
-	err := DecryptFile(key, cr, io.Discard, s.sum, FileChunkSize)
+	err := decryptFile(key, cr, io.Discard, s.sum, FileChunkSize)
 	if !errors.Is(err, ErrFileOpen) {
 		t.Fatalf("got %v", err)
 	}
@@ -232,7 +234,7 @@ func TestFileBadKey(t *testing.T) {
 	if _, _, err := EncryptFile(make([]byte, 5), strings.NewReader("x"), io.Discard); !errors.Is(err, ErrFileKey) {
 		t.Fatalf("encrypt: %v", err)
 	}
-	if err := DecryptFile(make([]byte, 5), strings.NewReader("x"), io.Discard, sum, 1); !errors.Is(err, ErrFileKey) {
+	if err := decryptFile(make([]byte, 5), strings.NewReader("x"), io.Discard, sum, 1); !errors.Is(err, ErrFileKey) {
 		t.Fatalf("decrypt: %v", err)
 	}
 }
@@ -263,10 +265,10 @@ func TestFileIOErrors(t *testing.T) {
 		t.Fatalf("encrypt write: %v", err)
 	}
 	s := encrypt(t, key, []byte("x"))
-	if err := DecryptFile(key, &errReader{}, io.Discard, s.sum, s.size); !errors.Is(err, errBoom) {
+	if err := decryptFile(key, &errReader{}, io.Discard, s.sum, s.size); !errors.Is(err, errBoom) {
 		t.Fatalf("decrypt read: %v", err)
 	}
-	if err := DecryptFile(key, bytes.NewReader(s.ct), errWriter{}, s.sum, s.size); !errors.Is(err, errBoom) {
+	if err := decryptFile(key, bytes.NewReader(s.ct), errWriter{}, s.sum, s.size); !errors.Is(err, errBoom) {
 		t.Fatalf("decrypt write: %v", err)
 	}
 	// A full chunk followed by a read error: the error surfaces on the next chunk.
@@ -290,7 +292,7 @@ func FuzzDecryptFile(f *testing.F) {
 	f.Add([]byte{1, 2, 3}, uint64(MaxFileSize+1))
 	f.Fuzz(func(t *testing.T, ct []byte, size uint64) {
 		var out bytes.Buffer
-		err := DecryptFile(key, bytes.NewReader(ct), &out, [HashSize]byte{}, size)
+		err := decryptFile(key, bytes.NewReader(ct), &out, [HashSize]byte{}, size)
 		if err == nil {
 			t.Fatal("opened with an all-zero hash")
 		}
@@ -298,4 +300,154 @@ func FuzzDecryptFile(f *testing.F) {
 			t.Fatal("wrote more than the claimed size")
 		}
 	})
+}
+
+// leftovers lists everything in dir, so a test can assert that nothing (no
+// destination, no temp file) remains after a failure.
+func leftovers(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range es {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func TestDecryptFileToSuccess(t *testing.T) {
+	dir := t.TempDir()
+	key := fileKey(t)
+	pt := make([]byte, 2*FileChunkSize+5)
+	rand.Read(pt)
+	s := encrypt(t, key, pt)
+	dst := filepath.Join(dir, "out.bin")
+	// An existing file is replaced atomically.
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DecryptFileTo(dst, key, bytes.NewReader(s.ct), s.sum, s.size); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, pt) {
+		t.Fatalf("content mismatch: %v", err)
+	}
+	if names := leftovers(t, dir); len(names) != 1 {
+		t.Fatalf("leftovers: %v", names)
+	}
+}
+
+// Every failure mode must leave nothing on disk, and must leave an existing
+// destination untouched.
+func TestDecryptFileToFailuresLeaveNothing(t *testing.T) {
+	key := fileKey(t)
+	pt := make([]byte, 3*FileChunkSize+100)
+	rand.Read(pt)
+	s := encrypt(t, key, pt)
+	cs := FileChunkSize + gcmTag
+	flip := append([]byte(nil), s.ct...)
+	flip[2*cs+5] ^= 1 // a late chunk, so earlier plaintext has already been written
+	swap := append([]byte(nil), s.ct...)
+	copy(swap[cs:2*cs], s.ct[2*cs:3*cs])
+	copy(swap[2*cs:3*cs], s.ct[cs:2*cs])
+	wrongHash := s.sum
+	wrongHash[0] ^= 1
+	good := func(w io.Writer) io.Writer { return w }
+	failSecondWrite := func(w io.Writer) io.Writer { return &failAfter{w: w, left: 1} }
+	cases := []struct {
+		name string
+		ct   []byte
+		sum  [HashSize]byte
+		size uint64
+		key  []byte
+		src  io.Reader
+		wrap func(io.Writer) io.Writer
+		want error
+	}{
+		{name: "tampered chunk", ct: flip, want: ErrFileOpen},
+		{name: "truncated at edge", ct: s.ct[:3*cs], want: ErrFileOpen},
+		{name: "truncated mid", ct: s.ct[:len(s.ct)-1], want: ErrFileOpen},
+		{name: "extended", ct: append(append([]byte(nil), s.ct...), s.ct[:cs]...), want: ErrFileOpen},
+		{name: "reordered", ct: swap, want: ErrFileOpen},
+		{name: "wrong key", ct: s.ct, key: fileKey(t), want: ErrFileOpen},
+		{name: "wrong hash", ct: s.ct, sum: wrongHash, want: ErrFileHash},
+		{name: "wrong size", ct: s.ct, size: 1, want: ErrFileOpen},
+		{name: "too large", ct: s.ct, size: MaxFileSize + 1, want: ErrFileTooLarge},
+		{name: "bad key", ct: s.ct, key: []byte{1}, want: ErrFileKey},
+		{name: "read error", src: io.MultiReader(bytes.NewReader(s.ct[:cs+10]), &errReader{}), want: errBoom},
+		{name: "write error", ct: s.ct, wrap: failSecondWrite, want: errBoom},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "out.bin")
+			if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			k, sum, size, wrap, src := key, s.sum, s.size, good, c.src
+			if c.key != nil {
+				k = c.key
+			}
+			if c.sum != ([HashSize]byte{}) {
+				sum = c.sum
+			}
+			if c.size != 0 {
+				size = c.size
+			}
+			if c.wrap != nil {
+				wrap = c.wrap
+			}
+			if src == nil {
+				src = bytes.NewReader(c.ct)
+			}
+			if err := decryptTo(dst, wrap, k, src, sum, size); !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+			if names := leftovers(t, dir); len(names) != 1 || names[0] != "out.bin" {
+				t.Fatalf("leftovers: %v", names)
+			}
+			if b, _ := os.ReadFile(dst); string(b) != "old" {
+				t.Fatalf("destination changed: %q", b)
+			}
+		})
+	}
+}
+
+// failAfter passes the first `left` writes through, then fails.
+type failAfter struct {
+	w    io.Writer
+	left int
+}
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.left <= 0 {
+		return 0, errBoom
+	}
+	f.left--
+	return f.w.Write(p)
+}
+
+func TestDecryptFileToFilesystemErrors(t *testing.T) {
+	key := fileKey(t)
+	s := encrypt(t, key, []byte("hello"))
+	// No such directory: nothing can be created.
+	if err := DecryptFileTo(filepath.Join(t.TempDir(), "no", "out"), key, bytes.NewReader(s.ct), s.sum, s.size); err == nil {
+		t.Fatal("expected an error")
+	}
+	// A directory in the way: the rename fails after a fully valid decrypt, and
+	// the temp file is still removed.
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out")
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := DecryptFileTo(dst, key, bytes.NewReader(s.ct), s.sum, s.size); err == nil {
+		t.Fatal("expected an error")
+	}
+	if names := leftovers(t, dir); len(names) != 1 || names[0] != "out" {
+		t.Fatalf("leftovers: %v", names)
+	}
 }
