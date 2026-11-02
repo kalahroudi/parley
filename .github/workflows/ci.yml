@@ -45,6 +45,7 @@ jobs:
       # Tier 1 at 100%, tier 2 at 95%, tier 3 at 85% (tests/coverage/tiers.json); CI
       # fails if any package falls below its tier. Go reports statements, not branches.
       - name: Go test with coverage
+        shell: bash # PowerShell splits -coverprofile=cover.out at the dot
         run: go test -race -coverprofile=cover.out ./...
       - name: Go coverage gates
         run: go run ./scripts/covergate -profile cover.out

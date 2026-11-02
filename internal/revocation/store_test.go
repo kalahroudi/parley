@@ -157,15 +157,16 @@ func TestFileStoreSaveStepFailures(t *testing.T) {
 }
 
 func TestSyncDir(t *testing.T) {
-	if err := syncDir(t.TempDir()); err != nil {
+	defer func(g string) { goos = g }(goos)
+	// Run the non-Windows path on every OS so its statements are covered on each.
+	// A real Windows directory cannot be synced, so only the outcome is checked elsewhere.
+	goos = "linux"
+	if err := syncDir(t.TempDir()); err != nil && runtime.GOOS != "windows" {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" {
-		if err := syncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
-			t.Fatal("a missing directory must be an error")
-		}
+	if err := syncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("a missing directory must be an error")
 	}
-	defer func(g string) { goos = g }(goos)
 	goos = "windows"
 	if err := syncDir(filepath.Join(t.TempDir(), "missing")); err != nil {
 		t.Fatal("windows skips directory sync:", err)
