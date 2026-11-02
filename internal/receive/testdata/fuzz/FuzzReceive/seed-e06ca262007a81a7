@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("\xe7\x00\xf8P\xf4\xb1\x1a")
+uint(41)
+byte('®')
+uint(81)
+byte('\x01')

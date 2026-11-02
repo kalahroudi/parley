@@ -8,9 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { start } from "./harness/harness.mjs";
 
@@ -129,4 +129,95 @@ func Report(l *logx.Logger, task string, res result) {
 test("acceptance: JA-01 root, approval, binding rollback, revocation and recovery code", needsGo, () => {
   const r = spawnSync("go", ["test", "-race", "-count=1", "./internal/acceptance"], { cwd: root, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
+});
+
+// Phase 2 acceptance (T207, spike 3): published test vectors pass, fuzzing finds
+// no crashes, and every malicious-gateway attack is rejected or detected. Each
+// check runs the real Go tests and requires the named tests to have actually run,
+// so a renamed or skipped test cannot let the acceptance pass empty.
+const go = (args) => spawnSync("go", args, { cwd: root, encoding: "utf8" });
+const ran = (out, names) => {
+  for (const n of names) assert.match(out, new RegExp(`^--- PASS: ${n} `, "m"), `${n} did not run and pass`);
+};
+
+test("acceptance: T207 published transcript and binding test vectors pass", needsGo, () => {
+  const r = go(["test", "-count=1", "-v", "-run", "^(TestPublishedVectors|TestPublishedPadFileVectors)$", "./internal/envelope", "./internal/binding"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^ok\s+\S+\/internal\/envelope/m);
+  assert.match(r.stdout, /^ok\s+\S+\/internal\/binding/m);
+  // Envelope transcripts, root-signed bindings, and the padding and file-chunk vectors.
+  ran(r.stdout, ["TestPublishedVectors", "TestPublishedPadFileVectors"]);
+  assert.equal(r.stdout.match(/^--- PASS: TestPublishedVectors /gm)?.length, 2, "both vector tests must run and pass");
+});
+
+// The independent path: verify_vectors.py shares no code with Go. CI installs
+// `cryptography` and requires it; locally the test skips when it is missing.
+const python = [process.env.PARLEY_PYTHON, "python3", "python"].filter(Boolean).find((p) => spawnSync(p, ["-c", "import cryptography"]).status === 0);
+test("acceptance: T207 the Python verifier checks every published vector", (t) => {
+  if (!python) {
+    if (process.env.CI) assert.fail("python with the cryptography package is required in CI");
+    return t.skip("python with cryptography not installed");
+  }
+  const r = spawnSync(python, ["-I", join(root, "internal", "envelope", "testdata", "verify_vectors.py")], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const name of ["task", "result", "status-empty-rpk"]) assert.match(r.stdout, new RegExp(`^ok ${name}$`, "m"));
+  for (const what of ["ok pad ", "ok pad_reject ", "ok file two-chunks", "ok file three-chunks", "ok binding basic"]) assert.ok(r.stdout.includes(what), `${what} did not run`);
+});
+
+// A fuzz target that panics or breaks an invariant exits nonzero and writes the
+// failing input under testdata/fuzz; a clean run over the committed corpus plus a
+// short random run exits zero. Go allows one -fuzz target per invocation. The
+// list is the one `make fuzz-long` and CI use (scripts/fuzz-targets.txt); a
+// target that exists in the code but is missing there fails the first test.
+const targets = readFileSync(join(root, "scripts", "fuzz-targets.txt"), "utf8")
+  .split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => l.split(/\s+/));
+
+test("acceptance: T207 every fuzz target in the code is in the fuzz list and has a committed corpus", () => {
+  const found = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(join(dir, e.name));
+      else if (e.name.endsWith("_test.go")) {
+        for (const m of readFileSync(join(dir, e.name), "utf8").matchAll(/^func (Fuzz\w+)\(/gm)) found.push(`./${relative(root, dir).replaceAll("\\", "/")} ${m[1]}`);
+      }
+    }
+  };
+  walk(join(root, "internal"));
+  assert.deepEqual(found.sort(), targets.map(([pkg, name]) => `${pkg} ${name}`).sort());
+  for (const [pkg, name] of targets) {
+    const corpus = join(root, pkg, "testdata", "fuzz", name);
+    assert.ok(existsSync(corpus) && readdirSync(corpus).length >= 3, `${pkg} ${name}: committed seed corpus missing or thin`);
+  }
+});
+
+for (const [pkg, name, smoke] of targets) {
+  test(`acceptance: T207 ${pkg} ${name} finds no crashes`, needsGo, () => {
+    const r = go(["test", pkg, "-run", "^$", "-fuzz", `^${name}$`, "-fuzztime", smoke]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /fuzz: elapsed/, "fuzzing did not run");
+  });
+}
+
+test("acceptance: T207 every malicious-gateway attack is rejected or detected", needsGo, () => {
+  const attacks = [
+    "TestHonestGateway",
+    "TestKeySubstitution",
+    "TestReplay",
+    "TestReorder",
+    "TestDrop",
+    "TestSwappedReplies",
+    "TestWithheldPrekeys",
+    "TestReusedPrekeys",
+    "TestJunkFramesBurnNothing",
+    "TestSignedButUnopenableBurnsNothing",
+    "TestClocks",
+    "TestWrongDirection",
+    "TestSenderPolicy",
+    "TestReconnectAndRestart",
+    "TestQuota",
+    "TestAttackMatrix",
+  ];
+  const r = go(["test", "-race", "-count=1", "-v", "./internal/acceptance"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  ran(r.stdout, attacks);
 });

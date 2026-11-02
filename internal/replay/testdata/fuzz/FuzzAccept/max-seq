@@ -1,0 +1,5 @@
+go test fuzz v1
+string("dev-a")
+[]byte("\x02")
+uint64(18446744073709551615)
+int64(60)

@@ -738,3 +738,10 @@ func TestPending_LateReplyAfterCancelIsRejected(t *testing.T) {
 func TestPending_GatewayRateLimitsPrekeyRequests(t *testing.T) {
 	pending(t, "T305", "needs the Tenant DO rate limit; assert a prekey-request flood through the gateway is refused before it reaches the target")
 }
+
+// (j) Core-dump and swap scans find no key bytes (T209). The pool's locking and
+// hardening exist (T202), but the scan itself needs a real process dump and a
+// swap-backed run, which T209 builds.
+func TestPending_CoreDumpAndSwapScansFindNoKeyBytes(t *testing.T) {
+	pending(t, "T209", "needs the core-dump and swap scan harness; assert no private prekey, reply key or signing seed bytes appear in a dump of a daemon that has received tasks")
+}

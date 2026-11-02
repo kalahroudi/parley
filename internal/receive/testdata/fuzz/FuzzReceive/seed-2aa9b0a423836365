@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("")
+uint(181)
+byte('\x01')
+uint(0)
+byte('Q')

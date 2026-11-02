@@ -1,0 +1,13 @@
+# Every Go fuzz target: package, name, smoke duration. tests/acceptance.test.mjs
+# fails if a Fuzz function in internal/ is missing here or has no committed seed
+# corpus (testdata/fuzz/<name>). `node scripts/fuzz.mjs smoke|long` runs them.
+./internal/envelope   FuzzMessage        10s
+./internal/envelope   FuzzUnpad          5s
+./internal/envelope   FuzzDecryptFile    5s
+./internal/binding    FuzzDecodeVerify   5s
+./internal/revocation FuzzDecodeVerify   5s
+./internal/trust      FuzzGatewayReplies 10s
+./internal/replay     FuzzAccept         5s
+./internal/prekey     FuzzIssue          5s
+./internal/prekey     FuzzVerify         5s
+./internal/receive    FuzzReceive        10s

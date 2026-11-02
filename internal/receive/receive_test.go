@@ -22,7 +22,7 @@ import (
 var t0 = time.Unix(1_800_000_000, 0).UTC()
 
 type fixture struct {
-	t        *testing.T
+	t        testing.TB
 	r        *Receiver
 	cfg      Config
 	pool     *prekey.Pool
@@ -42,7 +42,7 @@ func (f *fixture) advance(d time.Duration) {
 	f.mu.Unlock()
 }
 
-func gen(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+func gen(t testing.TB) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -51,7 +51,7 @@ func gen(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return pub, priv
 }
 
-func newFixture(t *testing.T, mod func(*Config)) *fixture {
+func newFixture(t testing.TB, mod func(*Config)) *fixture {
 	t.Helper()
 	f := &fixture{t: t, now: t0}
 	f.rootPub, f.rootPriv = gen(t)

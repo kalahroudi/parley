@@ -1,0 +1,12 @@
+go test fuzz v1
+string("0")
+string("")
+string("")
+uint64(0)
+[]byte("0")
+[]byte("00000000000000000000000000000000")
+string("")
+[]byte("")
+int64(-62135596800)
+int64(-62135596800)
+[]byte("")

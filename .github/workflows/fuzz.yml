@@ -1,0 +1,48 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Fuzz (long)
+
+# Every fuzz target for 10 minutes each (about 1 h 45 min in total) once a week,
+# or on demand with a different time per target. Same as `make fuzz-long`.
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Time per target (Go duration, e.g. 10m, 30m)"
+        default: "10m"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fuzz every target
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+        run: node scripts/fuzz.mjs long | tee "$RUNNER_TEMP/fuzz.log"; exit "${PIPESTATUS[0]}"
+        shell: bash
+      - name: Summary
+        if: always()
+        shell: bash
+        run: grep '^|' "$RUNNER_TEMP/fuzz.log" >> "$GITHUB_STEP_SUMMARY" || true
+      # A crashing input is written under testdata/fuzz; keep it so it can be
+      # committed as a regression seed with the fix.
+      - name: Keep crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: internal/**/testdata/fuzz/

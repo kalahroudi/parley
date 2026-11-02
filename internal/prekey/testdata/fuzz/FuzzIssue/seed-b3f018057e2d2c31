@@ -1,0 +1,4 @@
+go test fuzz v1
+string("d)v2a")
+[]byte("\x01\x9d\x03")
+int64(900)

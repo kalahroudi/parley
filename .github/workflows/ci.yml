@@ -19,7 +19,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -59,12 +59,31 @@ jobs:
           pct=$(go tool cover -func=envelope.cover | awk '/^total:/ {print $3}')
           echo "envelope coverage: $pct"
           [ "$pct" = "100.0%" ]
-      - name: Envelope fuzz smoke
-        run: go test ./internal/envelope -run '^$' -fuzz FuzzMessage -fuzztime 20s
-      - name: Envelope fuzz smoke (padding)
-        run: go test ./internal/envelope -run '^$' -fuzz FuzzUnpad -fuzztime 10s
-      - name: Envelope fuzz smoke (files)
-        run: go test ./internal/envelope -run '^$' -fuzz FuzzDecryptFile -fuzztime 10s
+      # Every fuzz target (scripts/fuzz-targets.txt) for a few seconds over its
+      # committed seed corpus; the long run is make fuzz-long and the weekly
+      # "Fuzz (long)" workflow.
+      - name: Fuzz smoke (all targets)
+        run: node scripts/fuzz.mjs smoke
+      # The published vectors checked by code that shares nothing with the Go
+      # package (messages, padding, file chunks, bindings), and the vector lock.
+      - name: Test vectors (independent Python verifier)
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/v"
+          if [ -d "$RUNNER_TEMP/v/Scripts" ]; then py="$RUNNER_TEMP/v/Scripts/python"; else py="$RUNNER_TEMP/v/bin/python"; fi
+          "$py" -m pip install --quiet cryptography
+          "$py" -I internal/envelope/testdata/verify_vectors.py
+          echo "PARLEY_PYTHON=$py" >> "$GITHUB_ENV"
+      # A vector file that changed since the base branch must carry a higher
+      # version in its vectors.lock.json.
+      - name: Test vector version bump
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          node scripts/vectorlock.mjs base "origin/$BASE"
       - name: Gateway install
         working-directory: gateway
         run: npm ci
