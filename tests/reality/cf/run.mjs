@@ -42,9 +42,17 @@ async function main() {
   stats.deploys++;
   results.initialDeployMs = Date.now() - t0;
   const wsUrl = origin.replace("https:", "wss:") + "/v1/connect";
-  const health = await fetch(`${origin}/healthz`);
-  stats.httpRequests++;
-  if (!health.ok) throw new Error(`healthz ${health.status}`);
+  // A new workers.dev route can take a little while to answer; poll before giving up.
+  let health;
+  const h0 = Date.now();
+  for (;;) {
+    health = await fetch(`${origin}/healthz`);
+    stats.httpRequests++;
+    if (health.ok || Date.now() - h0 > 90_000) break;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  results.healthzReadyAfterMs = Date.now() - h0;
+  if (!health.ok) throw new Error(`healthz ${health.status} after ${results.healthzReadyAfterMs} ms`);
   const ctx = { WebSocket, url: wsUrl, token: (d) => `dev:${tenant}:${d}`, stats };
   const step = async (key, fn) => {
     if (!only.has(key)) return;

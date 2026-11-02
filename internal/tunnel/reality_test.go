@@ -30,6 +30,7 @@ import (
 //	PARLEY_REALITY_DEPLOY_CMD  JSON array: the command that runs one real `wrangler deploy`;
 //	                           it gets a build id as its last argument and the environment
 //	PARLEY_REALITY_OUT         file the JSON result is written to
+//	PARLEY_REALITY_FRAME_INTERVAL_MS  pause between queued frames (default 10, about 100/s)
 //
 // Control points are spread over the run: PARLEY_REALITY_DEPLOYS real deploys and
 // the rest server-side closes (code 1012), PARLEY_REALITY_FORCED in all. Nothing
@@ -46,7 +47,8 @@ func TestRealSoak(t *testing.T) {
 	if tenant == "" || probe == "" || len(deployCmd) == 0 || deploys > forced {
 		t.Fatal("PARLEY_REALITY_TENANT, _PROBE_TOKEN and _DEPLOY_CMD are required, and deploys cannot exceed forced")
 	}
-	httpBase := "https" + strings.TrimPrefix(strings.TrimSuffix(wsURL, "/v1/connect"), "wss")
+	pace := time.Duration(envInt("PARLEY_REALITY_FRAME_INTERVAL_MS", 10)) * time.Millisecond
+	httpBase := strings.NewReplacer("wss://", "https://", "ws://", "http://").Replace(strings.TrimSuffix(wsURL, "/v1/connect"))
 	const device = "soak"
 	t0 := time.Now()
 	rel := func() int64 { return time.Since(t0).Milliseconds() }
@@ -88,8 +90,11 @@ func TestRealSoak(t *testing.T) {
 		conns    []conn
 		epoch    int64
 		lastUpAt time.Time
+		// Frames still unacknowledged when a connection came up: what had to be retransmitted.
+		unackedAtResume []int
 	)
-	c := New(Config{
+	var c *Client
+	c = New(Config{
 		URL: wsURL, Token: "dev:" + tenant + ":" + device, MinBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second,
 		OnState: func(up bool) {
 			cmu.Lock()
@@ -98,6 +103,9 @@ func TestRealSoak(t *testing.T) {
 			if up {
 				epoch++
 				lastUpAt = time.Now()
+				c.mu.Lock()
+				unackedAtResume = append(unackedAtResume, len(c.outbox))
+				c.mu.Unlock()
 			}
 		},
 	})
@@ -107,17 +115,26 @@ func TestRealSoak(t *testing.T) {
 	go func() { done <- c.Run(ctx) }()
 	getEpoch := func() (int64, time.Time) { cmu.Lock(); defer cmu.Unlock(); return epoch, lastUpAt }
 
-	// Daemon to gateway.
+	// Daemon to gateway. Send only queues, so progress is measured in frames the
+	// gateway has acknowledged, and queuing stays within a window of that, so
+	// drops and deploys land while traffic is in flight rather than after a backlog.
 	var sent atomic.Int64
+	acked := func() int64 {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return sent.Load() - int64(len(c.outbox))
+	}
 	go func() {
 		for i := 0; i < total; i++ {
+			for int64(i)-acked() > 200 && ctx.Err() == nil {
+				time.Sleep(2 * time.Millisecond)
+			}
 			if c.Send("m"+strconv.Itoa(i)) != nil {
 				return
 			}
 			sent.Add(1)
-			if i%50 == 0 {
-				time.Sleep(time.Millisecond)
-			}
+			// About 100 frames/s: slow enough that the transfer spans every control point.
+			time.Sleep(pace)
 		}
 	}()
 
@@ -160,11 +177,19 @@ func TestRealSoak(t *testing.T) {
 				}
 			}
 			retried += len(batch)
-			for len(batch) < 100 && next < total {
-				batch = append(batch, next)
-				next++
+			// Events follow the frames, so they are also in flight when a connection drops.
+			// They go in batches of 100: one request per batch keeps the run's cost small.
+			if a := acked(); a-int64(next) >= 100 || a >= int64(total) {
+				for len(batch) < 100 && next < total && int64(next) < a {
+					batch = append(batch, next)
+					next++
+				}
 			}
 			if len(batch) == 0 {
+				if next < total {
+					time.Sleep(20 * time.Millisecond)
+					continue
+				}
 				emu.Lock()
 				all := len(delivered) == total
 				emu.Unlock()
@@ -210,7 +235,7 @@ func TestRealSoak(t *testing.T) {
 		Kind    string `json:"kind"`
 		AtMs    int64  `json:"at_ms"`
 		EndMs   int64  `json:"end_ms,omitempty"`
-		AtSent  int64  `json:"at_sent"`
+		AtSent  int64  `json:"at_acked"`
 		Err     string `json:"err,omitempty"`
 		Closed  any    `json:"closed,omitempty"`
 		Dropped bool   `json:"dropped_a_connection"`
@@ -221,11 +246,11 @@ func TestRealSoak(t *testing.T) {
 		deployAt[k*forced/(deploys+1)] = true
 	}
 	for i := 1; i <= forced && !t.Failed(); i++ {
-		for sent.Load() < int64(i)*int64(total)/int64(forced+1) && ctx.Err() == nil {
-			time.Sleep(50 * time.Millisecond)
+		for acked() < int64(i)*int64(total)/int64(forced+1) && ctx.Err() == nil {
+			time.Sleep(20 * time.Millisecond)
 		}
 		before, _ := getEpoch()
-		a := action{AtMs: rel(), AtSent: sent.Load()}
+		a := action{AtMs: rel(), AtSent: acked()}
 		if deployAt[i] {
 			a.Kind = "deploy"
 			cmd := exec.CommandContext(ctx, deployCmd[0], append(deployCmd[1:], "build-"+strconv.Itoa(i))...)
@@ -239,8 +264,13 @@ func TestRealSoak(t *testing.T) {
 			m, _ := post("/__drop", map[string]any{"tenant": tenant, "device": device, "code": 1012})
 			a.Closed = m["closed"]
 		}
-		// Each control point must produce its own reconnect before the next one.
-		for k := 0; k < 600; k++ {
+		// A close must produce its own reconnect before the next control point. A deploy
+		// may not (that is a finding, not a failure), so it is given 20 s instead of 60 s.
+		wait := 600
+		if a.Kind == "deploy" {
+			wait = 200
+		}
+		for k := 0; k < wait; k++ {
 			if ep, _ := getEpoch(); ep > before {
 				a.Dropped = true
 				break
@@ -311,17 +341,43 @@ settled:
 		"events_missing": missing, "events_out_of_order_or_dup_seq": dupSeq,
 		"events_duplicate_bodies_after_sender_retry": dupBodyRetried, "events_duplicate_bodies_not_retried": dupBodyUnretried,
 		"events_retried": retried, "push_calls": pushes, "control_http_errors": httpErrs.Load(),
-		"unacked_frames_at_end": len(c.outbox), "conn_log": conns,
+		"unacked_frames_at_end": len(c.outbox), "unacked_at_resume": unackedAtResume, "conn_log": conns,
 	}
-	if out != "" {
-		b, _ := json.MarshalIndent(res, "", "  ")
-		_ = os.WriteFile(out, b, 0o600)
-	}
+	defer func() { // written last, so every field below is included even when an assertion fails
+		if out != "" {
+			b, _ := json.MarshalIndent(res, "", "  ")
+			_ = os.WriteFile(out, b, 0o600)
+		}
+	}()
 	if rx != float64(total) || missing != 0 || dupSeq != 0 || dupBodyUnretried != 0 || len(c.outbox) != 0 || sent.Load() != int64(total) {
 		t.Fatalf("soak failed: rx_seq=%v/%d missing=%d dupSeq=%d dupBodyUnretried=%d unacked=%d sent=%d", rx, total, missing, dupSeq, dupBodyUnretried, len(c.outbox), sent.Load())
 	}
-	if connects < forced+1 {
-		t.Fatalf("only %d connections for %d forced reconnects", connects, forced)
+	// Real deploys are not forced disconnects unless the connection actually dropped
+	// (the measured result is that they do not, see reality-check-1.md), so only
+	// the server-side closes are required to have produced reconnects.
+	closes, closeReconnects, deployReconnects := 0, 0, 0
+	for _, a := range actions {
+		switch {
+		case a.Kind == "deploy" && a.Dropped:
+			deployReconnects++
+		case a.Kind != "deploy":
+			closes++
+			if a.Dropped {
+				closeReconnects++
+			}
+		}
+	}
+	res["close_actions"], res["close_actions_that_reconnected"], res["deploys_that_dropped_the_connection"] = closes, closeReconnects, deployReconnects
+	if closeReconnects != closes || connects < closes+1 {
+		t.Fatalf("%d server closes, %d reconnected, %d connections", closes, closeReconnects, connects)
+	}
+	// As in T108: a soak that never had anything to recover proves nothing.
+	resumed := 0
+	for _, n := range unackedAtResume {
+		resumed += n
+	}
+	if resumed == 0 {
+		t.Fatal("no frame was unacknowledged at any reconnect: the soak did not exercise recovery")
 	}
 }
 

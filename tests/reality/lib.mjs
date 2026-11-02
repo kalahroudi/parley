@@ -254,6 +254,10 @@ export function estimateCost(usage, pricing) {
     rowsWritten: Math.max(0, usage.rowsWritten - p.includedRowsWritten) / 1e6 * p.perMillionRowsWritten,
     storage: Math.max(0, usage.storageGb - p.includedStorageGb) * p.perGbMonthStorage,
   };
+  // Worker (front door) requests: HTTP and one per WebSocket upgrade; messages are not counted.
+  if (p.perMillionWorkerRequests !== undefined) {
+    parts.workerRequests = Math.max(0, (usage.workerRequests ?? 0) - p.includedWorkerRequests) / 1e6 * p.perMillionWorkerRequests;
+  }
   const usageCost = Object.values(parts).reduce((a, b) => a + b, 0);
   return { parts, usageCost, planCost: p.planPerMonth, total: usageCost + p.planPerMonth, billedRequests: requests, gbSeconds };
 }

@@ -1,6 +1,8 @@
 # Reality check 1 (T109)
 
-**Status: Cloudflare half in progress; real Google and Entra logins pending the user (see "Real logins").**
+**Status.** Cloudflare half: run once on 2026-11-02 (23:04 to 23:19 UTC); limits, hibernation timing, costs and deploy behavior are measured. The 10k-message soak ran once, passed its data checks, but is **not** a valid soak (a harness flaw, below), and the harness is fixed but not re-run against Cloudflare because the agreed cap was one soak. Real Google and Entra logins: **pending the user**, runbook at the end.
+
+Versions: wrangler 4.156.1, `cf` 0.15.0, Go 1.27.3, Node 26.11.1, Worker compatibility date 2026-10-01. Raw data: [reality-check-1-data.json](reality-check-1-data.json) (timings and counters only). Worker `parley-test-r1-6d0c01`, deleted at the end; `cf workers scripts search --name parley-test-` on the pinned account returned `[]` afterwards, and again after the later local-only work.
 
 ## Rules this run follows
 
@@ -26,4 +28,155 @@ Stored data stays under 100 KB (counters only), all deleted with the Worker. Rea
 
 ## Results
 
-Pending.
+### Actual usage against the plan
+
+Platform analytics were not available: `cf billing usage` returned 403 for this login, and I did not widen the authentication. The actuals below are the client-side counts and the object's own counters, so they are exact for requests and messages we sent and derived for rows and duration.
+
+| | Plan | Actual |
+|---|---|---|
+| Real deploys | 5 | 5 in the full run (1 initial, 1 in the deploy experiment, 3 in the soak), plus 2 initial deploys of two smoke runs with only the limits experiment (those Workers were deleted too) |
+| Worker requests | < 200 | about 155 (31 WebSocket upgrades, 104 pushes, 17 drops, 2 healthz, 1 counters read) |
+| Incoming WebSocket messages | < 31,000 | at least about 20,300 (10,000 frames, up to 10,000 event acks, hellos, ~180 from the other experiments), about 1,015 billed at 20:1. Frames retransmitted after a reconnect were not counted, and with the backlog in this run (see Soak) that could be several thousand more, so the plan's bound is likely but not provably met. Pings are not billed |
+| Rows written | < 31,000 | not measured; at most about 31,000 from the code (one row per accepted frame, per event sent and per event acknowledged, plus boot counters) |
+| DO awake time | < 75 GB-s | not measured; at most about 75 GB-s (every object awake for the whole 15 minutes is the upper bound) |
+| Stored data | < 100 KB | counters only, deleted with the Worker |
+
+Priced at the overage rates as if no allowance applied, the whole run is under $0.05; with the Free or Paid allowances it is $0. The Free daily allowances (100,000 requests, 13,000 GB-s, 100,000 rows written) were not approached. The account's plan could not be read.
+
+Stop conditions: none triggered. Three control calls failed during the soak (against a limit of 15 in a row and 60 in total).
+
+### Limits
+
+| Frame body | Result |
+|---|---|
+| 1 KiB, 64 KiB, 512 KiB, 1,048,512 B | accepted, acknowledged in 132, 253, 239 and 345 ms (client round trip, includes upload) |
+| 1,048,576 B and 1,049,600 B | refused by the gateway's 1 MiB check, close 1009 |
+| 8 MiB | close 1009 after 5.1 s |
+| 33 MiB (34,603,008 B) | close 1009 after 3.8 s |
+
+The 1 MiB gateway cap (`MAX_FRAME_BYTES`) is the effective limit. The 8 MiB and 33 MiB closes carry the same code, so this run cannot separate the gateway's check from the platform's; the published platform limit is 32 MiB per received WebSocket message.
+
+Published limits relevant to the design, read on 2026-11-02 from developers.cloudflare.com/durable-objects/platform/limits (not measured here): SQLite storage per object 10 GB on Paid (the page says 1 GB on Free in one place and gives no Free figure in the table); key plus value 2 MB; row 2 MB; CPU 30 s per request, configurable to 5 minutes; a soft limit of 1,000 requests per second per object; 100 classes on Free and 500 on Paid. The page states no per-object WebSocket connection limit. I did not test connection counts or fill storage.
+
+### Hibernation timing
+
+One socket, probe after each idle period; "evicted" means the object was constructed again (new boot id, boot counter incremented in storage) since the previous probe.
+
+| Idle before probe | Evicted | First round trip (ms) | Right after (ms) |
+|---|---|---|---|
+| 2 s, 5 s, 8 s | no | 31, 36, 30 | 28, 29, 27 |
+| 10 s, 12 s, 15 s | **yes** | 36, 40, 39 | 27, 26, 33 |
+| 20 s | yes | 364 | 102 |
+| 30 s | yes | 36 | 30 |
+
+- The object hibernates after between 8 and 10 s without a message (consistent with the roughly 10 s Cloudflare documents elsewhere; the websockets page gives no figure).
+- Waking costs little: the first message after hibernation took 5 to 10 ms longer than a warm one (client-measured, including about 25 ms of network). The two slow samples (364 and 102 ms) were both slow warm too, so they look like network jitter and not wake time.
+- **Heartbeat pings do not wake or hold an object.** The object was probed, idle 20 s (hibernated), then 20 pings were sent 3 s apart over 60 s. The next probe found a new object only 0 ms old with the boot counter up by exactly 1: the probe woke it, the pings did not. This matches the auto-response design and the published statement that auto-responses are not billed for duration.
+- **Idle sockets survive 10 minutes** with or without 20 s pings; both objects hibernated during the wait and woke on the next message (89 ms and 175 ms, single samples). Cloudflare did not close an idle hibernating socket within 10 minutes; longer idle periods were not tested.
+
+### Deploy-driven disconnects
+
+- **A real `wrangler deploy` did not close any socket.** In the deploy experiment (deploy took 14.2 s) one hibernated socket and one busy socket (5 frames per second) both stayed open through the deploy and for 5 s after; neither received a close. In the soak, none of the three real deploys (13 to 14 s each) caused a reconnect in the Go client during the deploy or the 60 s the harness then waited.
+- The Durable Object **was re-instantiated by the deploy with the sockets still attached:** the busy object's age at the next probe was 17.5 s, which puts its construction about 2 s after the deploy started (estimated), and the soak object's boot counter was 4 after three deploys (the initial construction plus one per deploy).
+- This agrees with the published behavior ("Hibernation API connections persist ... after hibernating"; a forced code update disconnects). It does not show that a deploy can never disconnect: the published page says a forced update does, and I did not test the immediate or deferred update strategies.
+- The first workers.dev request after the first deploy returned 404 and `/healthz` answered after 3.3 s on this run (207 ms on an earlier smoke run).
+
+### Soak (T108 shape, real client, real Worker)
+
+Run once: 10,000 frames up, 10,000 events down, the Go tunnel client, 17 server-side closes (code 1012) and 3 real deploys.
+
+| Check | Result |
+|---|---|
+| Gateway `rx_seq` at the end | 10,000 (every frame accepted once, in order) |
+| Events missing, duplicated by sequence, or out of order | 0, 0, 0 |
+| Unacknowledged frames at the end | 0 |
+| Reconnects | 16 real reconnects after the first connection (the first of the 17 closes landed before the first connection was welcomed); the totals above reconciled after them, but this run did not record whether each welcome reported `resumed` |
+| Go test verdict | **FAIL**, on my own assertion: it required 21 connections for 20 forced reconnects, and only 17 occurred because the 3 deploys did not disconnect anything |
+
+**This run does not establish "deploys during traffic lose nothing".** Two defects in the harness, found by reading the result:
+
+1. The sender queued all 10,000 frames in about 0.2 s (`Send` only queues) and the control points were paced by that queued count, so nearly every close and deploy fired against a backlog and not during an even transfer (`at_sent` was 10,000 at 19 of 20 control points).
+2. The event pusher ran ahead for the same reason, so the sender's retry path for events lost in flight was never exercised (`events_retried` = 0).
+
+The invariants held, so nothing contradicts the T108 result, but the run did not demonstrate recovery under load. **Fixed, validated locally only:** the harness now paces frames at about 100 per second, counts progress in acknowledged frames, batches event pushes at 100, no longer requires a deploy to disconnect, and fails if no frame was ever unacknowledged at a reconnect (as the T108 test does). Against a local `wrangler dev` it passes with 17 of 17 closes reconnecting, 5 to 10 frames to recover at each reconnect, 101 push calls and 10,000 of 10,000 delivered exactly once. **It has not been re-run against Cloudflare:** the agreed cap was one 10,000-message soak. Re-running costs about the same as the first run (under $0.05 at overage rates): `node tests/reality/cf/run.mjs --only soak`, about 5 minutes, same safety rails. This needs your go-ahead.
+
+### Costs (Workers Paid)
+
+Prices copied on 2026-11-02 into `tests/reality/pricing.json` from the Durable Objects pricing page (last updated 2026-10-18) and the Workers pricing page (last updated 2026-10-02): $5 per month minimum; DO requests 1 million included then $0.15 per million, with incoming WebSocket messages at 20:1 and pings and outgoing messages free; duration 400,000 GB-s included then $12.50 per million GB-s, billed at 128 MB, hibernated and auto-response time not billed; SQLite rows written 50 million included then $1.00 per million; rows read 25 billion included; storage 5 GB-month then $0.20; Worker requests 10 million included then $0.30 per million (WebSocket messages through a Worker are not requests, the upgrade is one).
+
+Per-task usage is an assumption, not a measurement: 11 incoming messages and 30 rows written per task (15 from the Device DO as it is today, 15 allowed for the Task DO of Phase 2), and 0.3 s awake per task. `node tests/reality/cf/cost.mjs` prints:
+
+| Devices | Tasks per device per day | Tasks per month | Billed DO requests | Rows written | Usage USD | Total USD (with the $5 plan) |
+|---|---|---|---|---|---|---|
+| 10 | 20 | 6,000 | 4,500 | 180,000 | 0.00 | 5.00 |
+| 100 | 20 | 60,000 | 45,000 | 1,800,000 | 0.00 | 5.00 |
+| 1,000 | 20 | 600,000 | 450,000 | 18,000,000 | 0.00 | 5.00 |
+| 1,000 | 100 | 3,000,000 | 1,770,000 | 90,000,000 | 40.12 | 45.12 |
+| 5,000 | 100 | 15,000,000 | 8,850,000 | 450,000,000 | 403.21 | 408.21 |
+
+A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage starts at about 2,200 devices at 20 tasks per device per day, or 555 at 100. At scale **rows written, not requests or duration, dominate** (90 million rows is $40 of the $40 in the fourth row). Duration is negligible because hibernated objects are not billed. These are projections from stated assumptions; the first measured per-task numbers come with the Phase 2 and 3 task flow.
+
+### Proposals this implies (not applied)
+
+1. **Cut rows written per message.** `Device.webSocketMessage` rewrites the whole session record for every accepted frame, every event sent and every event acknowledged. Counters that only matter after a reconnect could be kept in the socket attachment (which survives hibernation and deploys, as shown) or written at most every N messages, with the durable value used only when the attachment is gone. Needs a correctness review against resume after eviction before anyone changes it.
+2. **Keep the resume logic and the daemon's reconnect loop.** Deploys did not disconnect sockets here, but the published behavior allows forced disconnects and idle limits can change; nothing observed argues for removing them.
+3. **Inline ciphertext tops out at a 512 KiB padding bucket.** Frames are JSON with a base64 body, and the 1 MiB frame cap (accepted up to 1,048,512 B body) leaves room for about 768 KB of raw ciphertext, so the largest power-of-two bucket that fits inline is 512 KiB. Larger payloads go through R2 files. Relevant to T205 and Phase 3.
+4. **Do not hold the Device or Task DOs awake.** No timers or intervals in the Device DO, and use alarms for task deadlines only while a deadline is pending, since the published page says timers prevent hibernation.
+5. **Retry after the first deploy.** workers.dev can answer 404 for a few seconds on a new Worker; enrollment or setup scripts should poll.
+
+## Real logins (pending the user)
+
+**Pending user.** Google and Entra OAuth clients can only be created in your own consoles. `tests/reality/logins/verify.mjs` runs the gateway's own OIDC code (`gateway/src/auth.ts`) on loopback against the real providers, needs no Cloudflare account, and is tested against the mock IdP (`verify.test.mjs`). It prints the login URL, waits for you to sign in, and reports `PASS` with the provider, issuer, email domain and whether the tenant check ran, or `REFUSED` with the code. It never prints the credentials, and shows neither you nor the browser the identity.
+
+### Google
+
+1. console.cloud.google.com: create or choose a project (not shared with anything important).
+2. Google Auth Platform (APIs and Services, OAuth consent screen): set up. For the Workspace case choose **Internal**; for a personal Gmail account choose **External** and add the account under Test users while in Testing. Scopes: `openid` and `email` (not sensitive, no verification needed).
+3. Clients, Create client, application type **Web application**. Authorized redirect URI: `http://127.0.0.1:8787/auth/google/callback`. Copy the client ID and secret.
+4. In a shell (do not put these in a file in the repo):
+   ```
+   export GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=...
+   export GOOGLE_HOSTED_DOMAIN=yourworkspace.example   # optional
+   node tests/reality/logins/verify.mjs google
+   ```
+   Open the printed URL and sign in.
+
+| Case | Setup | Expected |
+|---|---|---|
+| Workspace member | `GOOGLE_HOSTED_DOMAIN` set to their domain | `PASS`, `tenantChecked: true` |
+| Workspace member, wrong domain configured | `GOOGLE_HOSTED_DOMAIN=other.example` | `REFUSED status=401 ... tenant_mismatch` |
+| Personal Gmail | `GOOGLE_HOSTED_DOMAIN` unset | `PASS`, `tenantChecked: false` (any Google account is accepted when no domain is set) |
+| Personal Gmail | `GOOGLE_HOSTED_DOMAIN` set | `REFUSED ... tenant_mismatch` |
+
+### Microsoft Entra
+
+1. entra.microsoft.com, Identity, Applications, App registrations, New registration. Name it `parley-test`. Supported account types: **Accounts in this organizational directory only (single tenant)**. Redirect URI: platform **Web**, `http://localhost:8787/auth/entra/callback` (Entra accepts plain http only for `localhost`, not `127.0.0.1`).
+2. Overview: copy the **Application (client) ID** and **Directory (tenant) ID**.
+3. Certificates and secrets, New client secret: copy the secret **Value** at once.
+4. API permissions: the default `User.Read` plus the OpenID permissions `openid`, `email`, `profile` (delegated, no admin consent needed).
+5. Optional: Token configuration, add the `email` optional claim to the ID token. Without it the gateway falls back to `preferred_username`, which is the sign-in name.
+6. In a shell:
+   ```
+   export ENTRA_TENANT_ID=... ENTRA_CLIENT_ID=... ENTRA_CLIENT_SECRET=...
+   REDIRECT_HOST=localhost node tests/reality/logins/verify.mjs entra
+   ```
+
+| Case | Expected |
+|---|---|
+| Member of the tenant | `PASS`, `tenantChecked: true` |
+| Guest (B2B) user invited to the tenant | Entra signs them in with `tid` of your tenant, so expect `PASS`; **decide whether guests should be allowed**, since the gateway does not tell members from guests |
+| Account in another tenant, or a personal Microsoft account | Refused by Entra itself (single tenant), which the gateway reports as `idp_denied`; if it ever reaches the gateway, `tenant_mismatch` |
+
+### Against the deployed gateway
+
+After the loopback checks pass: add `https://<worker>.workers.dev/auth/<provider>/callback` as a second redirect URI, set the same values as Worker secrets with `wrangler secret put` (`FLOW_SECRET` is a random 32-byte hex string; `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`), and run `node tests/reality/probe.mjs logins --url https://<worker>.workers.dev` to check the redirect to the real provider, then sign in once in a browser. Use a `parley-test-*` Worker name and delete it afterwards, as above.
+
+When done, record in the table below which cases passed, without emails or subject ids.
+
+| Case | Date | Result |
+|---|---|---|
+| Google, Workspace | | pending user |
+| Google, personal | | pending user |
+| Entra, member | | pending user |
+| Entra, guest | | pending user |
+| Entra, other tenant | | pending user |
