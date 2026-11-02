@@ -1,0 +1,40 @@
+{
+  "description": "Parley binding v1 signing vectors. encoded = Binding.Encode(); signature = Ed25519(root, encoded). version is decimal; not_after is unix seconds.",
+  "root_seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "root_public_key": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "vectors": [
+    {
+      "name": "basic",
+      "tenant": "tenant-1",
+      "owner": "alice@example.com",
+      "device_id": "dev-1",
+      "signing_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+      "version": "1",
+      "not_after": "1790000000",
+      "encoded": "000000117061726c65792f62696e64696e672f76310000000874656e616e742d3100000011616c696365406578616d706c652e636f6d000000056465762d3100000020bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a50000000000000001000000006ab13b80",
+      "signature": "1f7236b52f012ec166512327ec1ecc149d3a08291eeb616210d65bb0d77f04fc0e5e851ca6d06014ae8d7661a8ac07747e5aa6bfcbf71c70f7edfedafc0cde00"
+    },
+    {
+      "name": "unicode-and-large-version",
+      "tenant": "тенант",
+      "owner": "svc:бот✓",
+      "device_id": "dev/2",
+      "signing_key": "55154f42065ea5a1bea05463826be2684eb92df92c100027aabaae57ca554207",
+      "version": "18446744073709551615",
+      "not_after": "1893456000",
+      "encoded": "000000117061726c65792f62696e64696e672f76310000000cd182d0b5d0bdd0b0d0bdd1820000000d7376633ad0b1d0bed182e29c93000000056465762f320000002055154f42065ea5a1bea05463826be2684eb92df92c100027aabaae57ca554207ffffffffffffffff0000000070dbd880",
+      "signature": "1f290b9d1b79706716506efe657d088a09c8e0d26382e319cac8152568fa5560812f6c7c3264a649af7a8ae50cf9e44f571539c8cf518d67ecf9bdbaf3e6eb0a"
+    },
+    {
+      "name": "short-fields",
+      "tenant": "ab",
+      "owner": "c",
+      "device_id": "d",
+      "signing_key": "d404bc44565aedbb899150e5b0b3b32b9441bf0cb7884c33130da8dbc27dd2cf",
+      "version": "7",
+      "not_after": "1800000000",
+      "encoded": "000000117061726c65792f62696e64696e672f76310000000261620000000163000000016400000020d404bc44565aedbb899150e5b0b3b32b9441bf0cb7884c33130da8dbc27dd2cf0000000000000007000000006b49d200",
+      "signature": "70055c595b1d8e31c870af1364e15647ab9b5880d0485f736dd815452c5bc2cc7db7fe689831f1e7348a0354f805bee02fa6275d257f7e84cf772240aca0390d"
+    }
+  ]
+}

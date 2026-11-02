@@ -116,7 +116,7 @@ func TestEncodingUnambiguous(t *testing.T) {
 
 func TestTrackerRollback(t *testing.T) {
 	rpub, rpriv := keys(t)
-	tr := NewTracker(rpub)
+	tr, _ := NewTracker(rpub, nil)
 	v2, _ := Sign(rpriv, sample(t, 2))
 	v1 := *v2
 	v1.Version = 1
@@ -160,7 +160,7 @@ func TestTrackerRollback(t *testing.T) {
 
 func TestTrackerSameVersionDifferentBinding(t *testing.T) {
 	rpub, rpriv := keys(t)
-	tr := NewTracker(rpub)
+	tr, _ := NewTracker(rpub, nil)
 	a, _ := Sign(rpriv, sample(t, 1))
 	b, _ := Sign(rpriv, sample(t, 1)) // same device, different signing key
 	if err := tr.Accept(a, now); err != nil {
@@ -173,7 +173,7 @@ func TestTrackerSameVersionDifferentBinding(t *testing.T) {
 
 func TestTrackerKeyNoCollision(t *testing.T) {
 	rpub, rpriv := keys(t)
-	tr := NewTracker(rpub)
+	tr, _ := NewTracker(rpub, nil)
 	x := sample(t, 5)
 	x.Tenant, x.DeviceID = "a\x00b", "c"
 	y := sample(t, 1)
