@@ -1,4 +1,4 @@
-.PHONY: test test-layout test-go test-gateway soak coverage mutation dev
+.PHONY: malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
 
 test: test-layout test-go test-gateway
 
@@ -36,3 +36,7 @@ test-go:
 # Boot the gateway, a mock OIDC server and N daemons (default 2): make dev N=3
 dev:
 	node tests/harness/harness.mjs --daemons=$(or $(N),2)
+
+# Proof that the T206 malicious-gateway tests fail when each defence is removed.
+malgw-mutations:
+	scripts/malgw-mutations.sh

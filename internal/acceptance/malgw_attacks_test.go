@@ -8,8 +8,8 @@ package acceptance
 // setup, so a rejection is the defence and not a broken harness.
 
 import (
+	"bytes"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -18,6 +18,7 @@ import (
 	"github.com/kalahroudi/parley/internal/binding"
 	"github.com/kalahroudi/parley/internal/envelope"
 	"github.com/kalahroudi/parley/internal/prekey"
+	"github.com/kalahroudi/parley/internal/receive"
 	"github.com/kalahroudi/parley/internal/replay"
 )
 
@@ -93,8 +94,8 @@ func TestHonestGateway(t *testing.T) {
 func TestKeySubstitution(t *testing.T) {
 	t.Run("a binding signed by the gateway, not the root", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
-		pub, _, _ := ed25519.GenerateKey(rand.Reader)
-		other, _ := newRootOf(t)
+		pub, _ := w.edKey()
+		_, other := w.edKey()
 		w.gw.onBinding = func(id string, honest *binding.Signed) *binding.Signed {
 			b, err := binding.Sign(other, binding.Binding{Tenant: tenant, Owner: "bob@acme.test", DeviceID: id,
 				SigningKey: pub, Version: 9, NotAfter: w.now.Add(binding.Lifetime)})
@@ -113,7 +114,7 @@ func TestKeySubstitution(t *testing.T) {
 	t.Run("an old genuine binding served after a re-approval", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
 		old := w.gw.bind["bob"]
-		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		pub, _ := w.edKey()
 		w.gw.bind["bob"] = w.approve("bob", pub, 2)
 		if err := w.dev("alice").learn("bob"); err != nil {
 			t.Fatal(err)
@@ -123,8 +124,8 @@ func TestKeySubstitution(t *testing.T) {
 	})
 	t.Run("a prekey for the gateway's own key", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
-		_, evilPriv, _ := ed25519.GenerateKey(rand.Reader)
-		evil := newKey(t)
+		_, evilPriv := w.edKey()
+		evil := w.key()
 		w.gw.onPrekey = func(from, to string, honest *prekey.Signed) (*prekey.Signed, error) {
 			forged := *honest
 			forged.PublicKey = evil.PublicKey().Bytes()
@@ -139,7 +140,7 @@ func TestKeySubstitution(t *testing.T) {
 	})
 	t.Run("a genuine prekey with its public key swapped", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
-		evil := newKey(t)
+		evil := w.key()
 		w.gw.onPrekey = func(from, to string, honest *prekey.Signed) (*prekey.Signed, error) {
 			swapped := *honest
 			swapped.PublicKey = evil.PublicKey().Bytes()
@@ -157,37 +158,36 @@ func TestKeySubstitution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, evilPriv, _ := ed25519.GenerateKey(rand.Reader)
+		_, evilPriv := w.edKey()
 		forger := *w.dev("alice") // a copy: only its signing key differs
 		forger.sign = evilPriv
 		_, wire := forger.sealTask("bob", s, []byte("do evil"))
-		wantErr(t, one(t, w.gw.push("bob", wire)), envelope.ErrBadSignature)
-		if bob.ran != 0 || bob.pool.Outstanding() != 1 {
-			t.Fatalf("ran %d, outstanding %d: a forged frame must run nothing and burn nothing", bob.ran, bob.pool.Outstanding())
+		before := bob.snap()
+		err = one(t, w.gw.push("bob", wire))
+		wantErr(t, err, receive.ErrRejected)
+		wantErr(t, err, envelope.ErrBadSignature)
+		before.unchanged(t) // no key burned, no replay entry for a forged frame
+		if bob.pool.Outstanding() != 1 {
+			t.Fatal("the issued prekey is gone")
 		}
 	})
-	t.Run("a task whose prekey object is not bob's", func(t *testing.T) {
+	t.Run("a task whose embedded prekey object is not bob's changes nothing", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob", "carol")
 		bob := w.dev("bob")
-		s, err := bob.issue("alice", []byte("n"), w.now.Add(taskTTL))
+		s, err := bob.issue("alice", w.bytes(16), w.now.Add(taskTTL))
 		if err != nil {
 			t.Fatal(err)
 		}
-		// alice (or someone with her key) embeds carol's signature on bob's id.
+		// The blob is informational: bob opens with the key he holds under the
+		// signed prekey id, so a doctored blob can neither redirect nor burn it.
 		forged := *s
 		forged.Signature = ed25519.Sign(w.dev("carol").sign, s.Encode())
 		_, wire := w.dev("alice").sealTask("bob", &forged, []byte("x"))
-		wantErr(t, one(t, w.gw.push("bob", wire)), errBadPrekeyBlob)
+		wantOK(t, w.gw.push("bob", wire))
+		if bob.ran != 1 || bob.pool.Outstanding() != 0 {
+			t.Fatalf("ran %d, outstanding %d", bob.ran, bob.pool.Outstanding())
+		}
 	})
-}
-
-func newRootOf(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return priv, pub
 }
 
 func TestReplay(t *testing.T) {
@@ -201,7 +201,11 @@ func TestReplay(t *testing.T) {
 		wantOK(t, errs)
 		wire := w.gw.seen["bob"][0]
 		_ = id
-		wantErr(t, one(t, w.gw.push("bob", wire)), prekey.ErrConsumed)
+		before := bob.snap()
+		err = one(t, w.gw.push("bob", wire))
+		wantErr(t, err, receive.ErrDropped)
+		wantErr(t, err, replay.ErrReplay) // the table, not just the erased key, refuses it
+		before.unchanged(t)
 		if bob.ran != 1 {
 			t.Fatalf("task ran %d times", bob.ran)
 		}
@@ -216,8 +220,9 @@ func TestReplay(t *testing.T) {
 		if errs[0] != nil {
 			t.Fatal(errs[0])
 		}
-		wantErr(t, errs[1], prekey.ErrConsumed)
-		wantErr(t, errs[2], prekey.ErrConsumed)
+		wantErr(t, errs[1], replay.ErrReplay)
+		wantErr(t, errs[2], replay.ErrReplay)
+		wantErr(t, errs[1], receive.ErrDropped)
 		if w.dev("bob").ran != 1 {
 			t.Fatal("duplicated task ran more than once")
 		}
@@ -239,7 +244,7 @@ func TestReplay(t *testing.T) {
 		}
 		wantOK(t, errs)
 		w.now = w.now.Add(taskTTL + time.Minute)
-		wantErr(t, one(t, w.gw.push("bob", w.gw.seen["bob"][0])), errExpired)
+		wantErr(t, one(t, w.gw.push("bob", w.gw.seen["bob"][0])), receive.ErrExpired)
 	})
 	t.Run("a cancel replayed", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
@@ -255,7 +260,7 @@ func TestReplay(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
 		_, errs, _ := w.dev("alice").sendTask("bob", []byte("x"))
 		wantOK(t, errs)
-		wantErr(t, one(t, w.gw.push("alice", w.gw.seen["bob"][0])), errUnknownSender)
+		wantErr(t, one(t, w.gw.push("alice", w.gw.seen["bob"][0])), receive.ErrNotForUs)
 	})
 	t.Run("bob's reply reflected back to bob", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
@@ -293,6 +298,17 @@ func TestReorder(t *testing.T) {
 		bad := mutate(t, wire, func(m *envelope.Message) { m.Header.Seq = 1 })
 		wantErr(t, one(t, w.gw.push("alice", bad)), envelope.ErrOpen)
 	})
+	t.Run("a correctly numbered reply that does not chain to the last one", func(t *testing.T) {
+		w := newWorld(t, "alice", "bob")
+		bob := w.dev("bob")
+		id := start(t, w)
+		bob.in[id].sendLast = bytes.Repeat([]byte{1}, envelope.HashSize) // a forked history
+		wire := bob.replyWire(id, envelope.TypeStatus, []byte("forked"))
+		wantErr(t, one(t, w.gw.push("alice", wire)), errOutOfOrder)
+		if len(w.dev("alice").out[id].results) != 1 {
+			t.Fatal("a forked reply was recorded")
+		}
+	})
 	t.Run("a cancel that overtakes its task", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
 		alice, bob := w.dev("alice"), w.dev("bob")
@@ -303,7 +319,7 @@ func TestReorder(t *testing.T) {
 		}
 		w.gw.onMsg = nil
 		// The task is still in the gateway's hands; the cancel goes first.
-		nk := newKey(t)
+		nk := w.key()
 		alice.out[id].peerNext, alice.out[id].peerNextID = nk.PublicKey().Bytes(), keyID(nk.PublicKey().Bytes())
 		errs, err := alice.cancel(id)
 		if err != nil {
@@ -488,7 +504,7 @@ func TestWithheldPrekeys(t *testing.T) {
 		copy(pid[:], raw)
 
 		w.now = w.now.Add(taskTTL + 3*time.Minute)
-		wantErr(t, one(t, w.gw.push("bob", held)), errExpired)
+		wantErr(t, one(t, w.gw.push("bob", held)), receive.ErrExpired)
 		// Even without the expiry check, the key no longer exists to open it.
 		if err := bob.pool.With(pid, func(*[32]byte) error { return nil }); !errors.Is(err, prekey.ErrExpired) && !errors.Is(err, prekey.ErrUnknown) {
 			t.Fatalf("expired prekey still usable: %v", err)
@@ -591,7 +607,11 @@ func TestReusedPrekeys(t *testing.T) {
 		_, first := alice.sealTask("bob", s, []byte("first"))
 		_, second := alice.sealTask("bob", s, []byte("second"))
 		wantOK(t, w.gw.push("bob", first))
-		wantErr(t, one(t, w.gw.push("bob", second)), prekey.ErrConsumed)
+		before := bob.snap()
+		err = one(t, w.gw.push("bob", second))
+		wantErr(t, err, receive.ErrDropped)
+		wantErr(t, err, prekey.ErrConsumed)
+		before.unchanged(t) // the replay entry for the refused task was taken back
 		if bob.ran != 1 {
 			t.Fatalf("ran %d", bob.ran)
 		}

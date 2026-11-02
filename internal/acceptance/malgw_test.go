@@ -3,27 +3,51 @@
 
 package acceptance
 
-// T206 (spike 3): a malicious-gateway test double and the minimal daemon logic
-// it attacks. The real receive path is T204; the device here composes the
-// shipped packages (binding, prekey, envelope, replay) in the order the plan
-// gives, so the harness checks what those packages guarantee together. The
-// gateway can see, copy, drop, delay, reorder, rewrite and inject every frame
-// and can answer prekey and binding lookups with anything it likes. It holds
-// no key the tenant trusts.
+// T206 (spike 3): a malicious-gateway test double and the device logic it
+// attacks. The task receive path is the shipped internal/receive code (T204),
+// wired to the real prekey pool, replay table, binding tracker and envelope; the
+// reply and cancel paths have no shipped receiver yet, so the harness composes
+// the same packages for them in the order the plan gives. The gateway can see,
+// copy, drop, delay, reorder, rewrite and inject every frame and can answer
+// prekey and binding lookups with anything it likes. It holds no key the tenant
+// trusts.
+//
+// Using the harness (T207, T208, T302):
+//
+//	w := newWorld(t, "alice", "bob")            // devices with root-signed bindings, learned from an honest directory
+//	id, errs, err := w.dev("alice").sendTask("bob", content)
+//	w.gw.onMsg = func(to string, wire []byte) [][]byte { ... } // drop, duplicate, reorder, rewrite
+//	w.gw.onPrekey, w.gw.onBinding = ...         // lie in prekey and directory answers
+//	w.gw.push("bob", frames...)                 // inject any bytes, no hook applied
+//	mutate(t, wire, func(m *envelope.Message))  // rewrite a captured frame
+//	w.dev("bob").restart()                      // crash: fresh pool and replay table, same identity
+//	snap := w.dev("bob").snap(); ...; snap.unchanged(t) // junk must change no state
+//	w.now = w.now.Add(d); w.dev("bob").skew = d // fake clocks; the harness never sleeps
+//
+// Determinism: the clock is fake, every key, nonce and task id the harness
+// makes comes from one ChaCha8 stream with a fixed seed (harnessSeed), the
+// gateway is single-threaded, and nothing sleeps. The only randomness left is
+// inside envelope.Seal and prekey.Issue (ephemeral keys), which no assertion
+// reads. Failure output carries errors and counts, never keys or message bytes.
+//
+// The tests are only worth having if they fail without the defences they
+// exercise; scripts/malgw-mutations.sh removes each defence in turn and checks
+// that the suite goes red. Run it after changing the receive path or the tests.
 
 import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	mrand "math/rand/v2"
 	"testing"
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
 	"github.com/kalahroudi/parley/internal/envelope"
 	"github.com/kalahroudi/parley/internal/prekey"
+	"github.com/kalahroudi/parley/internal/receive"
 	"github.com/kalahroudi/parley/internal/replay"
 )
 
@@ -32,6 +56,9 @@ const (
 	taskTTL    = 15 * time.Minute
 	cancelWait = 30 * time.Second
 )
+
+// harnessSeed seeds the world's single random stream.
+var harnessSeed = [32]byte{'p', 'a', 'r', 'l', 'e', 'y', '-', 'm', 'a', 'l', 'g', 'w', '-', 't', '2', '0', '6'}
 
 var (
 	errTimeout        = errors.New("harness: no prekey reply before the timeout")
@@ -47,7 +74,6 @@ var (
 	errWrongDevice    = errors.New("harness: binding is for another device")
 	errCancelUnacked  = errors.New("harness: cancel was not acknowledged")
 	errNoNextKey      = errors.New("harness: no follow-up key from the peer yet")
-	errBadPrekeyBlob  = errors.New("harness: task carries a prekey object that is not the target's")
 )
 
 func keyID(pub ed25519.PublicKey) string { return hex.EncodeToString(pub[:8]) }
@@ -150,11 +176,20 @@ type device struct {
 	pool    *prekey.Pool
 	replays *replay.Table
 	tracker *binding.Tracker
+	rx      *receive.Receiver // the shipped task receive path
 	trusted map[string]*binding.Signed
 	in      map[[16]byte]*inbound
 	out     map[[16]byte]*outbound
 	ran     int // tasks handed to the bot
+	acks    int // acknowledgments sent after the key was erased
+
+	skew    time.Duration   // this device's clock minus the world clock
+	revoked map[string]bool // senders on the signed revocation list
+	denied  map[string]bool // owners the allowlist refuses
 }
+
+// now is this device's clock.
+func (d *device) now() time.Time { return d.w.now.Add(d.skew) }
 
 type rootKeys struct {
 	Public  ed25519.PublicKey
@@ -166,51 +201,119 @@ type world struct {
 	root rootKeys
 	now  time.Time
 	gw   *gateway
+	rng  *mrand.ChaCha8
+}
+
+// bytes, edKey and key draw from the world's seeded stream.
+func (w *world) bytes(n int) []byte {
+	b := make([]byte, n)
+	w.rng.Read(b)
+	return b
+}
+
+func (w *world) edKey() (ed25519.PublicKey, ed25519.PrivateKey) {
+	priv := ed25519.NewKeyFromSeed(w.bytes(ed25519.SeedSize))
+	return priv.Public().(ed25519.PublicKey), priv
+}
+
+func (w *world) key() *ecdh.PrivateKey {
+	k, err := ecdh.X25519().NewPrivateKey(w.bytes(32))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return k
 }
 
 func newWorld(t *testing.T, ids ...string) *world {
 	t.Helper()
+	w := &world{t: t, now: t0, rng: mrand.NewChaCha8(harnessSeed)}
 	// A bare key pair: root.New stretches a recovery code with PBKDF2, which
 	// costs seconds per world under the race detector and adds nothing here.
-	rootPub, rootPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := &world{t: t, root: rootKeys{rootPub, rootPriv}, now: t0}
+	rootPub, rootPriv := w.edKey()
+	w.root = rootKeys{rootPub, rootPriv}
 	w.gw = &gateway{devs: map[string]*device{}, bind: map[string]*binding.Signed{}, seen: map[string][][]byte{}}
-	clock := func() time.Time { return w.now }
 	for _, id := range ids {
-		pub, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pub, priv := w.edKey()
 		b := w.approve(id, pub, 1)
-		pool, err := prekey.New(prekey.Config{Tenant: tenant, DeviceID: id, SigningKeyID: keyID(pub), BindingVersion: 1,
-			Signer: priv, AllowUnlocked: true, Now: clock, SweepEvery: time.Hour})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(pool.Close)
 		tr, err := binding.NewTracker(rootPub, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		w.gw.devs[id] = &device{t: t, w: w, id: id, sign: priv, bind: b, pool: pool, tracker: tr,
-			replays: replay.New(replay.Config{Now: clock}), trusted: map[string]*binding.Signed{},
-			in: map[[16]byte]*inbound{}, out: map[[16]byte]*outbound{}}
+		d := &device{t: t, w: w, id: id, sign: priv, bind: b, tracker: tr, trusted: map[string]*binding.Signed{},
+			revoked: map[string]bool{}, denied: map[string]bool{}}
+		d.boot()
+		t.Cleanup(func() { d.pool.Close() })
+		w.gw.devs[id] = d
 		w.gw.bind[id] = b
 	}
 	// Every device learns every other device's binding through an honest directory.
-	for _, d := range w.gw.devs {
-		for id := range w.gw.devs {
-			if id != d.id {
-				if err := d.learn(id); err != nil {
+	for _, id := range ids {
+		for _, peer := range ids {
+			if id != peer {
+				if err := w.dev(id).learn(peer); err != nil {
 					t.Fatal(err)
 				}
 			}
 		}
 	}
 	return w
+}
+
+// boot builds the memory-only state of a daemon: prekey pool, replay table,
+// task and reply state, and the receiver over them. Identity (signing key,
+// binding, trusted peers) is what survives a restart.
+func (d *device) boot() {
+	d.t.Helper()
+	pool, err := prekey.New(prekey.Config{Tenant: tenant, DeviceID: d.id, SigningKeyID: keyID(d.bind.SigningKey), BindingVersion: d.bind.Version,
+		Signer: d.sign, AllowUnlocked: true, Now: d.now, SweepEvery: time.Hour})
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	d.pool, d.replays = pool, replay.New(replay.Config{Now: d.now})
+	d.in, d.out = map[[16]byte]*inbound{}, map[[16]byte]*outbound{}
+	d.rx, err = receive.New(receive.Config{Tenant: tenant, Device: d.id, Pool: d.pool, Replay: d.replays, Bindings: d.tracker, Now: d.now,
+		Lookup: func(id string) (*binding.Signed, error) {
+			if b := d.trusted[id]; b != nil {
+				return b, nil
+			}
+			return nil, errUnknownSender
+		},
+		Revoked: func(id string) bool { return d.revoked[id] },
+		Allow:   func(owner string) bool { return !d.denied[owner] }})
+	if err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// restart models a crash and restart: every prekey private key, the replay
+// table and all task state are gone; identity stays.
+func (d *device) restart() {
+	d.t.Helper()
+	d.pool.Close()
+	d.boot()
+	d.ran, d.acks = 0, 0
+}
+
+// state is what a junk frame must not change.
+type state struct {
+	d           *device
+	outstanding int
+	replays     int
+	ran, acks   int
+	tasks       int
+}
+
+func (d *device) snap() state {
+	return state{d, d.pool.Outstanding(), d.replays.Len(), d.ran, d.acks, len(d.in)}
+}
+
+// unchanged fails if the device's prekeys, replay table or task state moved.
+func (s state) unchanged(t *testing.T) {
+	t.Helper()
+	if now := s.d.snap(); now != s {
+		t.Fatalf("a refused frame changed state: outstanding %d->%d, replay entries %d->%d, ran %d->%d, acks %d->%d, tasks %d->%d",
+			s.outstanding, now.outstanding, s.replays, now.replays, s.ran, now.ran, s.acks, now.acks, s.tasks, now.tasks)
+	}
 }
 
 func (w *world) approve(id string, pub ed25519.PublicKey, ver uint64) *binding.Signed {
@@ -229,7 +332,7 @@ func (w *world) dev(id string) *device { return w.gw.devs[id] }
 // pinned root signed it, it is not a rollback, and it is for the device asked.
 func (d *device) learn(id string) error {
 	b := d.w.gw.directory(id)
-	if err := d.tracker.Accept(b, d.w.now); err != nil {
+	if err := d.tracker.Accept(b, d.now()); err != nil {
 		return err
 	}
 	if b.DeviceID != id {
@@ -247,35 +350,17 @@ func (d *device) issue(caller string, nonce []byte, taskExpiry time.Time) (*prek
 	return d.pool.Issue(prekey.Request{Caller: caller, Nonce: nonce, TaskExpiry: taskExpiry})
 }
 
-func newKey(t *testing.T) *ecdh.PrivateKey {
-	t.Helper()
-	k, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
-}
-
-func randBytes(t *testing.T, n int) []byte {
-	t.Helper()
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
 // fetchPrekey asks the target for a prekey through the gateway and verifies it
 // against the target's root-signed binding and this request's nonce.
 func (d *device) fetchPrekey(target string, expiry time.Time) (*prekey.Signed, []byte, error) {
 	tb := d.trusted[target]
-	nonce := randBytes(d.t, 16)
+	nonce := d.w.bytes(16)
 	s, err := d.w.gw.requestPrekey(d.id, target, nonce, expiry)
 	if err != nil {
 		return nil, nil, err
 	}
 	err = prekey.Verify(tb.SigningKey, s, prekey.Expect{Tenant: tenant, DeviceID: target, SigningKeyID: keyID(tb.SigningKey),
-		Caller: d.id, Nonce: nonce, BindingVersion: tb.Version, Now: d.w.now})
+		Caller: d.id, Nonce: nonce, BindingVersion: tb.Version, Now: d.now()})
 	return s, nonce, err
 }
 
@@ -286,12 +371,12 @@ func prekeyBlob(s *prekey.Signed) []byte { return append(s.Encode(), s.Signature
 func (d *device) sealTask(target string, s *prekey.Signed, content []byte) ([16]byte, []byte) {
 	d.t.Helper()
 	var id [16]byte
-	copy(id[:], randBytes(d.t, 16))
-	rsk := newKey(d.t)
-	expiry := d.w.now.Add(taskTTL)
+	copy(id[:], d.w.bytes(16))
+	rsk := d.w.key()
+	expiry := d.now().Add(taskTTL)
 	h := envelope.Header{Tenant: tenant, SenderDevice: d.id, SenderKeyID: keyID(d.bind.SigningKey), BindingVersion: d.bind.Version,
 		TargetDevice: target, PrekeyID: hex.EncodeToString(s.ID[:]), TaskID: id, ContextID: "ctx-" + hex.EncodeToString(id[:4]),
-		Seq: 0, Type: envelope.TypeTask, IssuedAt: d.w.now, Expiry: expiry, RPK: rsk.PublicKey().Bytes(), Prekey: prekeyBlob(s)}
+		Seq: 0, Type: envelope.TypeTask, IssuedAt: d.now(), Expiry: expiry, RPK: rsk.PublicKey().Bytes(), Prekey: prekeyBlob(s)}
 	m, err := envelope.Seal(d.sign, s.PublicKey, h, content)
 	if err != nil {
 		d.t.Fatal(err)
@@ -303,7 +388,7 @@ func (d *device) sealTask(target string, s *prekey.Signed, content []byte) ([16]
 
 // sendTask is the honest caller flow: fetch, verify, seal, send.
 func (d *device) sendTask(target string, content []byte) ([16]byte, []error, error) {
-	s, _, err := d.fetchPrekey(target, d.w.now.Add(taskTTL))
+	s, _, err := d.fetchPrekey(target, d.now().Add(taskTTL))
 	if err != nil {
 		return [16]byte{}, nil, err
 	}
@@ -339,55 +424,31 @@ func (d *device) checkCommon(m *envelope.Message) (*binding.Signed, error) {
 	if h.BindingVersion != sb.Version || h.SenderKeyID != keyID(sb.SigningKey) {
 		return nil, errBindingVersion
 	}
-	if !d.w.now.Before(h.Expiry) {
+	if !d.now().Before(h.Expiry) {
 		return nil, errExpired
 	}
 	return sb, nil
 }
 
-// recvRequest is the target's receive order: open (so junk cannot burn a key),
-// verify the signature, record in the replay table, erase the key, then act.
+// recvRequest hands a task to the shipped receive path (open, verify, record,
+// erase, ack, execute); a cancel travels to a follow-up key, which the harness
+// handles itself.
 func (d *device) recvRequest(m *envelope.Message) error {
-	h := m.Header
-	sb, err := d.checkCommon(m)
-	if err != nil {
-		return err
-	}
-	if h.Type == envelope.TypeCancel {
+	if m.Header.Type == envelope.TypeCancel {
+		sb, err := d.checkCommon(m)
+		if err != nil {
+			return err
+		}
 		return d.recvCancel(m, sb)
 	}
-	var id [16]byte
-	if raw, err := hex.DecodeString(h.PrekeyID); err != nil || len(raw) != len(id) {
-		return envelope.ErrInvalid
-	} else {
-		copy(id[:], raw)
-	}
-	var pt []byte
-	if err := d.pool.With(id, func(sc *[32]byte) error {
-		var err error
-		pt, err = m.Open(sc[:])
-		return err
-	}); err != nil {
-		return err
-	}
-	if err := m.Verify(sb.SigningKey); err != nil {
-		return err
-	}
-	if len(h.Prekey) <= ed25519.SignatureSize ||
-		!ed25519.Verify(d.bind.SigningKey, h.Prekey[:len(h.Prekey)-ed25519.SignatureSize], h.Prekey[len(h.Prekey)-ed25519.SignatureSize:]) {
-		return errBadPrekeyBlob
-	}
-	if err := d.replays.Accept(replay.Key{Sender: h.SenderDevice, Task: h.TaskID, Seq: h.Seq}, h.Expiry); err != nil {
-		return err
-	}
-	if err := d.pool.Consume(id); err != nil {
-		return err
-	}
-	hh := h.Hash()
-	d.in[h.TaskID] = &inbound{caller: h.SenderDevice, rpk: h.RPK, expiry: h.Expiry, callerSeq: 1, callerLast: hh[:],
-		nextKeys: map[string][]byte{}, content: pt}
-	d.ran++
-	return nil
+	return d.rx.Receive(m, func() error { d.acks++; return nil }, func(dl receive.Delivered) error {
+		h := dl.Header
+		hh := h.Hash()
+		d.in[h.TaskID] = &inbound{caller: h.SenderDevice, rpk: h.RPK, expiry: h.Expiry, callerSeq: 1, callerLast: hh[:],
+			nextKeys: map[string][]byte{}, content: append([]byte(nil), dl.Plaintext...)}
+		d.ran++
+		return nil
+	})
 }
 
 func (d *device) recvCancel(m *envelope.Message, sb *binding.Signed) error {
@@ -434,13 +495,13 @@ func (d *device) reply(id [16]byte, typ envelope.Type, content []byte) []error {
 func (d *device) replyWire(id [16]byte, typ envelope.Type, content []byte) []byte {
 	d.t.Helper()
 	in := d.in[id]
-	nk := newKey(d.t)
+	nk := d.w.key()
 	nkID := keyID(nk.PublicKey().Bytes())
 	in.nextKeys[nkID] = nk.Bytes()
 	in.sendSeq++
 	h := envelope.Header{Tenant: tenant, SenderDevice: d.id, SenderKeyID: keyID(d.bind.SigningKey), BindingVersion: d.bind.Version,
 		TargetDevice: in.caller, PrekeyID: "rpk", TaskID: id, ContextID: "ctx", Seq: in.sendSeq, Type: typ,
-		IssuedAt: d.w.now, Expiry: in.expiry, PrevHash: in.sendLast}
+		IssuedAt: d.now(), Expiry: in.expiry, PrevHash: in.sendLast}
 	if in.sendSeq == 1 {
 		h.PrevHash = in.callerLast // first reply chains to the task
 	}
@@ -522,13 +583,13 @@ func (d *device) cancel(id [16]byte) ([]error, error) {
 	o.sendSeq++
 	h := envelope.Header{Tenant: tenant, SenderDevice: d.id, SenderKeyID: keyID(d.bind.SigningKey), BindingVersion: d.bind.Version,
 		TargetDevice: o.target, PrekeyID: o.peerNextID, TaskID: id, ContextID: o.ctx, Seq: o.sendSeq, Type: envelope.TypeCancel,
-		IssuedAt: d.w.now, Expiry: o.expiry, PrevHash: o.sent}
+		IssuedAt: d.now(), Expiry: o.expiry, PrevHash: o.sent}
 	m, err := envelope.Seal(d.sign, o.peerNext, h, nil)
 	if err != nil {
 		d.t.Fatal(err)
 	}
 	o.peerNext = nil
-	o.canceling, o.cancelBy = true, d.w.now.Add(cancelWait)
+	o.canceling, o.cancelBy = true, d.now().Add(cancelWait)
 	hh := h.Hash()
 	o.sent = hh[:]
 	return d.w.gw.deliver(o.target, m.Marshal()), nil
@@ -541,7 +602,7 @@ func (d *device) finishCancel(id [16]byte) error {
 	if o.state == envelope.TypeCancel {
 		return nil
 	}
-	if d.w.now.Before(o.cancelBy) {
+	if d.now().Before(o.cancelBy) {
 		return errTimeout
 	}
 	d.erase(o)
@@ -552,7 +613,7 @@ func (d *device) finishCancel(id [16]byte) error {
 // reap fails a task with no final message by its expiry and erases its key.
 func (d *device) reap(id [16]byte) {
 	o := d.out[id]
-	if !d.w.now.Before(o.expiry) && o.rsk != nil {
+	if !d.now().Before(o.expiry) && o.rsk != nil {
 		d.erase(o)
 		o.failed = true
 	}
