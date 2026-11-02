@@ -31,6 +31,9 @@ export interface Enrollment {
 }
 
 export const MAX_SIGNED_BYTES = 4096;
+// The revocation list grows with every revoked device (about 35 bytes each), so
+// it gets a larger cap; 64 KiB stays well under the 128 KiB storage value limit.
+export const MAX_LIST_BYTES = 65536;
 
 // Opaque signed statements the gateway only relays. Fields the gateway needs for
 // routing and monotonicity checks are named; the rest are carried untouched.

@@ -318,10 +318,14 @@ describe("root-signed bindings and the revocation list (relayed, never trusted)"
     expect((await post("/v1/admin/revocations", { list: l(1) }, x.admin)).status).toBe(409); // lower
     expect((await post("/v1/admin/revocations", { list: l(2, { revoked: [] }) }, x.admin)).status).toBe(409); // different, same version
     expect((await post("/v1/admin/revocations", { list: l(3, { tenant: "other" }) }, x.admin)).status).toBe(400); // not this tenant's
-    for (const bad of [null, [], { ...l(3), version: 0 }, { ...l(3), pad: "x".repeat(5000) }]) {
+    // A list with hundreds of revoked devices is larger than a binding may be, and must still be accepted.
+    const many = Array.from({ length: 500 }, (_, i) => `device-${String(i).padStart(24, "0")}`);
+    expect((await post("/v1/admin/revocations", { list: l(3, { revoked: many }) }, x.admin)).status).toBe(200);
+    expect((await json(await post("/v1/revocations", { tenant: x.t }))).revoked).toHaveLength(500);
+    for (const bad of [null, [], { ...l(4), version: 0 }, { ...l(4), pad: "x".repeat(70000) }]) {
       expect((await post("/v1/admin/revocations", { list: bad }, x.admin)).status).toBe(400);
     }
-    expect((await post("/v1/admin/revocations", { list: l(3) }, x.user())).status).toBe(401);
+    expect((await post("/v1/admin/revocations", { list: l(4) }, x.user())).status).toBe(401);
     expect((await post("/v1/revocations", { tenant: "bad tenant!" })).status).toBe(400);
     expect((await post("/v1/revocations", { tenant: fresh().t })).status).toBe(404); // tenants are separate
   });

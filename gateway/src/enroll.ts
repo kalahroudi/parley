@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Env } from "./index";
-import { MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
+import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const json = (status: number, body: unknown) =>
@@ -105,7 +105,7 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
     return json(200, { ok: true });
   }
   if (pathname === "/v1/admin/revocations") {
-    const l = signed(b.list);
+    const l = signed(b.list, MAX_LIST_BYTES);
     if (!l || l.tenant !== admin.tenant || !Number.isSafeInteger(l.version) || (l.version as number) < 1) return json(400, { error: "bad_request" });
     return (await stub.putRevocations(l as SignedList)) === "ok" ? json(200, { ok: true }) : json(409, { error: "rollback" });
   }
@@ -113,7 +113,7 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
 }
 
 // A small JSON object posted by the admin's daemon.
-function signed(v: unknown): Record<string, unknown> | null {
+function signed(v: unknown, max = MAX_SIGNED_BYTES): Record<string, unknown> | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  return JSON.stringify(v).length <= MAX_SIGNED_BYTES ? (v as Record<string, unknown>) : null;
+  return JSON.stringify(v).length <= max ? (v as Record<string, unknown>) : null;
 }
