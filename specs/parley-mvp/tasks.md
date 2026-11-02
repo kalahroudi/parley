@@ -47,7 +47,7 @@ Deliverable: `parley-cli test` sends an end-to-end encrypted echo between two ma
 - [x] T205 Padding to power-of-two buckets and client-side encrypted files
 - [x] T206 Malicious-gateway harness (key substitution, replay, reorder, drop, swapped replies, withheld and reused prekeys)
 - [ ] T207 Acceptance: test vectors pass; fuzzing finds no crashes; every attack is rejected or detected
-- [ ] T208 Acceptance: crash points (between open and ack, between erase and execute) end in a clean fail and resend; junk frames cannot burn keys
+- [x] T208 Acceptance: crash points (between open and ack, between erase and execute) end in a clean fail and resend; junk frames cannot burn keys
 - [ ] T209 Acceptance: core-dump and swap scans find no key bytes; canary test finds zero hits in all storage
 - [ ] T210 Gates: tier 1 at 100% with mutation testing
 
