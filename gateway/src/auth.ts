@@ -16,8 +16,15 @@ export type AuthEnv = {
   ENTRA_ISSUER?: string;
 };
 
+// oidc.ts caches discovery and JWKS per Provider object, so build the providers
+// once per env object rather than on every request.
+const providerCache = new WeakMap<AuthEnv, Record<string, Provider>>();
+
 export function providers(env: AuthEnv): Record<string, Provider> {
+  const cached = providerCache.get(env);
+  if (cached) return cached;
   const out: Record<string, Provider> = {};
+  providerCache.set(env, out);
   if (env.GOOGLE_CLIENT_ID) {
     out.google = google({
       clientId: env.GOOGLE_CLIENT_ID,
