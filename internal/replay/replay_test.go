@@ -306,3 +306,35 @@ func TestQuotaSurvivesPartialPrune(t *testing.T) {
 		t.Fatalf("got %v, want ErrQuota", err)
 	}
 }
+
+func TestForgetAllowsReacceptAndKeepsBookkeeping(t *testing.T) {
+	tb, c := newTable(10)
+	exp := t0.Add(time.Minute)
+	a, b, d := key("dev-a", 1, 0), key("dev-a", 2, 0), key("dev-b", 3, 0)
+	for _, k := range []Key{a, b, d} {
+		if err := tb.Accept(k, exp.Add(time.Duration(k.Task[0])*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !tb.Forget(a) || tb.Forget(a) {
+		t.Fatal("Forget must remove once, then report false")
+	}
+	if tb.Len() != 2 || len(tb.byExp) != 2 || tb.bySend["dev-a"] != 1 {
+		t.Fatalf("len=%d heap=%d bySend=%v", tb.Len(), len(tb.byExp), tb.bySend)
+	}
+	if err := tb.Accept(a, exp); err != nil {
+		t.Fatalf("re-accept after Forget: %v", err)
+	}
+	if err := tb.Accept(a, exp); !errors.Is(err, ErrReplay) {
+		t.Fatalf("got %v, want ErrReplay", err)
+	}
+	// Forgetting the only entry for a sender clears its counter; the rest
+	// still expire in order.
+	if !tb.Forget(d) || len(tb.bySend) != 1 {
+		t.Fatalf("bySend=%v", tb.bySend)
+	}
+	c.now = exp.Add(time.Hour)
+	if tb.Len() != 0 || len(tb.bySend) != 0 {
+		t.Fatal("entries outlived expiry")
+	}
+}

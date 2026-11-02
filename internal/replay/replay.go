@@ -65,20 +65,28 @@ type Key struct {
 type entry struct {
 	key  Key
 	keep time.Time // expiry plus skew: when the entry may be dropped
+	idx  int       // position in the heap, so Forget can remove it
 }
 
 // expiryHeap orders entries by expiry, earliest first.
-type expiryHeap []entry
+type expiryHeap []*entry
 
 func (h expiryHeap) Len() int           { return len(h) }
 func (h expiryHeap) Less(i, j int) bool { return h[i].keep.Before(h[j].keep) }
-func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(entry)) }
+func (h expiryHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].idx, h[j].idx = i, j
+}
+func (h *expiryHeap) Push(x any) {
+	e := x.(*entry)
+	e.idx = len(*h)
+	*h = append(*h, e)
+}
 func (h *expiryHeap) Pop() any {
 	old := *h
 	n := len(old) - 1
 	e := old[n]
-	old[n] = entry{} // drop the sender string reference
+	old[n] = nil // drop the entry reference
 	*h = old[:n]
 	// Give back the array a flood grew, once the table has drained.
 	if cap(*h) > 4*len(*h)+shrinkSlack {
@@ -105,7 +113,7 @@ type Config struct {
 // Table is safe for concurrent use.
 type Table struct {
 	mu     sync.Mutex
-	seen   map[Key]struct{}
+	seen   map[Key]*entry
 	bySend map[string]int
 	byExp  expiryHeap
 	cfg    Config
@@ -128,7 +136,7 @@ func New(cfg Config) *Table {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Table{seen: make(map[Key]struct{}), bySend: make(map[string]int), cfg: cfg}
+	return &Table{seen: make(map[Key]*entry), bySend: make(map[string]int), cfg: cfg}
 }
 
 // Accept records the message and returns nil the first time it is seen. It
@@ -160,10 +168,35 @@ func (t *Table) Accept(k Key, expiry time.Time) error {
 	if len(t.seen) >= t.cfg.MaxEntries {
 		return ErrFull
 	}
-	t.seen[k] = struct{}{}
+	e := &entry{key: k, keep: expiry.Add(t.cfg.Skew)}
+	t.seen[k] = e
 	t.bySend[k.Sender]++
-	heap.Push(&t.byExp, entry{key: k, keep: expiry.Add(t.cfg.Skew)})
+	heap.Push(&t.byExp, e)
 	return nil
+}
+
+// Forget removes an entry Accept recorded, for a message that was accepted but
+// then not executed (the acknowledgment failed, or the prekey was lost to
+// another delivery), so a resend of the same task is not dropped as a replay.
+// Call it only when nothing ran. It reports whether an entry was removed.
+func (t *Table) Forget(k Key) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.seen[k]
+	if !ok {
+		return false
+	}
+	heap.Remove(&t.byExp, e.idx)
+	t.drop(e.key)
+	return true
+}
+
+// drop deletes a key's bookkeeping. Callers hold t.mu.
+func (t *Table) drop(k Key) {
+	delete(t.seen, k)
+	if t.bySend[k.Sender]--; t.bySend[k.Sender] == 0 {
+		delete(t.bySend, k.Sender)
+	}
 }
 
 // Len is the number of entries held.
@@ -177,10 +210,6 @@ func (t *Table) Len() int {
 // prune drops entries whose window (expiry plus skew) has passed. Callers hold t.mu.
 func (t *Table) prune(now time.Time) {
 	for len(t.byExp) > 0 && !t.byExp[0].keep.After(now) {
-		e := heap.Pop(&t.byExp).(entry)
-		delete(t.seen, e.key)
-		if t.bySend[e.key.Sender]--; t.bySend[e.key.Sender] == 0 {
-			delete(t.bySend, e.key.Sender)
-		}
+		t.drop(heap.Pop(&t.byExp).(*entry).key)
 	}
 }
