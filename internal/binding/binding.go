@@ -25,6 +25,7 @@ var (
 	ErrExpired      = errors.New("binding: expired")
 	ErrRollback     = errors.New("binding: version lower than one already seen")
 	ErrInvalid      = errors.New("binding: missing or malformed field")
+	ErrConflict     = errors.New("binding: different binding at a version already seen")
 )
 
 // Binding is the statement the root signs. Encryption keys are not part of it:
@@ -103,26 +104,39 @@ func Verify(root ed25519.PublicKey, s *Signed, now time.Time) error {
 type Tracker struct {
 	root ed25519.PublicKey
 	mu   sync.Mutex
-	seen map[string]uint64 // tenant\x00device -> version
+	seen map[deviceKey]seenBinding
+}
+
+type deviceKey struct{ tenant, device string }
+
+type seenBinding struct {
+	version uint64
+	encoded string
 }
 
 // NewTracker pins the root public key.
 func NewTracker(root ed25519.PublicKey) *Tracker {
-	return &Tracker{root: root, seen: map[string]uint64{}}
+	return &Tracker{root: root, seen: map[deviceKey]seenBinding{}}
 }
 
-// Accept verifies s and records its version. An equal version is accepted so
-// the same binding can be presented repeatedly.
+// Accept verifies s and records its version. The identical binding can be
+// presented repeatedly; a different binding at the same version is rejected.
 func (t *Tracker) Accept(s *Signed, now time.Time) error {
 	if err := Verify(t.root, s, now); err != nil {
 		return err
 	}
-	k := s.Tenant + "\x00" + s.DeviceID
+	k := deviceKey{s.Tenant, s.DeviceID}
+	enc := string(s.Encode())
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if v, ok := t.seen[k]; ok && s.Version < v {
-		return ErrRollback
+	if v, ok := t.seen[k]; ok {
+		if s.Version < v.version {
+			return ErrRollback
+		}
+		if s.Version == v.version && enc != v.encoded {
+			return ErrConflict
+		}
 	}
-	t.seen[k] = s.Version
+	t.seen[k] = seenBinding{s.Version, enc}
 	return nil
 }

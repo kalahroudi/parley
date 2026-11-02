@@ -157,3 +157,33 @@ func TestTrackerRollback(t *testing.T) {
 		t.Fatal("version advanced by rejected binding:", err)
 	}
 }
+
+func TestTrackerSameVersionDifferentBinding(t *testing.T) {
+	rpub, rpriv := keys(t)
+	tr := NewTracker(rpub)
+	a, _ := Sign(rpriv, sample(t, 1))
+	b, _ := Sign(rpriv, sample(t, 1)) // same device, different signing key
+	if err := tr.Accept(a, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Accept(b, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTrackerKeyNoCollision(t *testing.T) {
+	rpub, rpriv := keys(t)
+	tr := NewTracker(rpub)
+	x := sample(t, 5)
+	x.Tenant, x.DeviceID = "a\x00b", "c"
+	y := sample(t, 1)
+	y.Tenant, y.DeviceID = "a", "b\x00c"
+	sx, _ := Sign(rpriv, x)
+	sy, _ := Sign(rpriv, y)
+	if err := tr.Accept(sx, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Accept(sy, now); err != nil {
+		t.Fatal("distinct device treated as rollback:", err)
+	}
+}
