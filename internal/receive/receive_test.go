@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,8 +83,17 @@ func newFixture(t *testing.T, mod func(*Config)) *fixture {
 	if mod != nil {
 		mod(&f.cfg)
 	}
-	f.r = New(f.cfg)
+	f.r = f.build(f.cfg)
 	return f
+}
+
+func (f *fixture) build(cfg Config) *Receiver {
+	f.t.Helper()
+	r, err := New(cfg)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return r
 }
 
 // seal issues a prekey and seals a TASK to it.
@@ -216,7 +226,7 @@ func TestRedeliveryDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	ru, err := f.receive(m, nil, nil)
-	if !errors.Is(err, ErrDropped) || !errors.Is(err, prekey.ErrConsumed) || len(ru.events) != 0 {
+	if !errors.Is(err, ErrDropped) || !errors.Is(err, replay.ErrReplay) || len(ru.events) != 0 {
 		t.Fatalf("%v %v", err, ru.events)
 	}
 }
@@ -231,6 +241,7 @@ func TestHeaderChecksBeforeAnyKeyUse(t *testing.T) {
 		"target":    {func(h *envelope.Header) { h.TargetDevice = "dev-z" }, ErrNotForUs},
 		"prekey id": {func(h *envelope.Header) { h.PrekeyID = "nothex" }, ErrNotForUs},
 		"short id":  {func(h *envelope.Header) { h.PrekeyID = "abcd" }, ErrNotForUs},
+		"at expiry": {func(h *envelope.Header) { h.IssuedAt, h.Expiry = t0.Add(-time.Hour), t0 }, ErrExpired},
 		"expired":   {func(h *envelope.Header) { h.IssuedAt, h.Expiry = t0.Add(-time.Hour), t0.Add(-time.Minute) }, ErrExpired},
 		"future":    {func(h *envelope.Header) { h.IssuedAt = t0.Add(time.Hour); h.Expiry = t0.Add(2 * time.Hour) }, ErrExpired},
 	}
@@ -253,13 +264,25 @@ func TestJunkCannotBurnKey(t *testing.T) {
 	junk := *m
 	junk.Ciphertext = bytes.Clone(m.Ciphertext)
 	junk.Ciphertext[0] ^= 1
-	if _, err := f.receive(&junk, nil, nil); !errors.Is(err, envelope.ErrOpen) || !f.intact() {
+	// Unauthenticated ciphertext is refused before it is opened or recorded.
+	if _, err := f.receive(&junk, nil, nil); !errors.Is(err, ErrRejected) || !errors.Is(err, envelope.ErrBadSignature) ||
+		!f.intact() || f.table.Len() != 0 {
 		t.Fatalf("%v intact=%v", err, f.intact())
 	}
 	bad := *m
-	bad.Header.Type = 0 // fails header validation before opening
-	if _, err := f.receive(&bad, nil, nil); !errors.Is(err, envelope.ErrInvalid) || !f.intact() {
+	bad.Header.Type = 0 // fails header validation
+	if _, err := f.receive(&bad, nil, nil); !errors.Is(err, ErrRejected) || !errors.Is(err, envelope.ErrInvalid) ||
+		!f.intact() || f.table.Len() != 0 {
 		t.Fatalf("%v intact=%v", err, f.intact())
+	}
+	// Even a correctly signed frame that does not decrypt leaves the key and
+	// the replay table as they were.
+	signed := *m
+	signed.Ciphertext = bytes.Clone(m.Ciphertext)
+	signed.Ciphertext[0] ^= 1
+	signed.Signature = ed25519.Sign(f.senderSk, signed.Transcript())
+	if _, err := f.receive(&signed, nil, nil); !errors.Is(err, envelope.ErrOpen) || !f.intact() || f.table.Len() != 0 {
+		t.Fatalf("%v intact=%v len=%d", err, f.intact(), f.table.Len())
 	}
 	if _, err := f.receive(m, nil, nil); err != nil {
 		t.Fatal("legitimate frame after junk:", err)
@@ -269,7 +292,7 @@ func TestJunkCannotBurnKey(t *testing.T) {
 func TestUnknownAndClosedAndExpiredPrekey(t *testing.T) {
 	f := newFixture(t, nil)
 	m, sp := f.seal(func(h *envelope.Header) { h.PrekeyID = PrekeyID([16]byte{1}) })
-	if _, err := f.receive(m, nil, nil); !errors.Is(err, ErrDropped) || !errors.Is(err, prekey.ErrUnknown) {
+	if _, err := f.receive(m, nil, nil); !errors.Is(err, ErrDropped) || !errors.Is(err, prekey.ErrUnknown) || f.table.Len() != 0 {
 		t.Fatal(err)
 	}
 	f.pool.Consume(sp.ID)
@@ -336,7 +359,7 @@ func TestSenderRejectedKeepsKey(t *testing.T) {
 		if c.mod != nil {
 			// The default Lookup closes over f.bind, so mods may replace either.
 			c.mod(&f.cfg, f)
-			f.r = New(f.cfg)
+			f.r = f.build(f.cfg)
 		}
 		if c.key != nil {
 			f.senderSk = c.key
@@ -346,8 +369,8 @@ func TestSenderRejectedKeepsKey(t *testing.T) {
 		if !errors.Is(err, ErrRejected) || len(ru.events) != 0 {
 			t.Errorf("%s: %v %v", name, err, ru.events)
 		}
-		if !f.intact() {
-			t.Errorf("%s: key burned by a rejected sender", name)
+		if !f.intact() || f.table.Len() != 0 {
+			t.Errorf("%s: key burned or replay entry kept for a rejected sender", name)
 		}
 	}
 }
@@ -387,7 +410,7 @@ func TestReplayTable(t *testing.T) {
 	f.table.Accept(replay.Key{Sender: "dev-q", Seq: 1}, t0.Add(time.Hour))
 	cfg := f.cfg
 	cfg.Replay = f.table
-	f.r = New(cfg)
+	f.r = f.build(cfg)
 	m, _ = f.seal(nil)
 	if _, err := f.receive(m, nil, nil); !errors.Is(err, ErrRejected) || !errors.Is(err, replay.ErrFull) || !f.intact() {
 		t.Fatal(err)
@@ -424,16 +447,21 @@ func TestConcurrentDuplicateWinsOnce(t *testing.T) {
 }
 
 func TestLostRaceAtErase(t *testing.T) {
-	f := newFixture(t, nil)
-	m, sp := f.seal(nil)
-	// Another delivery consumes the key between verification and erase.
-	f.cfg.Lookup = func(string) (*binding.Signed, error) {
-		f.pool.Consume(sp.ID)
-		return f.bind, nil
-	}
-	f.r = New(f.cfg)
+	var f *fixture
+	var sp *prekey.Signed
+	f = newFixture(t, func(c *Config) {
+		// Another delivery consumes the key between open and erase.
+		c.Fault = func(st Stage) error {
+			if st == StageOpened {
+				f.pool.Consume(sp.ID)
+			}
+			return nil
+		}
+	})
+	var m *envelope.Message
+	m, sp = f.seal(nil)
 	ru, err := f.receive(m, nil, nil)
-	if !errors.Is(err, ErrDropped) || len(ru.events) != 0 {
+	if !errors.Is(err, ErrDropped) || !errors.Is(err, prekey.ErrConsumed) || len(ru.events) != 0 {
 		t.Fatalf("%v %v", err, ru.events)
 	}
 	if f.table.Len() != 0 {
@@ -441,9 +469,198 @@ func TestLostRaceAtErase(t *testing.T) {
 	}
 }
 
-func TestNewDefaults(t *testing.T) {
-	r := New(Config{})
-	if r.cfg.Skew != DefaultSkew || r.cfg.Now == nil {
-		t.Fatal("defaults not applied")
+func TestNewDefaultsAndRequiredFields(t *testing.T) {
+	f := newFixture(t, nil)
+	if f.r.cfg.Skew != DefaultSkew {
+		t.Fatal("skew default not applied")
+	}
+	c := f.cfg
+	c.Now, c.Skew = nil, 0
+	if r := f.build(c); r.cfg.Now == nil {
+		t.Fatal("clock default not applied")
+	}
+	for name, mod := range map[string]func(*Config){
+		"tenant": func(c *Config) { c.Tenant = "" }, "device": func(c *Config) { c.Device = "" },
+		"pool": func(c *Config) { c.Pool = nil }, "replay": func(c *Config) { c.Replay = nil },
+		"lookup": func(c *Config) { c.Lookup = nil }, "bindings": func(c *Config) { c.Bindings = nil },
+		"revoked": func(c *Config) { c.Revoked = nil }, "allow": func(c *Config) { c.Allow = nil },
+	} {
+		c := f.cfg
+		mod(&c)
+		if r, err := New(c); r != nil || !errors.Is(err, ErrConfig) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestNilMessage(t *testing.T) {
+	f := newFixture(t, nil)
+	if err := f.r.Receive(nil, nil, nil); !errors.Is(err, ErrNotForUs) {
+		t.Fatal(err)
+	}
+}
+
+// Every crash point: nothing executes, a key is erased exactly from the erase
+// stage on, and the sender's resend with a fresh prekey runs.
+func TestCrashPoints(t *testing.T) {
+	stages := []struct {
+		st     Stage
+		erased bool
+	}{
+		{StageAuthenticated, false}, {StageRecorded, false}, {StageOpened, false},
+		{StageErased, true}, {StageAcked, true},
+	}
+	for _, c := range stages {
+		var inject Stage
+		f := newFixture(t, func(cfg *Config) {
+			cfg.Fault = func(st Stage) error {
+				if st == inject {
+					return errors.New("crash")
+				}
+				return nil
+			}
+		})
+		var task [16]byte
+		rand.Read(task[:])
+		fix := func(h *envelope.Header) { h.TaskID = task }
+		inject = c.st
+		m, _ := f.seal(fix)
+		ru, err := f.receive(m, nil, nil)
+		wantEvents := 0
+		if c.st == StageAcked {
+			wantEvents = 1 // acknowledged, then died before execute
+		}
+		if !errors.Is(err, ErrFault) || len(ru.events) != wantEvents || ru.got.Plaintext != nil {
+			t.Errorf("stage %d: %v %v", c.st, err, ru.events)
+		}
+		if got := f.pool.Outstanding() == 0; got != c.erased {
+			t.Errorf("stage %d: erased=%v want %v", c.st, got, c.erased)
+		}
+		// The same frame is retried if the key survived, else it is dropped.
+		inject = 0
+		if !c.erased {
+			if _, err := f.receive(m, nil, nil); err != nil {
+				t.Errorf("stage %d: retry of same frame: %v", c.st, err)
+			}
+			continue
+		}
+		if _, err := f.receive(m, nil, nil); !errors.Is(err, ErrDropped) {
+			t.Errorf("stage %d: redelivery %v", c.st, err)
+		}
+		m2, _ := f.seal(fix)
+		if ru, err := f.receive(m2, nil, nil); err != nil || len(ru.events) != 2 {
+			t.Errorf("stage %d: resend %v %v", c.st, err, ru.events)
+		}
+	}
+}
+
+func TestPanicsEraseAndZero(t *testing.T) {
+	for _, where := range []string{"ack", "execute"} {
+		f := newFixture(t, nil)
+		m, _ := f.seal(nil)
+		var plain []byte
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: panic swallowed", where)
+				}
+			}()
+			f.r.Receive(m,
+				func() error {
+					if where == "ack" {
+						panic("ack")
+					}
+					return nil
+				},
+				func(d Delivered) error { plain = d.Plaintext; panic("execute") })
+		}()
+		if f.pool.Outstanding() != 0 {
+			t.Errorf("%s: key survived a panic", where)
+		}
+		if where == "execute" {
+			if !bytes.Equal(plain, make([]byte, len(plain))) {
+				t.Error("plaintext not zeroed after a panic")
+			}
+			// Execute may have run: the entry stays, a replay is dropped.
+			if f.table.Len() != 1 {
+				t.Error("replay entry forgotten after execute started")
+			}
+		} else if f.table.Len() != 0 {
+			t.Error("replay entry kept though nothing ran")
+		}
+	}
+}
+
+// Execute failing keeps the replay entry: the task may have run.
+func TestExecuteErrorKeepsReplayEntry(t *testing.T) {
+	f := newFixture(t, nil)
+	m, _ := f.seal(nil)
+	f.receive(m, nil, errors.New("boom"))
+	if f.table.Len() != 1 {
+		t.Fatal("entry forgotten")
+	}
+}
+
+// Prekeys and the replay table are memory only. A restarted receiver has an
+// empty table and no keys, so a frame captured before the restart cannot be
+// opened or executed, whether or not it ran before.
+func TestRestartCannotOpenCapturedMessage(t *testing.T) {
+	f := newFixture(t, nil)
+	pending, _ := f.seal(nil) // captured, never delivered
+	done, _ := f.seal(nil)    // captured after it ran
+	if _, err := f.receive(done, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.pool.Close() // restart: fresh pool (new random keys) and empty table
+	_, tpriv := gen(t)
+	pool, err := prekey.New(prekey.Config{Tenant: "t1", DeviceID: "dev-b", SigningKeyID: "k-b", BindingVersion: 1,
+		Signer: tpriv, AllowUnlocked: true, SweepEvery: time.Hour, Now: f.clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	cfg := f.cfg
+	cfg.Pool, cfg.Replay = pool, replay.New(replay.Config{Now: f.clock})
+	f.r = f.build(cfg)
+	for name, m := range map[string]*envelope.Message{"pending": pending, "executed": done} {
+		ru, err := f.receive(m, nil, nil)
+		if !errors.Is(err, ErrDropped) || !errors.Is(err, prekey.ErrUnknown) || len(ru.events) != 0 {
+			t.Errorf("%s: %v %v", name, err, ru.events)
+		}
+		if cfg.Replay.Len() != 0 {
+			t.Errorf("%s: entry left behind", name)
+		}
+	}
+}
+
+// No error carries payload, identifiers, keys or the owner.
+func TestErrorsCarryNoPayload(t *testing.T) {
+	secrets := []string{"secret task", "alice@example.com", "dev-a", "dev-b", "t1", "ctx", "k-a"}
+	check := func(what string, err error) {
+		if err == nil {
+			return
+		}
+		for _, s := range secrets {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("%s: %q leaks %q", what, err, s)
+			}
+		}
+	}
+	f := newFixture(t, nil)
+	m, sp := f.seal(nil)
+	bad := *m
+	bad.Ciphertext = bytes.Clone(m.Ciphertext)
+	bad.Ciphertext[0] ^= 1
+	_, err := f.receive(&bad, nil, nil)
+	check("bad sig", err)
+	_, err = f.receive(m, errors.New("socket"), nil)
+	check("ack", err)
+	_, err = f.receive(m, nil, nil)
+	check("redelivery", err)
+	m2, _ := f.seal(func(h *envelope.Header) { h.Tenant = "t1x" })
+	_, err = f.receive(m2, nil, nil)
+	check("not for us", err)
+	if strings.Contains(err.Error(), PrekeyID(sp.ID)) {
+		t.Error("prekey id leaked")
 	}
 }
