@@ -344,6 +344,10 @@ func TestSendAfterRunReturnsAndLimits(t *testing.T) {
 	if err := c.Send(strings.Repeat("x", maxFrameBytes)); err == nil {
 		t.Fatal("oversized frame accepted")
 	}
+	// JSON escaping doubles this body past the gateway's frame limit.
+	if err := c.Send(strings.Repeat(`"`, maxFrameBytes/2)); err == nil {
+		t.Fatal("frame that exceeds the limit once encoded was accepted")
+	}
 	cancel()
 	<-done
 	if err := c.Send("late"); err != ErrClosed {
