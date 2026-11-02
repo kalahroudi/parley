@@ -20,6 +20,13 @@ test("tier gates match the plan's coverage policy", () => {
   assert.equal(tiers["3"].line, 85);
 });
 
+// Security-critical packages named by the plan's tier 1 row; moving one down a tier needs the plan to change.
+test("security-critical packages are in tier 1", () => {
+  for (const p of ["internal/binding", "internal/envelope", "internal/revocation", "internal/logx"]) {
+    assert.ok(tiers["1"].packages.includes(p), `${p} must be tier 1`);
+  }
+});
+
 test("every tiered package exists, and none is in two tiers", () => {
   const seen = new Map();
   for (const [tier, t] of Object.entries(tiers)) {
