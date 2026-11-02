@@ -108,3 +108,27 @@ func TestOpenPaddedErrors(t *testing.T) {
 		t.Fatalf("unpadded: %v", err)
 	}
 }
+
+// FuzzUnpad feeds arbitrary bytes to the unpadder. Nothing may panic, and
+// anything it accepts must re-pad to exactly the same bytes.
+func FuzzUnpad(f *testing.F) {
+	for _, n := range []int{0, 1, 4095, 4096, 9000} {
+		p, _ := Pad(make([]byte, n))
+		f.Add(p)
+	}
+	f.Add([]byte{})
+	f.Add(make([]byte, MinBucket))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		pt, err := Unpad(b)
+		if err != nil {
+			if pt != nil {
+				t.Fatal("plaintext returned with an error")
+			}
+			return
+		}
+		again, err := Pad(pt)
+		if err != nil || !bytes.Equal(again, b) {
+			t.Fatal("accepted padding is not canonical")
+		}
+	})
+}
