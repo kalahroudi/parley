@@ -24,7 +24,18 @@ export interface Enrollment {
   status: EnrollmentStatus;
   created: number;
   decided?: number;
+  // The root-signed binding the admin's daemon posted after approval. Opaque to
+  // the gateway: devices verify it against the pinned root, so a forged or
+  // swapped binding is rejected there.
+  binding?: SignedBinding;
 }
+
+export const MAX_SIGNED_BYTES = 4096;
+
+// Opaque signed statements the gateway only relays. Fields the gateway needs for
+// routing and monotonicity checks are named; the rest are carried untouched.
+export type SignedBinding = { device_id: string; signing_key: string; version: number };
+export type SignedList = { tenant: string; version: number };
 
 interface StoredEnrollment extends Enrollment {
   poll_hash: string;
@@ -153,6 +164,37 @@ export class Tenant extends DurableObject<Env> {
     await this.ctx.storage.put(`enr:${id}`, rec);
     await this.schedule(rec.decided + DECIDED_RETENTION_MS);
     return strip(rec);
+  }
+
+  // Stores the binding the admin's daemon signed for an approved device. A
+  // higher version replaces a lower one; the same version only when identical.
+  async putBinding(id: string, b: SignedBinding): Promise<Enrollment | "not_found" | "not_approved" | "mismatch" | "rollback"> {
+    const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${id}`);
+    if (!rec) return "not_found";
+    if (rec.status !== "approved") return "not_approved";
+    if (b.signing_key !== rec.signing_key) return "mismatch";
+    if (rec.binding) {
+      if (b.device_id !== rec.binding.device_id) return "mismatch";
+      if (b.version < rec.binding.version) return "rollback";
+      if (b.version === rec.binding.version && JSON.stringify(b) !== JSON.stringify(rec.binding)) return "rollback";
+    }
+    rec.binding = b;
+    await this.ctx.storage.put(`enr:${id}`, rec);
+    return strip(rec);
+  }
+
+  // The signed revocation list is public and signed by the root holder's daemon;
+  // the gateway stores the newest and only relays it. It refuses a lower
+  // version, or a different list at the same version (advisory: daemons check too).
+  async putRevocations(l: SignedList): Promise<"ok" | "rollback"> {
+    const cur = await this.ctx.storage.get<SignedList>("revocations");
+    if (cur && (l.version < cur.version || (l.version === cur.version && JSON.stringify(l) !== JSON.stringify(cur)))) return "rollback";
+    await this.ctx.storage.put("revocations", l);
+    return "ok";
+  }
+
+  async revocations(): Promise<SignedList | null> {
+    return (await this.ctx.storage.get<SignedList>("revocations")) ?? null;
   }
 
   // Keep the earliest wake-up needed to purge records.

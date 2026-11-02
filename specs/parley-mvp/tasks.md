@@ -31,7 +31,7 @@ Deliverable: two daemons enroll under an admin root and show online; revocation 
 - [x] T104 Enrollment tokens and the approval queue
 - [x] T105 Root-signed device bindings with versions and not_after
 - [x] T106 Signed revocation list with refresh, staleness warning and send refusal
-- [ ] T107 Acceptance: enroll, approve and revoke; binding rollback rejected; recovery code restores the root; stale revocation list behavior
+- [x] T107 Acceptance: enroll, approve and revoke; binding rollback rejected; recovery code restores the root; stale revocation list behavior
 - [x] T108 Acceptance: 20 forced reconnects and a deploy during a 10k-message soak lose or duplicate nothing
 - [ ] T109 Real-Cloudflare reality check 1: limits, costs, hibernation timing, deploy-driven disconnects, real Google and Entra logins
 - [ ] T110 Gates: tier 1 at 100%, tier 2 gates met

@@ -198,3 +198,30 @@ func TestSubSecondNotAfterDoesNotExtend(t *testing.T) {
 		t.Fatalf("got %v, want ErrExpired", err)
 	}
 }
+
+// lockedStore is a Locker whose Load starts failing after n successful calls.
+type lockedStore struct{ loads, okLoads int }
+
+func (s *lockedStore) Load() ([]Record, error) {
+	s.loads++
+	if s.loads > s.okLoads {
+		return nil, ErrStore
+	}
+	return nil, nil
+}
+func (s *lockedStore) Save([]Record) error         { return nil }
+func (s *lockedStore) Lock() (func() error, error) { return func() error { return nil }, nil }
+
+// Another process may have corrupted the store since this one started: Accept
+// re-reads it under the lock and must reject rather than judge from stale state.
+func TestAcceptRejectsWhenStoreUnreadableUnderLock(t *testing.T) {
+	rpub, rpriv := keys(t)
+	tr, err := NewTracker(rpub, &lockedStore{okLoads: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := Sign(rpriv, sample(t, 1))
+	if err := tr.Accept(s, now); !errors.Is(err, ErrStore) {
+		t.Fatalf("got %v", err)
+	}
+}

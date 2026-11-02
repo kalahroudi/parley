@@ -37,7 +37,7 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
     if (pathname.startsWith("/auth/")) return handleAuth(request, env);
-    if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/")) return handleEnroll(request, env);
+    if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
     if (pathname !== "/v1/connect") return new Response("not found", { status: 404 });
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
