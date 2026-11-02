@@ -175,7 +175,7 @@ export class Tenant extends DurableObject<Env> {
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${id}`);
     if (!rec) return "not_found";
     if (rec.status !== "approved") return "not_approved";
-    if (b.signing_key !== rec.signing_key) return "mismatch";
+    if (b.signing_key !== rec.signing_key || b.device_id !== id) return "mismatch"; // the device id is the request id
     if (rec.binding) {
       if (b.device_id !== rec.binding.device_id) return "mismatch";
       if (b.version < rec.binding.version) return "rollback";

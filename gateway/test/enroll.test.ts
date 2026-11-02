@@ -264,10 +264,12 @@ describe("routing", () => {
 
 describe("root-signed bindings and the revocation list (relayed, never trusted)", () => {
   const b64 = (n: number) => btoa(String.fromCharCode(...new Uint8Array(n).fill(7)));
-  const binding = (sk: string, version = 1, extra: object = {}) => ({ tenant: "t", owner: "a", device_id: "dev1", signing_key: sk, version, signature: b64(64), ...extra });
+  let curId = "";
+  const binding = (sk: string, version = 1, extra: object = {}) => ({ tenant: "t", owner: "a", device_id: curId, signing_key: sk, version, signature: b64(64), ...extra });
   const approved = async (x: ReturnType<typeof fresh>) => {
     const sk = key();
     const { id, poll } = await json(await post("/v1/enroll/request", { name: "d", signing_key: sk }, x.user()));
+    curId = id;
     return { id, poll, sk };
   };
   const status = async (x: ReturnType<typeof fresh>, e: { id: string; poll: string }) => json(await post("/v1/enroll/status", { tenant: x.t, id: e.id, poll: e.poll }));
@@ -291,7 +293,11 @@ describe("root-signed bindings and the revocation list (relayed, never trusted)"
     const x = fresh();
     const e = await approved(x);
     await post("/v1/admin/enrollments/decide", { id: e.id, decision: "approved" }, x.admin);
-    await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk, 2) }, x.admin);
+    // The device id is the request id, even for the first binding.
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk, 1, { device_id: "other" }) }, x.admin)).status).toBe(409);
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk, 2) }, x.admin)).status).toBe(200);
+    // A body far larger than any legitimate one is refused before it is parsed.
+    expect((await post("/v1/admin/bindings", JSON.stringify({ id: e.id, pad: "x".repeat(200000) }), x.admin)).status).toBe(400);
     const code = async (body: unknown, auth = x.admin) => (await post("/v1/admin/bindings", body, auth)).status;
     expect(await code({ id: e.id, binding: binding(e.sk, 1) })).toBe(409);
     expect(await code({ id: e.id, binding: binding(e.sk, 2, { owner: "other" }) })).toBe(409);

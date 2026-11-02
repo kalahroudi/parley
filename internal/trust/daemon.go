@@ -63,8 +63,21 @@ func (d *Daemon) Warning(now time.Time) string {
 	return ""
 }
 
+// defaultPoll is used when a non-positive interval is given, so a zero value
+// cannot turn a loop into a busy loop against the gateway (or panic a Ticker).
+const defaultPoll = 5 * time.Second
+
+// maxEnrollWait bounds how long Enroll waits for a decision and its binding.
+const maxEnrollWait = 24 * time.Hour
+
 // RunRefresh refreshes every interval until ctx ends, reporting failures to onErr.
 func (d *Daemon) RunRefresh(ctx context.Context, every time.Duration, clock func() time.Time, onErr func(error)) {
+	if every <= 0 {
+		every = defaultPoll
+	}
+	if onErr == nil {
+		onErr = func(error) {}
+	}
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -83,6 +96,11 @@ func (d *Daemon) RunRefresh(ctx context.Context, every time.Duration, clock func
 // returns the root-signed binding. The binding is verified against the pinned
 // root and recorded in the tracker, so a gateway cannot substitute another.
 func (d *Daemon) Enroll(ctx context.Context, name string, key ed25519.PublicKey, poll time.Duration, clock func() time.Time) (*binding.Signed, error) {
+	if poll <= 0 {
+		poll = defaultPoll
+	}
+	ctx, cancel := context.WithTimeout(ctx, maxEnrollWait)
+	defer cancel()
 	id, secret, err := d.Client.RequestEnrollment(ctx, name, key)
 	if err != nil {
 		return nil, err

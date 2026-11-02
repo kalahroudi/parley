@@ -4,6 +4,7 @@
 import type { Env } from "./index";
 import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
 
+const MAX_BODY_BYTES = MAX_LIST_BYTES + 1024;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -25,8 +26,13 @@ const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFro
 
 async function body(req: Request): Promise<Record<string, unknown> | null> {
   if (req.method !== "POST") return null;
+  // Bound what is buffered before parsing; the largest legitimate body is a
+  // revocation list plus a little framing.
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return null;
   try {
-    const b = await req.json();
+    const text = await req.text();
+    if (text.length > MAX_BODY_BYTES) return null;
+    const b = JSON.parse(text);
     return b && typeof b === "object" && !Array.isArray(b) ? (b as Record<string, unknown>) : null;
   } catch {
     return null;

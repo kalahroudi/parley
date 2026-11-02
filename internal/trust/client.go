@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
 	"github.com/kalahroudi/parley/internal/revocation"
@@ -24,6 +25,16 @@ import (
 
 // maxResponse bounds what is read from the gateway.
 const maxResponse = 1 << 20
+
+// ErrTooLarge means the gateway's reply exceeded maxResponse.
+var ErrTooLarge = errors.New("trust: gateway reply too large")
+
+// requestTimeout bounds one call when the caller supplies no HTTP client.
+const requestTimeout = 30 * time.Second
+
+// defaultHTTP has a timeout, unlike http.DefaultClient, so a stalled gateway
+// cannot hang the daemon.
+var defaultHTTP = &http.Client{Timeout: requestTimeout}
 
 // ErrNotFound is returned when the gateway has no such record (HTTP 404).
 var ErrNotFound = errors.New("trust: not found at the gateway")
@@ -69,16 +80,19 @@ func (c *Client) post(ctx context.Context, path string, in, out any) error {
 	}
 	h := c.HTTP
 	if h == nil {
-		h = http.DefaultClient
+		h = defaultHTTP
 	}
 	resp, err := h.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxResponse {
+		return ErrTooLarge
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:

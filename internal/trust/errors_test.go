@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -203,4 +204,47 @@ func TestRunRefresh(t *testing.T) {
 	}
 	// After cancel, a failing refresh is not reported as an error.
 	d.RunRefresh(ctx, time.Hour, func() time.Time { return t0 }, func(error) { t.Fatal("reported after cancel") })
+}
+
+func TestClientBoundsReplyAndTimeout(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"pad":"` + strings.Repeat("x", maxResponse) + `"}`))
+	}))
+	defer big.Close()
+	if _, err := (&Client{BaseURL: big.URL}).EnrollmentStatus(context.Background(), "t", "i", "p"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversize reply: %v", err)
+	}
+	if defaultHTTP.Timeout <= 0 {
+		t.Fatal("default HTTP client has no timeout")
+	}
+}
+
+func TestZeroIntervalsDoNotSpin(t *testing.T) {
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/enroll/request" {
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"i","poll":"p"}`))
+			return
+		}
+		polls.Add(1)
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	}))
+	defer srv.Close()
+	d := &Daemon{Client: &Client{BaseURL: srv.URL}, Tenant: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, _ = d.Enroll(ctx, "n", newKey(t), 0, func() time.Time { return t0 })
+	if n := polls.Load(); n > 2 {
+		t.Fatalf("zero poll interval spun: %d polls in 300ms", n)
+	}
+	// A zero refresh interval and a nil error callback must neither panic nor spin.
+	g, _ := revocation.NewGuard(newKey(t), "t", nil, t0)
+	d2 := &Daemon{Guard: g, Client: &Client{BaseURL: srv.URL}, Tenant: "t"}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	d2.RunRefresh(ctx2, 0, func() time.Time { return t0 }, nil)
+	if n := polls.Load(); n > 4 {
+		t.Fatalf("zero refresh interval spun: %d requests", n)
+	}
 }
