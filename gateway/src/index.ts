@@ -3,11 +3,14 @@
 
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { Device } from "./device";
+import { handleEnroll } from "./enroll";
+import { Tenant } from "./tenant";
 
-export { Device };
+export { Device, Tenant };
 
 export interface Env extends AuthEnv {
   DEVICE: DurableObjectNamespace<Device>;
+  TENANT: DurableObjectNamespace<Tenant>;
   // "1" enables the development bearer token `dev:<tenant>:<device>`. Never set in production.
   DEV_AUTH?: string;
 }
@@ -34,6 +37,7 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
     if (pathname.startsWith("/auth/")) return handleAuth(request, env);
+    if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/")) return handleEnroll(request, env);
     if (pathname !== "/v1/connect") return new Response("not found", { status: 404 });
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
