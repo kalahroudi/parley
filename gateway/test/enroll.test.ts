@@ -92,7 +92,7 @@ describe("interactive enrollment and the approval queue", () => {
     for (let i = 0; i < MAX_PENDING; i++) await stub.request({ user: `u${i}@example.test`, name: "d", signing_key: key() });
     const r = await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user());
     expect(r.status).toBe(429);
-  });
+  }, 60_000); // MAX_PENDING sequential storage writes; slow disks (Windows CI) need far more than the 5s default
 
   it("drops requests that outlive their TTL", async () => {
     const x = fresh();
