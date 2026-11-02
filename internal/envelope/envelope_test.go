@@ -346,7 +346,7 @@ type vectorFile struct {
 	Vectors            []vector `json:"vectors"`
 }
 
-func vectorKeys(t *testing.T) (ed25519.PrivateKey, []byte, []byte) {
+func vectorKeys(t testing.TB) (ed25519.PrivateKey, []byte, []byte) {
 	t.Helper()
 	sign := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
 	k, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x22}, KeySize))
@@ -499,4 +499,148 @@ func TestSubSecondExpiryRejected(t *testing.T) {
 	if _, err := Unmarshal(m.Marshal()); err != nil {
 		t.Fatalf("sealed message does not round-trip: %v", err)
 	}
+}
+
+func TestFieldAndPayloadLimits(t *testing.T) {
+	k := newKeys(t)
+	h := taskHeader()
+	h.ContextID = string(make([]byte, MaxFieldSize+1))
+	if _, err := Seal(k.sign, k.prekeyPub, h, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversize field: %v", err)
+	}
+	h = taskHeader()
+	h.Prekey = make([]byte, MaxFieldSize+1)
+	if _, err := DecodeHeader(h.Encode()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversize prekey decoded: %v", err)
+	}
+	if _, err := Seal(k.sign, k.prekeyPub, taskHeader(), make([]byte, MaxCiphertextSize)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversize plaintext: %v", err)
+	}
+	m, err := Seal(k.sign, k.prekeyPub, taskHeader(), make([]byte, MaxCiphertextSize-ciphertextOverhead))
+	if err != nil {
+		t.Fatalf("largest payload: %v", err)
+	}
+	if _, err := Unmarshal(m.Marshal()); err != nil {
+		t.Fatal(err)
+	}
+	m.Ciphertext = append(m.Ciphertext, 0)
+	if _, err := Unmarshal(m.Marshal()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("oversize ciphertext unmarshalled: %v", err)
+	}
+	if err := m.Verify(k.sign.Public().(ed25519.PublicKey)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversize ciphertext verified: %v", err)
+	}
+}
+
+func TestVerifyRejectsBadEncLength(t *testing.T) {
+	k := newKeys(t)
+	m, _ := Seal(k.sign, k.prekeyPub, taskHeader(), []byte("x"))
+	m.Enc = m.Enc[:KeySize-1]
+	if err := m.Verify(k.sign.Public().(ed25519.PublicKey)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("short enc: %v", err)
+	}
+}
+
+// X25519 points of low order give an all-zero DH output; they must be refused
+// when sealing to them and when used as an encapsulated key.
+func TestLowOrderPoints(t *testing.T) {
+	k := newKeys(t)
+	pub := k.sign.Public().(ed25519.PublicKey)
+	zero := make([]byte, KeySize)
+	one := make([]byte, KeySize)
+	one[0] = 1
+	for name, p := range map[string][]byte{"zero": zero, "one": one} {
+		if _, err := Seal(k.sign, p, taskHeader(), []byte("x")); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s recipient: %v", name, err)
+		}
+		m, err := Seal(k.sign, k.prekeyPub, taskHeader(), []byte("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Enc = p
+		m.Signature = ed25519.Sign(k.sign, m.Transcript())
+		if err := m.Verify(pub); err != nil {
+			t.Fatal(err)
+		}
+		if pt, err := m.Open(k.prekeyPriv); !errors.Is(err, ErrOpen) || pt != nil {
+			t.Fatalf("%s enc opened: %x %v", name, pt, err)
+		}
+	}
+	if _, err := Seal(k.sign, []byte{1}, taskHeader(), nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("short recipient: %v", err)
+	}
+}
+
+func TestVerifyAndOpen(t *testing.T) {
+	k := newKeys(t)
+	pub := k.sign.Public().(ed25519.PublicKey)
+	m, err := Seal(k.sign, k.prekeyPub, taskHeader(), []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt, err := m.VerifyAndOpen(pub, k.prekeyPriv); err != nil || string(pt) != "hello" {
+		t.Fatalf("%q %v", pt, err)
+	}
+	other := newKeys(t)
+	// Wrong sender: rejected before any decryption.
+	if pt, err := m.VerifyAndOpen(other.sign.Public().(ed25519.PublicKey), k.prekeyPriv); !errors.Is(err, ErrBadSignature) || pt != nil {
+		t.Fatalf("wrong sender: %q %v", pt, err)
+	}
+	// Right sender, wrong recipient key: signature fine, open fails, no plaintext.
+	if pt, err := m.VerifyAndOpen(pub, other.prekeyPriv); !errors.Is(err, ErrOpen) || pt != nil {
+		t.Fatalf("wrong recipient: %q %v", pt, err)
+	}
+	// Valid ciphertext re-signed under a tampered header never opens.
+	bad := *m
+	bad.Header.ContextID = "other"
+	if pt, err := bad.Open(k.prekeyPriv); err == nil || pt != nil {
+		t.Fatalf("header swap opened: %q %v", pt, err)
+	}
+}
+
+// FuzzMessage feeds arbitrary bytes through the whole receive surface. Nothing
+// may panic, and plaintext may come back only from a message whose signature
+// verifies and whose encoding round-trips exactly.
+func FuzzMessage(f *testing.F) {
+	sign, priv, pub := vectorKeys(f)
+	spub := sign.Public().(ed25519.PublicKey)
+	raw, err := os.ReadFile("testdata/vectors.json")
+	if err != nil {
+		f.Fatal(err)
+	}
+	var vf vectorFile
+	if err := json.Unmarshal(raw, &vf); err != nil {
+		f.Fatal(err)
+	}
+	for _, v := range vf.Vectors {
+		b, _ := hex.DecodeString(v.Message)
+		f.Add(b)
+	}
+	for _, h := range []Header{taskHeader(), replyHeader()} {
+		m, err := Seal(sign, pub, h, []byte("seed"))
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(m.Marshal())
+		f.Add(h.Encode())
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		if h, err := DecodeHeader(b); err == nil && !bytes.Equal(h.Encode(), b) {
+			t.Fatalf("header does not re-encode to its input")
+		}
+		m, err := Unmarshal(b)
+		if err != nil {
+			return
+		}
+		if !bytes.Equal(m.Marshal(), b) {
+			t.Fatalf("message does not re-marshal to its input")
+		}
+		pt, err := m.VerifyAndOpen(spub, priv)
+		if err != nil && pt != nil {
+			t.Fatal("plaintext returned with an error")
+		}
+		if pt2, err2 := m.Open(priv); err2 != nil && pt2 != nil {
+			t.Fatal("Open returned plaintext with an error")
+		}
+	})
 }

@@ -30,8 +30,16 @@ const (
 	aeadID uint16 = 0x0003
 
 	TaskIDSize = 16
-	KeySize    = 32
-	HashSize   = sha256.Size
+	// ciphertextOverhead is the ChaCha20-Poly1305 tag.
+	ciphertextOverhead = 16
+	KeySize            = 32
+	HashSize           = sha256.Size
+
+	// MaxFieldSize bounds every variable-length header field and MaxCiphertextSize
+	// the sealed payload, so no length prefix can wrap its uint32 and a hostile
+	// frame cannot make us buffer without limit.
+	MaxFieldSize      = 1 << 16
+	MaxCiphertextSize = 1 << 24
 )
 
 var (
@@ -80,6 +88,12 @@ func (h Header) validate() error {
 		h.IssuedAt.IsZero() || h.Expiry.Unix() <= h.IssuedAt.Unix() ||
 		(len(h.RPK) != 0 && len(h.RPK) != KeySize) {
 		return ErrInvalid
+	}
+	for _, f := range []int{len(h.Tenant), len(h.SenderDevice), len(h.SenderKeyID), len(h.TargetDevice),
+		len(h.PrekeyID), len(h.ContextID), len(h.Prekey)} {
+		if f > MaxFieldSize {
+			return ErrInvalid
+		}
 	}
 	if h.Type == TypeTask {
 		if h.Seq != 0 || len(h.RPK) != KeySize || len(h.PrevHash) != 0 || len(h.Prekey) == 0 {
@@ -244,25 +258,26 @@ func (m *Message) Transcript() []byte {
 // Seal encrypts plaintext to the recipient's one-time prekey (32-byte X25519
 // public key) and signs the transcript with the sender's signing key.
 func Seal(sign ed25519.PrivateKey, recipient []byte, h Header, plaintext []byte) (*Message, error) {
-	if err := h.validate(); err != nil || len(sign) != ed25519.PrivateKeySize {
+	if err := h.validate(); err != nil || len(sign) != ed25519.PrivateKeySize ||
+		len(plaintext) > MaxCiphertextSize-ciphertextOverhead {
 		return nil, ErrInvalid
 	}
-	ecpub, err := ecdh.X25519().NewPublicKey(recipient)
+	pk, err := hpke.DHKEM(ecdh.X25519()).NewPublicKey(recipient)
 	if err != nil {
 		return nil, ErrInvalid
-	}
-	pk, err := hpke.NewDHKEMPublicKey(ecpub)
-	if err != nil {
-		return nil, err
 	}
 	hash := h.Hash()
+	// A low-order recipient point makes the DH output all zero and NewSender
+	// fail; that is bad input, not an internal error. Sealing to a fresh sender
+	// cannot otherwise fail (the nonce counter starts at zero), so the Seal
+	// error shares this branch rather than adding one no test can reach.
+	var ct []byte
 	enc, s, err := hpke.NewSender(pk, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), hash[:])
-	if err != nil {
-		return nil, err
+	if err == nil {
+		ct, err = s.Seal(hash[:], plaintext)
 	}
-	ct, err := s.Seal(hash[:], plaintext)
 	if err != nil {
-		return nil, err
+		return nil, ErrInvalid
 	}
 	m := &Message{Header: h, Enc: enc, Ciphertext: ct}
 	m.Signature = ed25519.Sign(sign, m.Transcript())
@@ -272,8 +287,13 @@ func Seal(sign ed25519.PrivateKey, recipient []byte, h Header, plaintext []byte)
 // Verify checks the sender's signature over the transcript. The caller is
 // responsible for having verified the sender's binding and for matching
 // header fields (tenant, target, direction) against its own state.
+//
+// Sequence numbers, the previous-message hash (Header.Hash of the prior message
+// in the task), task id and expiry are checked by the receive path against its
+// replay table and clock, not here.
 func (m *Message) Verify(sender ed25519.PublicKey) error {
-	if len(sender) != ed25519.PublicKeySize || m.Header.validate() != nil {
+	if len(sender) != ed25519.PublicKeySize || m.Header.validate() != nil ||
+		len(m.Enc) != KeySize || len(m.Ciphertext) > MaxCiphertextSize {
 		return ErrInvalid
 	}
 	if !ed25519.Verify(sender, m.Transcript(), m.Signature) {
@@ -282,9 +302,23 @@ func (m *Message) Verify(sender ed25519.PublicKey) error {
 	return nil
 }
 
-// Open decrypts with the recipient's X25519 private key (32 bytes). It only
-// does the AEAD open; ordering of signature checks and key erasure belongs to
-// the receive path.
+// VerifyAndOpen checks the signature and only then decrypts, so unauthenticated
+// ciphertext is never opened. Plaintext is returned only with a nil error.
+// Erasing the one-time prekey afterwards is the caller's job (Go gives no
+// zeroing guarantee for the key objects built here, so erasure of the caller's
+// raw scalar is best effort).
+func (m *Message) VerifyAndOpen(sender ed25519.PublicKey, recipient []byte) ([]byte, error) {
+	if err := m.Verify(sender); err != nil {
+		return nil, err
+	}
+	return m.Open(recipient)
+}
+
+// Open decrypts with the recipient's X25519 private key (32 bytes). It does
+// not check the signature: the receive path opens first so that junk frames
+// cannot burn a prekey, then verifies before using or erasing anything. Use
+// VerifyAndOpen when no such ordering is needed. Plaintext is returned only
+// with a nil error.
 func (m *Message) Open(recipient []byte) ([]byte, error) {
 	if m.Header.validate() != nil {
 		return nil, ErrInvalid
@@ -320,7 +354,8 @@ func (m *Message) Marshal() []byte {
 func Unmarshal(p []byte) (*Message, error) {
 	r := reader{b: p}
 	hb, enc, ct, sig := r.field(), r.bytes(), r.bytes(), r.bytes()
-	if r.err != nil || len(r.b) != 0 || len(enc) != KeySize || len(sig) != ed25519.SignatureSize {
+	if r.err != nil || len(r.b) != 0 || len(enc) != KeySize || len(ct) > MaxCiphertextSize ||
+		len(sig) != ed25519.SignatureSize {
 		return nil, ErrMalformed
 	}
 	h, err := DecodeHeader(hb)

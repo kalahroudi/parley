@@ -44,6 +44,18 @@ jobs:
         run: go vet ./...
       - name: Go test
         run: go test -race ./...
+      # Tier 1 (plan.md, coverage policy): the envelope crypto module must stay at
+      # 100% of statements; the fuzz step is a short smoke run over the committed
+      # seed corpus (internal/envelope/testdata/fuzz).
+      - name: Envelope coverage gate (tier 1)
+        shell: bash
+        run: |
+          go test -coverprofile=envelope.cover ./internal/envelope
+          pct=$(go tool cover -func=envelope.cover | awk '/^total:/ {print $3}')
+          echo "envelope coverage: $pct"
+          [ "$pct" = "100.0%" ]
+      - name: Envelope fuzz smoke
+        run: go test ./internal/envelope -run '^$' -fuzz FuzzMessage -fuzztime 20s
       - name: Gateway install
         working-directory: gateway
         run: npm ci
