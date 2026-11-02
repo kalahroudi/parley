@@ -89,7 +89,10 @@ func (c *Client) Events() <-chan Event { return c.events }
 // Send queues a frame. It is retransmitted across reconnects until the gateway
 // acknowledges it. A restart of the daemon loses queued frames by design.
 func (c *Client) Send(body string) error {
-	if len(body) > maxFrameBytes-1024 {
+	// Size the encoded frame: JSON escaping can inflate a body well past its raw
+	// length, and a frame the gateway rejects would be retransmitted forever.
+	enc, err := json.Marshal(map[string]any{"t": "frame", "seq": uint64(1<<63 - 1), "body": body})
+	if err != nil || len(enc) > maxFrameBytes {
 		return errors.New("tunnel: frame too large")
 	}
 	c.mu.Lock()

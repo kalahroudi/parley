@@ -344,6 +344,10 @@ func TestSendAfterRunReturnsAndLimits(t *testing.T) {
 	if err := c.Send(strings.Repeat("x", maxFrameBytes)); err == nil {
 		t.Fatal("oversized frame accepted")
 	}
+	// Under the raw limit, but quotes double in JSON and push it over.
+	if err := c.Send(strings.Repeat(`"`, maxFrameBytes/2+1)); err == nil {
+		t.Fatal("frame that exceeds the limit once encoded accepted")
+	}
 	cancel()
 	<-done
 	if err := c.Send("late"); err != ErrClosed {
