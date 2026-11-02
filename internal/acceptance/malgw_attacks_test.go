@@ -569,21 +569,17 @@ func TestReusedPrekeys(t *testing.T) {
 	t.Run("a prekey cached past its expiry", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
 		alice := w.dev("alice")
-		var cached *prekey.Signed
-		w.gw.onPrekey = func(_, _ string, honest *prekey.Signed) (*prekey.Signed, error) {
-			if cached == nil {
-				cached = honest
-			}
-			return cached, nil
-		}
-		if _, _, err := alice.fetchPrekey("bob", w.now.Add(taskTTL)); err != nil {
+		tb := alice.trusted["bob"]
+		s, nonce, err := alice.fetchPrekey("bob", w.now.Add(taskTTL))
+		if err != nil {
 			t.Fatal(err)
 		}
+		// A replay of the cached answer to a new request fails on the nonce, so
+		// check expiry with the original nonce: only the clock can reject it.
 		w.now = w.now.Add(2 * time.Hour)
-		_, _, err := alice.fetchPrekey("bob", w.now.Add(taskTTL))
-		if err == nil {
-			t.Fatal("an expired prekey was accepted")
-		}
+		err = prekey.Verify(tb.SigningKey, s, prekey.Expect{Tenant: tenant, DeviceID: "bob", SigningKeyID: keyID(tb.SigningKey),
+			Caller: "alice", Nonce: nonce, BindingVersion: tb.Version, Now: w.now})
+		wantErr(t, err, prekey.ErrExpired)
 	})
 	t.Run("two tasks sealed to one prekey: only the first opens", func(t *testing.T) {
 		w := newWorld(t, "alice", "bob")
