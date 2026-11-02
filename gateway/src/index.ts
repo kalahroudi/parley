@@ -1,11 +1,12 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { Device } from "./device";
 
 export { Device };
 
-export interface Env {
+export interface Env extends AuthEnv {
   DEVICE: DurableObjectNamespace<Device>;
   // "1" enables the development bearer token `dev:<tenant>:<device>`. Never set in production.
   DEV_AUTH?: string;
@@ -18,7 +19,7 @@ interface Identity {
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-// Placeholder until OIDC login and connect tokens land (T102). Fails closed:
+// Placeholder until connect tokens land. Fails closed:
 // without DEV_AUTH every request is unauthenticated.
 function authenticate(request: Request, env: Env): Identity | null {
   if (env.DEV_AUTH !== "1") return null;
@@ -32,6 +33,7 @@ export default {
     // Identifiers travel in the Authorization header and frames, never in the URL.
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
+    if (pathname.startsWith("/auth/")) return handleAuth(request, env);
     if (pathname !== "/v1/connect") return new Response("not found", { status: 404 });
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
