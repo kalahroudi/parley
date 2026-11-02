@@ -12,8 +12,11 @@ const (
 	semNoGPFaultErrorBox  = 0x0002
 )
 
-// disableCoreDumps stops Windows Error Reporting from writing a crash dump.
-func disableCoreDumps() error {
+// hardenSteps are run by Harden in order.
+var hardenSteps = []func() error{stopErrorReporting}
+
+// stopErrorReporting stops Windows Error Reporting from writing a crash dump.
+func stopErrorReporting() error {
 	p := syscall.NewLazyDLL("kernel32.dll").NewProc("SetErrorMode")
 	p.Call(semFailCriticalErrors | semNoGPFaultErrorBox)
 	return nil

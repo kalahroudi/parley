@@ -6,6 +6,7 @@
 package prekey
 
 import (
+	"fmt"
 	"syscall"
 	"unsafe"
 )
@@ -24,21 +25,26 @@ const (
 	pageReadWrite    = 0x04
 )
 
-// allocLocked commits n bytes outside the Go heap and pins them in RAM.
-func allocLocked(n int) ([]byte, error) {
+// sysMap commits n bytes outside the Go heap.
+func sysMap(n int) ([]byte, error) {
 	p, _, err := procVirtualAlloc.Call(0, uintptr(n), memCommitReserve, pageReadWrite)
 	if p == 0 {
-		return nil, err
-	}
-	if r, _, err := procVirtualLock.Call(p, uintptr(n)); r == 0 {
-		procVirtualFree.Call(p, 0, memRelease)
-		return nil, err
+		return nil, fmt.Errorf("VirtualAlloc: %w", err)
 	}
 	// p is memory VirtualAlloc returned, not a Go pointer; this form keeps go vet quiet.
 	return unsafe.Slice(*(**byte)(unsafe.Pointer(&p)), n), nil
 }
 
-func freeLocked(b []byte) {
+// sysLock pins the region in RAM.
+func sysLock(b []byte) error {
+	if r, _, err := procVirtualLock.Call(uintptr(unsafe.Pointer(&b[0])), uintptr(len(b))); r == 0 {
+		return fmt.Errorf("VirtualLock: %w", err)
+	}
+	return nil
+}
+
+// sysUnmap zeroes, unlocks and frees the region.
+func sysUnmap(b []byte) {
 	clear(b)
 	p := uintptr(unsafe.Pointer(&b[0]))
 	procVirtualUnlock.Call(p, uintptr(len(b)))

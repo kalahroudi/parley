@@ -7,9 +7,9 @@ package prekey
 
 import "syscall"
 
-func disableCoreDumps() error {
-	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
-		return err
-	}
-	return markUndumpable()
-}
+// hardenSteps are run by Harden in order.
+var hardenSteps = []func() error{zeroCoreLimit, markUndumpable}
+
+func zeroCoreLimit() error { return setCoreLimit(&syscall.Rlimit{}) }
+
+func setCoreLimit(l *syscall.Rlimit) error { return syscall.Setrlimit(syscall.RLIMIT_CORE, l) }
