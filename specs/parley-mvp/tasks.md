@@ -19,7 +19,7 @@ Deliverable: repository, CI on three OSes, local harness that boots a gateway an
 - [x] T005 Log-redaction wrapper (ids, states, sizes, timestamps only) with a build test that fails on a leaked payload field
 - [ ] T006 Canary test scaffold
 - [ ] T007 `tests/journeys.md` journey matrix
-- [ ] T008 Acceptance: harness boots; a release build is reproducible and verifiable with the project key; the redaction build test fails on a leaked payload field
+- [x] T008 Acceptance: harness boots; a release build is reproducible and verifiable with the project key; the redaction build test fails on a leaked payload field
 
 ## Phase 1: Tunnel and identity (about 3 weeks)
 
