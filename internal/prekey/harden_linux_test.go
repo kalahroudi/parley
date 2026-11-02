@@ -5,10 +5,7 @@
 
 package prekey
 
-import (
-	"syscall"
-	"testing"
-)
+import "testing"
 
 func TestPrctlAndMadvise(t *testing.T) {
 	if err := prctl(0x7fffffff, 0); err == nil {
@@ -24,8 +21,8 @@ func TestPrctlAndMadvise(t *testing.T) {
 	if err := adviseNoDump(b); err != nil {
 		t.Fatal(err)
 	}
-	syscall.Munmap(b)
-	if err := adviseNoDump(b); err == nil {
+	if err := adviseNoDump(beyondMapping(b)); err == nil {
 		t.Fatal("advice on unmapped memory accepted")
 	}
+	sysUnmap(b)
 }

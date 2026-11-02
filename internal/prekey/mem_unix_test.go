@@ -9,7 +9,14 @@ import (
 	"math"
 	"syscall"
 	"testing"
+	"unsafe"
 )
+
+// beyondMapping returns a slice that starts inside the mapping b and runs far
+// past its end, so the range always includes unmapped addresses. Unlike
+// unmapping b and reusing it, no other thread can map the range meanwhile, so
+// the system calls on it fail deterministically.
+func beyondMapping(b []byte) []byte { return unsafe.Slice(&b[0], math.MaxInt>>20) }
 
 func TestSysMapLockUnmap(t *testing.T) {
 	b, err := sysMap(4096)
@@ -20,15 +27,15 @@ func TestSysMapLockUnmap(t *testing.T) {
 		t.Fatalf("this OS must be able to lock a page: %v", err)
 	}
 	b[0] = 1
-	sysUnmap(b)
 
 	if _, err := sysMap(math.MaxInt); err == nil {
 		t.Fatal("impossible mapping succeeded")
 	}
-	// Locking memory that is not mapped fails and says so.
-	if err := sysLock(b); err == nil {
+	// Locking a range that is not all mapped fails and says so.
+	if err := sysLock(beyondMapping(b)); err == nil {
 		t.Fatal("locking unmapped memory succeeded")
 	}
+	sysUnmap(b)
 }
 
 func TestSetCoreLimitError(t *testing.T) {
