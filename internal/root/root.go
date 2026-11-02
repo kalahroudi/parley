@@ -50,15 +50,18 @@ func Fingerprint(pub ed25519.PublicKey) string {
 // New generates a root key, a recovery code and the encrypted backup.
 func New() (*Root, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if err != nil {
 		return nil, err
 	}
 	raw := make([]byte, recoveryBytes)
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
 	}
 	code := group(enc.EncodeToString(raw))
 	backup, err := seal(code, priv.Seed(), pub)
+	//cover:ignore seal fails only if crypto/rand does, which cannot be injected
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +75,7 @@ func Recover(code string, backup []byte) (ed25519.PrivateKey, error) {
 		return nil, ErrBadRecovery
 	}
 	aead, err := aeadFor(code, b.Salt, b.Rounds)
+	//cover:ignore aeadFor fails only for a bad round count, which was checked against pbkdf2Rounds above
 	if err != nil {
 		return nil, ErrBadRecovery
 	}
@@ -100,14 +104,17 @@ type backupFile struct {
 
 func seal(code string, seed []byte, pub ed25519.PublicKey) ([]byte, error) {
 	salt := make([]byte, saltBytes)
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
 	aead, err := aeadFor(code, salt, pbkdf2Rounds)
+	//cover:ignore aeadFor fails only on an invalid key length or round count, and both are constants here
 	if err != nil {
 		return nil, err
 	}
 	nonce := make([]byte, aead.NonceSize())
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
@@ -120,10 +127,12 @@ func seal(code string, seed []byte, pub ed25519.PublicKey) ([]byte, error) {
 func aeadFor(code string, salt []byte, rounds int) (cipher.AEAD, error) {
 	norm := strings.ToUpper(strings.NewReplacer("-", "", " ", "").Replace(code))
 	key, err := pbkdf2.Key(sha256.New, norm, salt, rounds, 32)
+	//cover:ignore pbkdf2 fails only for a non-positive round count or an oversized key; the callers pass a validated round count and 32
 	if err != nil {
 		return nil, err
 	}
 	blk, err := aes.NewCipher(key)
+	//cover:ignore NewCipher fails only for a key length other than 16, 24 or 32, and the key is always 32 bytes
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,7 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { SELF, env, evictDurableObject } from "cloudflare:test";
+import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Device } from "../src/device";
 
@@ -264,5 +264,17 @@ describe("hibernation and resume", () => {
       await c.closed();
     }
     expect((await stubFor().status()).session?.rx_seq).toBe(total);
+  });
+});
+
+describe("socket teardown", () => {
+  it("closes with 1011 on a socket error", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      await instance.webSocketError(state.getWebSockets()[0]!);
+    });
+    expect((await c.closed())?.code).toBe(1011);
   });
 });

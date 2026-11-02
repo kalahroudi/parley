@@ -1,4 +1,4 @@
-.PHONY: test test-layout test-go test-gateway soak dev
+.PHONY: test test-layout test-go test-gateway soak coverage mutation dev
 
 test: test-layout test-go test-gateway
 
@@ -9,6 +9,19 @@ test-gateway:
 # Windows), so it is not part of `make test`; CI runs it as its own step.
 soak:
 	cd gateway && npm ci && npm run test:soak
+
+# Coverage tiers from the plan (tests/coverage/tiers.json): tier 1 at 100%, tier 2
+# at 95% line and 90% branch, tier 3 at 85%. Go reports statement coverage only,
+# so Go branches are held by `make mutation`. The gateway gates cover the Durable
+# Objects and handlers (vitest, istanbul) and the OIDC modules (node:test), per file.
+coverage:
+	go test -race -coverprofile=cover.out ./...
+	go run ./scripts/covergate -profile cover.out
+	cd gateway && npm ci && npm run test:coverage && npm run test:oidc-coverage
+
+# Mutation testing of the tier 1 Go packages (slow: minutes).
+mutation:
+	scripts/mutation.sh
 
 test-layout:
 	node --test "tests/**/*.test.mjs"

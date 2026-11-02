@@ -42,8 +42,13 @@ jobs:
       # when Go is missing and could let CI pass without running Go tests.
       - name: Go vet
         run: go vet ./...
-      - name: Go test
-        run: go test -race ./...
+      # Tier 1 at 100%, tier 2 at 95%, tier 3 at 85% (tests/coverage/tiers.json); CI
+      # fails if any package falls below its tier. Go reports statements, not branches.
+      - name: Go test with coverage
+        shell: bash # PowerShell splits -coverprofile=cover.out at the dot
+        run: go test -race -coverprofile=cover.out ./...
+      - name: Go coverage gates
+        run: go run ./scripts/covergate -profile cover.out
       # Tier 1 (plan.md, coverage policy): the envelope crypto module must stay at
       # 100% of statements; the fuzz step is a short smoke run over the committed
       # seed corpus (internal/envelope/testdata/fuzz).
@@ -62,9 +67,12 @@ jobs:
       - name: Gateway typecheck
         working-directory: gateway
         run: npm run typecheck
-      - name: Gateway tests
+      - name: Gateway tests with coverage gates
         working-directory: gateway
-        run: npm test
+        run: npm run test:coverage
+      - name: OIDC coverage gates
+        working-directory: gateway
+        run: npm run test:oidc-coverage
       # The soak is run alone, not beside the other test files: it does ~20k durable
       # storage writes, which cost ~25ms each on Windows runners (vs ~0.5ms on Linux and
       # macOS), so beside other files it starves them; its own timeouts are sized for that.
@@ -73,3 +81,7 @@ jobs:
         run: npm run test:soak
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
+      # Slow and Linux-only: mutation testing of the tier 1 packages.
+      - name: Mutation testing (tier 1)
+        if: runner.os == 'Linux'
+        run: scripts/mutation.sh

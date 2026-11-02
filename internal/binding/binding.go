@@ -154,7 +154,7 @@ func (t *Tracker) Accept(s *Signed, now time.Time) error {
 		if err != nil {
 			return err
 		}
-		t.seen = make(map[deviceKey]Record, len(recs)+1)
+		t.seen = make(map[deviceKey]Record, len(recs))
 		for _, r := range recs {
 			t.seen[deviceKey{r.Tenant, r.DeviceID}] = r
 		}

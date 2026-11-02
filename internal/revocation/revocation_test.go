@@ -105,6 +105,11 @@ func TestVerifyRejects(t *testing.T) {
 	if err := Verify(pub, &bad, now); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unsorted: %v", err)
 	}
+	dup := *good
+	dup.Revoked = []string{"a", "a"}
+	if err := Verify(pub, &dup, now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("duplicate: %v", err)
+	}
 	if err := Verify(pub, signed(t, priv, 1, now.Add(MaxSkew+time.Minute)), now); !errors.Is(err, ErrFuture) {
 		t.Fatalf("future: %v", err)
 	}

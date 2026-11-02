@@ -5,6 +5,7 @@ package binding
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -48,6 +48,7 @@ type Locker interface {
 const (
 	storeFormat = 1
 	lockTimeout = 10 * time.Second
+	lockPoll    = 10 * time.Millisecond
 )
 
 type storeFile struct {
@@ -58,15 +59,33 @@ type storeFile struct {
 // FileStore is a Store backed by one JSON file, replaced atomically (temp file,
 // fsync, rename) so a failed write never leaves a truncated file behind.
 type FileStore struct {
-	path   string
-	rename func(oldpath, newpath string) error // replaceable in tests
+	path string
+	// Seams for tests: each stands in for an OS call that cannot fail on demand.
+	rename  func(oldpath, newpath string) error
+	marshal func(any) ([]byte, error)
+	create  func(dir, pattern string) (tempFile, error)
+	syncDir func(dir string) error
+	try     func(*os.File) (bool, error)
 
 	lockTimeout time.Duration
 }
 
+// tempFile is the part of *os.File that Save uses.
+type tempFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+func createTemp(dir, pattern string) (tempFile, error) { return os.CreateTemp(dir, pattern) } // created 0600
+
 // NewFileStore returns a store at path. The parent directory must exist.
 func NewFileStore(path string) *FileStore {
-	return &FileStore{path: path, rename: os.Rename, lockTimeout: lockTimeout}
+	return &FileStore{
+		path: path, rename: os.Rename, marshal: json.Marshal, create: createTemp, syncDir: syncDir,
+		try: tryLock, lockTimeout: lockTimeout,
+	}
 }
 
 // Lock takes an exclusive OS lock (flock, LockFileEx) on a sidecar file next to
@@ -80,25 +99,19 @@ func (f *FileStore) Lock() (func() error, error) {
 	}
 	deadline := time.Now().Add(f.lockTimeout)
 	for {
-		ok, err := tryLock(lf)
+		ok, err := f.try(lf)
 		if err != nil {
 			lf.Close()
 			return nil, fmt.Errorf("%w: lock: %v", ErrStore, err)
 		}
 		if ok {
-			return func() error {
-				uerr := unlock(lf)
-				if cerr := lf.Close(); uerr == nil {
-					uerr = cerr
-				}
-				return uerr
-			}, nil
+			return func() error { return errors.Join(unlock(lf), lf.Close()) }, nil
 		}
 		if !time.Now().Before(deadline) {
 			lf.Close()
 			return nil, fmt.Errorf("%w: timed out waiting for the store lock", ErrStore)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(lockPoll)
 	}
 }
 
@@ -135,18 +148,18 @@ func (f *FileStore) Load() ([]Record, error) {
 
 func (f *FileStore) Save(recs []Record) (err error) {
 	recs = append([]Record(nil), recs...)
-	sort.Slice(recs, func(i, j int) bool {
-		if recs[i].Tenant != recs[j].Tenant {
-			return recs[i].Tenant < recs[j].Tenant
+	slices.SortFunc(recs, func(a, b Record) int {
+		if c := cmp.Compare(a.Tenant, b.Tenant); c != 0 {
+			return c
 		}
-		return recs[i].DeviceID < recs[j].DeviceID
+		return cmp.Compare(a.DeviceID, b.DeviceID)
 	})
-	data, err := json.Marshal(storeFile{Format: storeFormat, Records: recs})
+	data, err := f.marshal(storeFile{Format: storeFormat, Records: recs})
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStore, err)
 	}
 	dir := filepath.Dir(f.path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(f.path)+".tmp*") // created 0600
+	tmp, err := f.create(dir, filepath.Base(f.path)+".tmp*")
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStore, err)
 	}
@@ -169,16 +182,6 @@ func (f *FileStore) Save(recs []Record) (err error) {
 	if err = f.rename(tmp.Name(), f.path); err != nil {
 		return err
 	}
-	// Make the rename itself durable. Windows cannot open or sync directories.
-	if runtime.GOOS != "windows" {
-		d, derr := os.Open(dir)
-		if derr != nil {
-			return derr
-		}
-		defer d.Close()
-		if err = d.Sync(); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Make the rename itself durable.
+	return f.syncDir(dir)
 }

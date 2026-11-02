@@ -36,9 +36,11 @@ func SBOM(version string, paths []string) ([]byte, error) {
 		for _, d := range bi.Deps {
 			// A versioned replacement is what was actually compiled in; a
 			// local-path replacement has no version, so keep the original.
+			//cover:ignore needs a binary built with a versioned module replacement, which a unit test cannot produce offline
 			if d.Replace != nil && d.Replace.Version != "" {
 				d = d.Replace
 			}
+			//cover:ignore needs a dependency without a version, which only a local-path build produces
 			if d.Version == "" || d.Version == "(devel)" {
 				return nil, fmt.Errorf("sbom: %s: dependency %s has no version", p, d.Path)
 			}
@@ -61,6 +63,7 @@ func SBOM(version string, paths []string) ([]byte, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetIndent("", "  ")
+	//cover:ignore doc holds only strings and ints, which always encode
 	if err := enc.Encode(doc); err != nil {
 		return nil, err
 	}

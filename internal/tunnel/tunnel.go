@@ -343,6 +343,7 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idle time.D
 
 func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
 	b, err := json.Marshal(v)
+	//cover:ignore every value passed here is a map of strings and integers, which always marshals
 	if err != nil {
 		return err
 	}

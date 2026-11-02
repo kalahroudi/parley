@@ -219,3 +219,58 @@ func TestMinisignInterop(t *testing.T) {
 		t.Fatalf("verify minisign signature: %q %v", c, err)
 	}
 }
+
+// Signature files that are well formed up to one field are rejected at that field.
+func TestVerifyRejectsEachField(t *testing.T) {
+	sk, pk, _ := GenerateKey()
+	sig, _ := sk.Sign([]byte("m"), "c")
+	lines := strings.Split(string(sig), "\n")
+	raw, _ := base64.StdEncoding.DecodeString(lines[1])
+	with := func(mod func(raw []byte, lines []string) []byte) []byte {
+		l := append([]string(nil), lines...)
+		r := mod(append([]byte(nil), raw...), l)
+		l[1] = base64.StdEncoding.EncodeToString(r)
+		return []byte(strings.Join(l, "\n"))
+	}
+	cases := map[string][]byte{
+		"wrong algorithm": with(func(r []byte, _ []string) []byte { r[0] = 'X'; return r }),
+		"wrong key id":    with(func(r []byte, _ []string) []byte { r[2] ^= 1; return r }),
+		"short global":    with(func(r []byte, l []string) []byte { l[3] = base64.StdEncoding.EncodeToString([]byte("short")); return r }),
+		"bad global b64":  with(func(r []byte, l []string) []byte { l[3] = "!!!"; return r }),
+	}
+	for name, s := range cases {
+		if _, err := pk.Verify([]byte("m"), s); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestParseSecretKeyRejectsBadIterationCount(t *testing.T) {
+	sk, _, _ := GenerateKey()
+	enc, _ := sk.MarshalEncrypted("pw")
+	lines := strings.Split(string(enc), "\n")
+	raw, _ := base64.StdEncoding.DecodeString(lines[1])
+	for _, iter := range []uint32{0, maxKDFIterations + 1} {
+		r := append([]byte(nil), raw...)
+		r[saltLen], r[saltLen+1], r[saltLen+2], r[saltLen+3] = byte(iter>>24), byte(iter>>16), byte(iter>>8), byte(iter)
+		file := lines[0] + "\n" + base64.StdEncoding.EncodeToString(r) + "\n"
+		if _, err := ParseSecretKey([]byte(file), "pw"); err == nil || !strings.Contains(err.Error(), "iteration") {
+			t.Errorf("iteration %d: %v", iter, err)
+		}
+	}
+}
+
+// Blank lines in a SHA256SUMS body are skipped, and a name that is a directory
+// (open succeeds, read fails) is an error rather than a hash of nothing.
+func TestVerifyChecksumsBlankLinesAndUnreadableEntries(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a"), []byte("A"), 0o644)
+	sums, _ := Checksums(dir, []string{"a"})
+	if err := VerifyChecksums(dir, append([]byte("\n"), sums...)); err != nil {
+		t.Fatal(err)
+	}
+	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
+	if err := VerifyChecksums(dir, []byte(strings.Repeat("0", 64)+"  sub\n")); err == nil {
+		t.Fatal("directory accepted")
+	}
+}

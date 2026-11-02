@@ -94,7 +94,7 @@ test("CI runs on macOS, Linux and Windows and runs Go directly", () => {
   }
   assert.match(ci, /^\s*fail-fast:\s*false\s*$/m, "one OS failing must not hide the others");
   assert.match(ci, /^\s*run:\s*go vet \.\/\.\.\.\s*$/m, "CI must run go vet");
-  assert.match(ci, /^\s*run:\s*go test -race \.\/\.\.\.\s*$/m, "CI must run Go tests directly");
+  assert.match(ci, /^\s*run:\s*go test -race\b.*\.\/\.\.\.\s*$/m, "CI must run Go tests directly");
   assert.match(ci, /^\s*run:\s*node --test\b/m, "CI must run the layout tests");
   assert.ok(!/^\s*run:.*\bmake\b/m.test(ci), "CI must not use the skipping make target");
 });

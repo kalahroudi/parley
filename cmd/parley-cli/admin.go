@@ -31,6 +31,7 @@ func adminInit(args []string, out, errw io.Writer, store root.Store, defaultBack
 		return 1
 	}
 	r, err := root.New()
+	//cover:ignore root.New fails only if crypto/rand does, which cannot be injected
 	if err != nil {
 		fmt.Fprintln(errw, "error:", err)
 		return 1

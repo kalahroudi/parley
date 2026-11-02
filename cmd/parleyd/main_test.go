@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -34,5 +36,21 @@ func TestRunBlocksUntilCanceled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not return after cancel")
+	}
+}
+
+func TestExecute(t *testing.T) {
+	var out, errw bytes.Buffer
+	ctx := context.Background()
+	ok := func(context.Context) error { return nil }
+	if code := execute(ctx, []string{"--version"}, &out, &errw, func(context.Context) error { t.Fatal("ran the daemon for --version"); return nil }); code != 0 || out.String() != "parleyd "+version+"\n" {
+		t.Fatalf("--version: %d %q", code, out.String())
+	}
+	if code := execute(ctx, nil, &out, &errw, ok); code != 0 {
+		t.Fatalf("clean run: %d", code)
+	}
+	errw.Reset()
+	if code := execute(ctx, nil, &out, &errw, func(context.Context) error { return errors.New("boom") }); code != 1 || errw.String() != "parleyd: boom\n" {
+		t.Fatalf("failing run: %d %q", code, errw.String())
 	}
 }

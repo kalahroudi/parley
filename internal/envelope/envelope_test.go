@@ -523,6 +523,20 @@ func TestFieldAndPayloadLimits(t *testing.T) {
 	if _, err := Unmarshal(m.Marshal()); err != nil {
 		t.Fatal(err)
 	}
+	// The limits are inclusive: the largest ciphertext and the longest field are valid.
+	if err := m.Verify(k.sign.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("largest ciphertext rejected by Verify: %v", err)
+	}
+	h = taskHeader()
+	h.ContextID = string(bytes.Repeat([]byte{'c'}, MaxFieldSize))
+	if _, err := Seal(k.sign, k.prekeyPub, h, nil); err != nil {
+		t.Fatalf("longest field rejected: %v", err)
+	}
+	h = replyHeader()
+	h.Type = TypeCancel // the last valid message type
+	if _, err := Seal(k.sign, k.prekeyPub, h, nil); err != nil {
+		t.Fatalf("cancel rejected: %v", err)
+	}
 	m.Ciphertext = append(m.Ciphertext, 0)
 	if _, err := Unmarshal(m.Marshal()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("oversize ciphertext unmarshalled: %v", err)

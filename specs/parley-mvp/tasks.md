@@ -34,7 +34,7 @@ Deliverable: two daemons enroll under an admin root and show online; revocation 
 - [x] T107 Acceptance: enroll, approve and revoke; binding rollback rejected; recovery code restores the root; stale revocation list behavior
 - [x] T108 Acceptance: 20 forced reconnects and a deploy during a 10k-message soak lose or duplicate nothing
 - [ ] T109 Real-Cloudflare reality check 1: limits, costs, hibernation timing, deploy-driven disconnects, real Google and Entra logins
-- [ ] T110 Gates: tier 1 at 100%, tier 2 gates met
+- [x] T110 Gates: tier 1 at 100%, tier 2 gates met
 
 ## Phase 2: Secure messaging core (about 2 to 3 weeks)
 

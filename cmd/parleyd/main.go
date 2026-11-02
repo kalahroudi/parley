@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,16 +22,23 @@ func run(ctx context.Context) error {
 	return nil
 }
 
+//cover:ignore main only wires the process (arguments, signals, os.Exit) to execute, which is tested
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Println("parleyd", version)
-		return
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx); err != nil {
-		//logx:allow fatal startup/CLI error for the operator's terminal; no task content exists in this process path
-		fmt.Fprintln(os.Stderr, "parleyd:", err)
-		os.Exit(1)
+	code := execute(ctx, os.Args[1:], os.Stdout, os.Stderr, run)
+	stop()
+	os.Exit(code)
+}
+
+func execute(ctx context.Context, args []string, out, errw io.Writer, runFn func(context.Context) error) int {
+	if len(args) == 1 && args[0] == "--version" {
+		fmt.Fprintln(out, "parleyd", version)
+		return 0
 	}
+	if err := runFn(ctx); err != nil {
+		//logx:allow fatal startup/CLI error for the operator's terminal; no task content exists in this process path
+		fmt.Fprintln(errw, "parleyd:", err)
+		return 1
+	}
+	return 0
 }
