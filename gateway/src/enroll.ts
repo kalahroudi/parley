@@ -57,7 +57,7 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
     }
     if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
     const r = await tenantStub(env, tenant).request({ user, token, name: str(b.name) ?? "", signing_key: str(b.signing_key) ?? "" });
-    if ("error" in r) return json(r.error === "bad_token" ? 401 : r.error === "queue_full" ? 429 : 400, { error: r.error });
+    if ("error" in r) return json(r.error === "bad_token" ? 401 : r.error === "queue_full" || r.error === "owner_full" ? 429 : 400, { error: r.error });
     return json(202, r);
   }
 

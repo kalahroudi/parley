@@ -116,7 +116,7 @@ func TestEncodingUnambiguous(t *testing.T) {
 
 func TestTrackerRollback(t *testing.T) {
 	rpub, rpriv := keys(t)
-	tr := NewTracker(rpub)
+	tr, _ := NewTracker(rpub, nil)
 	v2, _ := Sign(rpriv, sample(t, 2))
 	v1 := *v2
 	v1.Version = 1
@@ -155,6 +155,36 @@ func TestTrackerRollback(t *testing.T) {
 	}
 	if err := tr.Accept(v3, now); err != nil {
 		t.Fatal("version advanced by rejected binding:", err)
+	}
+}
+
+func TestTrackerSameVersionDifferentBinding(t *testing.T) {
+	rpub, rpriv := keys(t)
+	tr, _ := NewTracker(rpub, nil)
+	a, _ := Sign(rpriv, sample(t, 1))
+	b, _ := Sign(rpriv, sample(t, 1)) // same device, different signing key
+	if err := tr.Accept(a, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Accept(b, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTrackerKeyNoCollision(t *testing.T) {
+	rpub, rpriv := keys(t)
+	tr, _ := NewTracker(rpub, nil)
+	x := sample(t, 5)
+	x.Tenant, x.DeviceID = "a\x00b", "c"
+	y := sample(t, 1)
+	y.Tenant, y.DeviceID = "a", "b\x00c"
+	sx, _ := Sign(rpriv, x)
+	sy, _ := Sign(rpriv, y)
+	if err := tr.Accept(sx, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Accept(sy, now); err != nil {
+		t.Fatal("distinct device treated as rollback:", err)
 	}
 }
 

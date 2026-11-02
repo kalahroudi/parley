@@ -1,9 +1,9 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { SELF, env } from "cloudflare:test";
+import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { REQUEST_TTL_MS, MAX_PENDING, MAX_PENDING_PER_OWNER } from "../src/tenant";
+import { REQUEST_TTL_MS, MAX_PENDING, MAX_PENDING_PER_OWNER, DECIDED_RETENTION_MS } from "../src/tenant";
 
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 const post = (path: string, body: unknown, auth?: string) =>
@@ -70,6 +70,13 @@ describe("interactive enrollment and the approval queue", () => {
     }
   });
 
+  it("stores the signing key in canonical base64", async () => {
+    const x = fresh();
+    const sk = key();
+    await post("/v1/enroll/request", { name: "d", signing_key: ` ${sk.slice(0, 20)}\n${sk.slice(20)} ` }, x.user());
+    expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending[0].signing_key).toBe(sk);
+  });
+
   it("keeps tenants apart", async () => {
     const a = fresh();
     const b = fresh();
@@ -87,13 +94,6 @@ describe("interactive enrollment and the approval queue", () => {
     expect(r.status).toBe(429);
   });
 
-  it("caps pending requests per owner so one user cannot fill the queue", async () => {
-    const x = fresh();
-    for (let i = 0; i < MAX_PENDING_PER_OWNER; i++) expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user())).status).toBe(202);
-    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user())).status).toBe(429);
-    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user("bob@example.test"))).status).toBe(202);
-  });
-
   it("drops requests that outlive their TTL", async () => {
     const x = fresh();
     const { id, poll } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user()));
@@ -106,6 +106,71 @@ describe("interactive enrollment and the approval queue", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("limits, validation and retention", () => {
+  const storageKeys = (t: string) =>
+    runInDurableObject(env.TENANT.get(env.TENANT.idFromName(t)), async (_i, state) => [...(await state.storage.list()).keys()]);
+  const withTime = async (ms: number, f: () => Promise<void>) => {
+    const { vi } = await import("vitest");
+    vi.useFakeTimers({ now: Date.now() + ms, toFake: ["Date"] });
+    try {
+      await f();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it("caps pending requests per owner without blocking other users", async () => {
+    const x = fresh();
+    for (let i = 0; i < MAX_PENDING_PER_OWNER; i++) expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user())).status).toBe(202);
+    const over = await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user("Alice@Example.test"));
+    expect(over.status).toBe(429);
+    expect(await json(over)).toEqual({ error: "owner_full" });
+    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user("bob@example.test"))).status).toBe(202);
+  });
+
+  it("rejects control, bidi and format characters in names and owners", async () => {
+    const x = fresh();
+    const bad = ["a\nb", "a\tb", "a\u202Eb", "a\u200Bb", "a\u2028b", "a\u00A0b", "a\u0000b", "a\uE000b", "a\uD800b", "   "];
+    for (const name of bad) expect((await post("/v1/enroll/request", { name, signing_key: key() }, x.user())).status, JSON.stringify(name)).toBe(400);
+    // identity headers cannot carry these characters, so go to the Tenant directly
+    const stub = env.TENANT.get(env.TENANT.idFromName(x.t));
+    for (const user of ["a\u202E@example.test", "a\u200B@example.test", "a\n@example.test", ""]) {
+      expect(await stub.request({ user, name: "d", signing_key: key() })).toEqual({ error: "bad_request" });
+    }
+    for (const owner of ["svc\u202Eci", "svc\nci", "x".repeat(255)]) expect((await post("/v1/admin/enrollment-tokens", { owner }, x.admin)).status).toBe(400);
+    expect((await post("/v1/enroll/request", { name: "  my laptop  ", signing_key: key() }, x.user("Alice@Example.test"))).status).toBe(202);
+    const e = (await json(await post("/v1/admin/enrollments", {}, x.admin))).pending[0];
+    expect(e).toMatchObject({ name: "my laptop", owner: "alice@example.test" });
+  });
+
+  it("purges used and expired tokens, and decided records after retention", async () => {
+    const x = fresh();
+    const used = (await json(await post("/v1/admin/enrollment-tokens", { owner: "svc" }, x.admin))).token;
+    await json(await post("/v1/admin/enrollment-tokens", { owner: "svc2" }, x.admin)); // never used
+    const { id: podId } = await json(await post("/v1/enroll/request", { tenant: x.t, token: used, name: "p", signing_key: key() }));
+    // the used token is gone immediately; the unused one stays until it expires
+    expect((await storageKeys(x.t)).filter((k) => k.startsWith("tok:"))).toHaveLength(1);
+    const { id, poll } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user()));
+    await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, x.admin);
+
+    await withTime(25 * 3600_000, async () => {
+      await runDurableObjectAlarm(env.TENANT.get(env.TENANT.idFromName(x.t)));
+      expect((await storageKeys(x.t)).filter((k) => k.startsWith("tok:"))).toHaveLength(0);
+      expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(200);
+    });
+    await withTime(REQUEST_TTL_MS + 1000, async () => {
+      await runDurableObjectAlarm(env.TENANT.get(env.TENANT.idFromName(x.t)));
+      expect(await storageKeys(x.t)).toEqual([`enr:${id}`]); // the stale pending pod request is gone, the decided one is kept
+      expect((await post("/v1/enroll/status", { tenant: x.t, id: podId, poll: "x" })).status).toBe(404);
+    });
+    await withTime(DECIDED_RETENTION_MS + 1000, async () => {
+      await runDurableObjectAlarm(env.TENANT.get(env.TENANT.idFromName(x.t)));
+      expect(await storageKeys(x.t)).toEqual([]);
+      expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(404);
+    });
   });
 });
 
@@ -187,5 +252,12 @@ describe("routing", () => {
     const { default: worker } = await import("../src/index");
     const req = new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } });
     expect((await worker.fetch(req, { ...env, DEV_AUTH: undefined })).status).toBe(401);
+    for (const v of ["0", "true", "", "2", " 1", "yes"]) {
+      const mk = () => new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } });
+      expect((await worker.fetch(mk(), { ...env, DEV_AUTH: v })).status, `DEV_AUTH=${v}`).toBe(401);
+      const u = new Request("https://gw/v1/enroll/request", { method: "POST", body: JSON.stringify({ name: "d", signing_key: key() }), headers: { Authorization: x.user() } });
+      expect((await worker.fetch(u, { ...env, DEV_AUTH: v })).status, `DEV_AUTH=${v}`).toBe(401);
+    }
+    expect((await worker.fetch(new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } }), { ...env, DEV_AUTH: "1" })).status).toBe(200);
   });
 });

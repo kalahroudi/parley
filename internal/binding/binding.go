@@ -8,6 +8,7 @@
 package binding
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
@@ -25,6 +26,7 @@ var (
 	ErrExpired      = errors.New("binding: expired")
 	ErrRollback     = errors.New("binding: version lower than one already seen")
 	ErrInvalid      = errors.New("binding: missing or malformed field")
+	ErrConflict     = errors.New("binding: different binding at a version already seen")
 )
 
 // Binding is the statement the root signs. Encryption keys are not part of it:
@@ -101,29 +103,84 @@ func Verify(root ed25519.PublicKey, s *Signed, now time.Time) error {
 
 // Tracker remembers the highest binding version seen per device and rejects
 // anything lower, so an old (possibly compromised-key) binding cannot be replayed.
+// With a Store the state survives restarts.
 type Tracker struct {
-	root ed25519.PublicKey
-	mu   sync.Mutex
-	seen map[string]uint64 // tenant\x00device -> version
+	root  ed25519.PublicKey
+	store Store
+	mu    sync.Mutex
+	seen  map[deviceKey]Record
 }
 
-// NewTracker pins the root public key.
-func NewTracker(root ed25519.PublicKey) *Tracker {
-	return &Tracker{root: root, seen: map[string]uint64{}}
+type deviceKey struct{ tenant, device string }
+
+// NewTracker pins the root public key and loads previously saved state from
+// store. A nil store keeps state in memory only. It fails if the store cannot
+// be read or is corrupt; callers must not fall back to an empty state.
+func NewTracker(root ed25519.PublicKey, store Store) (*Tracker, error) {
+	t := &Tracker{root: root, store: store, seen: map[deviceKey]Record{}}
+	if store != nil {
+		recs, err := store.Load()
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range recs {
+			t.seen[deviceKey{r.Tenant, r.DeviceID}] = r
+		}
+	}
+	return t, nil
 }
 
-// Accept verifies s and records its version. An equal version is accepted so
-// the same binding can be presented repeatedly.
+// Accept verifies s, durably records its version, and only then returns nil.
+// The identical binding can be presented repeatedly; a different binding at the
+// same version is rejected. If the store cannot be written, s is rejected.
 func (t *Tracker) Accept(s *Signed, now time.Time) error {
 	if err := Verify(t.root, s, now); err != nil {
 		return err
 	}
-	k := s.Tenant + "\x00" + s.DeviceID
+	k := deviceKey{s.Tenant, s.DeviceID}
+	rec := Record{Tenant: s.Tenant, DeviceID: s.DeviceID, Version: s.Version, Encoded: s.Encode()}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if v, ok := t.seen[k]; ok && s.Version < v {
-		return ErrRollback
+	if l, ok := t.store.(Locker); ok {
+		// Another process may have recorded bindings since we last looked: hold
+		// the store lock and re-read before judging and writing, so its records
+		// are neither missed nor overwritten.
+		release, err := l.Lock()
+		if err != nil {
+			return err
+		}
+		defer release()
+		recs, err := t.store.Load()
+		if err != nil {
+			return err
+		}
+		t.seen = make(map[deviceKey]Record, len(recs)+1)
+		for _, r := range recs {
+			t.seen[deviceKey{r.Tenant, r.DeviceID}] = r
+		}
 	}
-	t.seen[k] = s.Version
+	if v, ok := t.seen[k]; ok {
+		if s.Version < v.Version {
+			return ErrRollback
+		}
+		if s.Version == v.Version {
+			if !bytes.Equal(rec.Encoded, v.Encoded) {
+				return ErrConflict
+			}
+			return nil // already recorded
+		}
+	}
+	if t.store != nil {
+		recs := make([]Record, 0, len(t.seen)+1)
+		for kk, r := range t.seen {
+			if kk != k {
+				recs = append(recs, r)
+			}
+		}
+		if err := t.store.Save(append(recs, rec)); err != nil {
+			return err
+		}
+	}
+	t.seen[k] = rec
 	return nil
 }

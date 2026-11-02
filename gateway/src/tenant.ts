@@ -8,7 +8,8 @@ export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
 export const TOKEN_TTL_MAX_MS = 7 * 24 * 3600_000;
 export const REQUEST_TTL_MS = 7 * 24 * 3600_000;
 export const MAX_PENDING = 200;
-export const MAX_PENDING_PER_OWNER = 10;
+export const MAX_PENDING_PER_OWNER = 5;
+export const DECIDED_RETENTION_MS = 30 * 24 * 3600_000;
 
 export type EnrollmentStatus = "pending" | "approved" | "rejected";
 
@@ -32,16 +33,24 @@ interface StoredEnrollment extends Enrollment {
 interface StoredToken {
   owner: string;
   exp: number;
-  used?: number;
 }
 
-export type EnrollError = "bad_token" | "queue_full" | "bad_request";
+export type EnrollError = "bad_token" | "queue_full" | "owner_full" | "bad_request";
 
 const enc = new TextEncoder();
 const hex = (b: ArrayBuffer | Uint8Array) =>
   [...(b instanceof Uint8Array ? b : new Uint8Array(b))].map((x) => x.toString(16).padStart(2, "0")).join("");
 const sha256 = async (s: string | Uint8Array) => hex(await crypto.subtle.digest("SHA-256", typeof s === "string" ? enc.encode(s) : s));
 const random = (n: number) => hex(crypto.getRandomValues(new Uint8Array(n)));
+
+// Display text shown to an admin: NFC, trimmed, no control, format (bidi
+// overrides, zero-width), separator, private-use or unpaired-surrogate
+// characters, and no whitespace other than a plain space.
+export function cleanText(v: string, max: number): string | null {
+  const s = v.normalize("NFC").trim();
+  if (!s || s.length > max || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}]|[^\S ]/u.test(s)) return null;
+  return s;
+}
 
 export function decodeKey(b64: string): Uint8Array | null {
   try {
@@ -60,10 +69,12 @@ export class Tenant extends DurableObject<Env> {
   // Admin-minted, single-use pod token. The plaintext is returned once and only
   // its hash is stored.
   async mintToken(owner: string, ttlMs = TOKEN_TTL_DEFAULT_MS): Promise<{ token: string; expires_at: number } | null> {
-    if (!owner || owner.length > 254 || !(ttlMs > 0)) return null;
+    const clean = cleanText(owner, 254);
+    if (!clean || !(ttlMs > 0)) return null;
     const exp = Date.now() + Math.min(ttlMs, TOKEN_TTL_MAX_MS);
     const token = `pet_${random(24)}`;
-    await this.ctx.storage.put(`tok:${await sha256(token)}`, { owner, exp } satisfies StoredToken);
+    await this.ctx.storage.put(`tok:${await sha256(token)}`, { owner: clean, exp } satisfies StoredToken);
+    await this.schedule(exp);
     return { token, expires_at: exp };
   }
 
@@ -79,23 +90,23 @@ export class Tenant extends DurableObject<Env> {
     input: { user?: string; token?: string; name: string; signing_key: string },
   ): Promise<{ id: string; poll: string } | { error: EnrollError }> {
     const key = decodeKey(input.signing_key);
-    if (!key || !input.name || input.name.length > 100) return { error: "bad_request" };
-    let owner = input.user;
+    const name = cleanText(input.name, 100);
+    if (!key || !name) return { error: "bad_request" };
+    let owner = input.user === undefined ? undefined : cleanText(input.user, 254)?.toLowerCase();
+    if (input.user !== undefined && !owner) return { error: "bad_request" };
     let kind: Enrollment["kind"] = "user";
     let tokKey: string | undefined;
     if (input.token !== undefined) {
       kind = "pod";
       tokKey = `tok:${await sha256(input.token)}`;
       const tok = await this.ctx.storage.get<StoredToken>(tokKey);
-      if (!tok || tok.used || tok.exp <= Date.now()) return { error: "bad_token" };
+      if (!tok || tok.exp <= Date.now()) return { error: "bad_token" };
       owner = tok.owner;
     }
     if (!owner) return { error: "bad_request" };
     const queue = await this.pending();
-    // One owner must not be able to fill the shared queue and lock out the rest.
-    if (queue.length >= MAX_PENDING || queue.filter((e) => e.owner === owner).length >= MAX_PENDING_PER_OWNER) {
-      return { error: "queue_full" };
-    }
+    if (queue.length >= MAX_PENDING) return { error: "queue_full" };
+    if (queue.filter((e) => e.owner === owner).length >= MAX_PENDING_PER_OWNER) return { error: "owner_full" };
 
     const id = random(16);
     const poll = random(24);
@@ -103,17 +114,17 @@ export class Tenant extends DurableObject<Env> {
       id,
       owner,
       kind,
-      name: input.name,
-      signing_key: input.signing_key,
+      name,
+      signing_key: btoa(String.fromCharCode(...key)), // canonical form: atob tolerates whitespace and stray bits
       fingerprint: await sha256(key),
       status: "pending",
       created: Date.now(),
       poll_hash: await sha256(poll),
     };
-    // One atomic write: a token is never burned without its request being queued.
-    const writes: Record<string, unknown> = { [`enr:${id}`]: rec };
-    if (tokKey) writes[tokKey] = { ...(await this.ctx.storage.get<StoredToken>(tokKey))!, used: rec.created };
-    await this.ctx.storage.put(writes);
+    // A used token is deleted at once; a missing token is indistinguishable from a bad one.
+    if (tokKey) await this.ctx.storage.delete(tokKey);
+    await this.ctx.storage.put(`enr:${id}`, rec);
+    await this.schedule(rec.created + REQUEST_TTL_MS);
     return { id, poll };
   }
 
@@ -140,14 +151,38 @@ export class Tenant extends DurableObject<Env> {
     rec.status = decision;
     rec.decided = Date.now();
     await this.ctx.storage.put(`enr:${id}`, rec);
+    await this.schedule(rec.decided + DECIDED_RETENTION_MS);
     return strip(rec);
+  }
+
+  // Keep the earliest wake-up needed to purge records.
+  private async schedule(at: number) {
+    const cur = await this.ctx.storage.getAlarm();
+    if (cur === null || at < cur) await this.ctx.storage.setAlarm(at);
+  }
+
+  // Purges expired tokens, expired pending requests and decided records past
+  // retention, then re-arms for the next one still due.
+  async alarm() {
+    const now = Date.now();
+    let next: number | undefined;
+    const due = async (k: string, at: number) => {
+      if (at <= now) await this.ctx.storage.delete(k);
+      else if (next === undefined || at < next) next = at;
+    };
+    for (const [k, r] of await this.ctx.storage.list<StoredEnrollment>({ prefix: "enr:" })) {
+      await due(k, r.status === "pending" ? r.created + REQUEST_TTL_MS : (r.decided ?? r.created) + DECIDED_RETENTION_MS);
+    }
+    for (const [k, t] of await this.ctx.storage.list<StoredToken>({ prefix: "tok:" })) await due(k, t.exp);
+    if (next !== undefined) await this.ctx.storage.setAlarm(next);
   }
 
   // The requesting device polls with the secret it was handed at request time.
   async status(id: string, poll: string): Promise<Enrollment | null> {
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${id}`);
     if (!rec || !timingSafeEqual(rec.poll_hash, await sha256(poll))) return null;
-    if (rec.status === "pending" && rec.created + REQUEST_TTL_MS <= Date.now()) return null; // expired: matches decide()
+    // An expired pending request can no longer be decided; do not report it as pending forever.
+    if (rec.status === "pending" && rec.created + REQUEST_TTL_MS <= Date.now()) return null;
     return strip(rec);
   }
 }
