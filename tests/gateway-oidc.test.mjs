@@ -312,3 +312,41 @@ test("callback over https sets a Secure cookie; unknown paths are 404", () =>
     const cb = await handle(new Request(`https://gw.test/auth/google/callback?state=${state}&error=access_denied`, { headers: { cookie } }), env);
     assert.equal(cb.status, 401);
   }));
+
+test("session logins: tenant and role ride a cookie to the callback, which hands the identity to the issuer", () =>
+  withIdp(async (idp) => {
+    const env = { FLOW_SECRET: "s", GOOGLE_CLIENT_ID: "cid", GOOGLE_ISSUER: idp.issuer };
+    const seen = [];
+    const issue = async (tenant, role, email) => (seen.push([tenant, role, email]), Response.json({ role }, { status: 200, headers: { "set-cookie": "parley_session=x; Path=/" } }));
+    const start = (qs) => handle(new Request(`http://gw.test/auth/google/login?${qs}`), env, undefined, issue);
+
+    // Bad or half-given parameters are refused before anything is sent to the IdP.
+    for (const qs of ["tenant=t1", "role=admin", "tenant=t1&role=root", "tenant=bad%20id&role=user", "tenant=&role=user"]) {
+      assert.equal((await start(qs)).status, 400, qs);
+    }
+    assert.equal((await handle(new Request("http://gw.test/auth/google/login?tenant=t1&role=user"), env)).status, 400); // no issuer wired
+
+    const login = await start("tenant=t1&role=admin&login_hint=Root@example.test");
+    assert.equal(login.status, 302);
+    assert.equal(new URL(login.headers.get("location")).searchParams.get("login_hint"), "Root@example.test");
+    const cookies = login.headers.getSetCookie();
+    assert.equal(cookies.length, 2);
+    assert.match(cookies[1], /^parley_ctx=t1\.admin; Path=\/auth\/google\/callback; HttpOnly/);
+    const q = await browse(login.headers.get("location"));
+    const jar = cookies.map((c) => c.split(";")[0]).join("; ");
+    const cb = await handle(new Request(`http://gw.test/auth/google/callback?${q}`, { headers: { cookie: jar } }), env, undefined, issue);
+    assert.equal(cb.status, 200);
+    assert.deepEqual(seen, [["t1", "admin", "root@example.test"]]);
+    const set = cb.headers.getSetCookie();
+    assert.ok(set.some((c) => c.startsWith("parley_session=x")));
+    for (const name of ["parley_flow", "parley_ctx"]) assert.ok(set.some((c) => c.startsWith(`${name}=;`) && /Max-Age=0/.test(c)), name);
+    assert.equal(cb.headers.get("cache-control"), "no-store");
+
+    // A login without tenant and role is the plain identity flow, and a callback without the ctx cookie is too.
+    const plain = await handle(new Request("http://gw.test/auth/google/login"), env, undefined, issue);
+    assert.equal(plain.headers.getSetCookie().length, 1);
+    const q2 = await browse(plain.headers.get("location"));
+    const cb2 = await handle(new Request(`http://gw.test/auth/google/callback?${q2}`, { headers: { cookie: plain.headers.getSetCookie()[0].split(";")[0] } }), env, undefined, issue);
+    assert.equal((await cb2.json()).provider, "google");
+    assert.equal(seen.length, 1);
+  }));

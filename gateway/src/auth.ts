@@ -55,14 +55,17 @@ export function providers(env: AuthEnv): Record<string, Provider> {
 }
 
 const COOKIE = "parley_flow";
+// Which tenant and role a login is for; set by /login?tenant=..&role=.. and read back by the callback.
+const CTX_COOKIE = "parley_ctx";
+export type SessionIssuer = (tenant: string, role: "admin" | "user", email: string) => Promise<Response>;
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
 // /auth/:provider/login redirects to the IdP; /auth/:provider/callback finishes
-// the flow. Session and connect-token issuance build on the returned identity
-// in later tasks (enrollment); here the callback reports the verified identity.
-// Nothing about the user goes in URLs or logs.
-export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch): Promise<Response> {
+// the flow. A login started with `?tenant=T&role=admin|user` ends in a session
+// for that tenant (issued by `issue`); without them the callback reports the
+// verified identity. Nothing about the user goes in URLs or logs.
+export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch, issue?: SessionIssuer): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname === "/healthz") return json(200, { ok: true });
   const m = /^\/auth\/([a-z]+)\/(login|callback)$/.exec(url.pathname);
@@ -75,12 +78,30 @@ export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch)
   const cookieAttrs = `Path=/auth/${p.name}/callback; HttpOnly; SameSite=Lax; Max-Age=600${url.protocol === "https:" ? "; Secure" : ""}`;
   try {
     if (action === "login") {
-      const { url: to, flow } = await startLogin(ctx, p, redirectUri);
-      return new Response(null, { status: 302, headers: { location: to, "set-cookie": `${COOKIE}=${flow}; ${cookieAttrs}` } });
+      const tenant = url.searchParams.get("tenant");
+      const role = url.searchParams.get("role");
+      const wantSession = tenant !== null || role !== null;
+      if (wantSession && (!issue || !tenant || !/^[A-Za-z0-9_-]{1,64}$/.test(tenant) || (role !== "admin" && role !== "user"))) {
+        return json(400, { error: "bad_request" });
+      }
+      const hint = url.searchParams.get("login_hint")?.slice(0, 254) || undefined;
+      const { url: to, flow } = await startLogin(ctx, p, redirectUri, hint);
+      const headers = new Headers({ location: to });
+      headers.append("set-cookie", `${COOKIE}=${flow}; ${cookieAttrs}`);
+      if (wantSession) headers.append("set-cookie", `${CTX_COOKIE}=${tenant}.${role}; ${cookieAttrs}`);
+      return new Response(null, { status: 302, headers });
     }
-    const flow = /(?:^|;\s*)parley_flow=([^;]+)/.exec(req.headers.get("cookie") ?? "")?.[1];
+    const cookies = req.headers.get("cookie") ?? "";
+    const flow = /(?:^|;\s*)parley_flow=([^;]+)/.exec(cookies)?.[1];
     const id = await completeLogin(ctx, p, flow, url.searchParams);
-    return json(200, id, { "set-cookie": `${COOKIE}=; ${cookieAttrs.replace("Max-Age=600", "Max-Age=0")}`, "cache-control": "no-store" });
+    const clear = (name: string) => `${name}=; ${cookieAttrs.replace("Max-Age=600", "Max-Age=0")}`;
+    const wanted = /(?:^|;\s*)parley_ctx=([A-Za-z0-9_-]{1,64})\.(admin|user)(?:;|$)/.exec(cookies);
+    const res = wanted && issue ? await issue(wanted[1]!, wanted[2] as "admin" | "user", id.email) : json(200, id);
+    const out = new Response(res.body, res);
+    out.headers.append("set-cookie", clear(COOKIE));
+    out.headers.append("set-cookie", clear(CTX_COOKIE));
+    out.headers.set("cache-control", "no-store");
+    return out;
   } catch (e) {
     if (e instanceof OidcError) return json(e.code === "idp_error" ? 502 : 401, { error: e.code });
     return json(500, { error: "server_error" });

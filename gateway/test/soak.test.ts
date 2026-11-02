@@ -8,7 +8,7 @@
 // A deploy is modeled as evicting the object and closing its sockets, which is
 // what the platform does to a hibernating object on a new version.
 
-import { SELF, env, evictDurableObject } from "cloudflare:test";
+import { env, evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Device } from "../src/device";
 
@@ -53,7 +53,7 @@ let epoch = 0; // connection counter; events are tagged with the connection they
 async function connect() {
   epoch++;
   const res = await bounded(
-    SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: "Bearer dev:soak:d1" } }),
+    env.DEVICE.get(env.DEVICE.idFromName("soak:d1")).fetch("https://do/", { headers: { Upgrade: "websocket" } }),
     "connect",
   );
   const ws = res.webSocket!;
