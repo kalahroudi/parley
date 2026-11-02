@@ -37,6 +37,7 @@ var (
 	ErrInvalid      = errors.New("revocation: missing or malformed field")
 	ErrFuture       = errors.New("revocation: issued in the future")
 	ErrRollback     = errors.New("revocation: version lower than one already seen")
+	ErrOlder        = errors.New("revocation: issued before the list already held")
 	ErrConflict     = errors.New("revocation: different list at a version already seen")
 	ErrTenant       = errors.New("revocation: list is for a different tenant")
 	ErrNoList       = errors.New("revocation: no list yet; cannot confirm the device is not revoked")
@@ -107,6 +108,13 @@ func Sign(root ed25519.PrivateKey, l List) (*Signed, error) {
 	return &Signed{List: l, Signature: ed25519.Sign(root, l.Encode())}, nil
 }
 
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
 // Next signs the successor of prev (nil for the first list): version+1, issued
 // now, with add revoked on top of what prev already revoked. Called with no
 // additions it is the periodic refresh. Revocation is permanent: a revoked
@@ -118,6 +126,7 @@ func Next(root ed25519.PrivateKey, tenant string, prev *Signed, add []string, no
 			return nil, ErrTenant
 		}
 		l.Version = prev.Version + 1
+		l.IssuedAt = laterOf(now, prev.IssuedAt) // never step back, even if the clock did
 		l.Revoked = append(l.Revoked, prev.Revoked...)
 	}
 	return Sign(root, l)
@@ -221,7 +230,9 @@ func (g *Guard) adopt(s *Signed) {
 
 // Accept verifies s, durably records it, and only then switches to it. A lower
 // version is rejected; the identical list may be presented again; a different
-// list at the same version is rejected.
+// list at the same version is rejected, as is a higher version issued before
+// the held list (a root clock that went backwards must not shorten the list's
+// apparent age).
 func (g *Guard) Accept(s *Signed, now time.Time) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -243,6 +254,9 @@ func (g *Guard) acceptLocked(s *Signed, now time.Time) error {
 			}
 			return nil
 		}
+	}
+	if g.cur != nil && s.IssuedAt.Before(g.cur.IssuedAt) {
+		return ErrOlder // a higher version must not also be an older statement
 	}
 	if g.store != nil {
 		if err := g.store.Save(s); err != nil {

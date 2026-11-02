@@ -180,6 +180,45 @@ func TestGuardAccept(t *testing.T) {
 	}
 }
 
+func TestGuardRejectsHigherVersionIssuedEarlier(t *testing.T) {
+	pub, priv := keys(t)
+	g := guard(t, pub, nil)
+	v2 := signed(t, priv, 2, now, "d1")
+	if err := g.Accept(v2, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Accept(signed(t, priv, 3, now.Add(-time.Hour), "d1"), now); !errors.Is(err, ErrOlder) {
+		t.Fatalf("higher version, earlier issue: %v", err)
+	}
+	if st := g.Status(now); st.Version != 2 {
+		t.Fatalf("held list changed: %+v", st)
+	}
+	if err := g.Accept(v2, now); err != nil { // identical re-accept still fine
+		t.Fatal(err)
+	}
+	if err := g.Accept(signed(t, priv, 3, now, "d1"), now); err != nil { // same instant is fine
+		t.Fatal(err)
+	}
+}
+
+func TestRenewNeverSignsEarlierThanHeld(t *testing.T) {
+	pub, priv := keys(t)
+	g := guard(t, pub, nil)
+	r := &Renewer{Root: priv, Tenant: "t1", Guard: g, Push: func(context.Context, *Signed) error { return nil }}
+	ctx := context.Background()
+	if _, err := r.Renew(ctx, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	s, err := r.Renew(ctx, []string{"d1"}, now.Add(-time.Minute)) // clock went backwards
+	if err != nil || s.Version != 2 || !s.IssuedAt.Equal(now) || !g.IsRevoked("d1") {
+		t.Fatal(s, err)
+	}
+	s, err = r.Renew(ctx, nil, now.Add(time.Hour))
+	if err != nil || !s.IssuedAt.Equal(now.Add(time.Hour)) {
+		t.Fatal(s, err)
+	}
+}
+
 func TestCheckSendAndStatus(t *testing.T) {
 	pub, priv := keys(t)
 	g := guard(t, pub, nil)
