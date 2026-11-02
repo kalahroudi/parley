@@ -4,13 +4,15 @@
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { Device } from "./device";
 import { handleEnroll } from "./enroll";
+import { Task } from "./task";
 import { Tenant } from "./tenant";
 
-export { Device, Tenant };
+export { Device, Task, Tenant };
 
 export interface Env extends AuthEnv {
   DEVICE: DurableObjectNamespace<Device>;
   TENANT: DurableObjectNamespace<Tenant>;
+  TASK: DurableObjectNamespace<Task>;
   // "1" enables the development bearer token `dev:<tenant>:<device>`. Never set in production.
   DEV_AUTH?: string;
 }
