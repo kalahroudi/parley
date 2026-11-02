@@ -99,7 +99,7 @@ export class Tenant extends DurableObject<Env> {
       owner,
       kind,
       name: input.name,
-      signing_key: input.signing_key,
+      signing_key: btoa(String.fromCharCode(...key)), // canonical form: atob tolerates whitespace and stray bits
       fingerprint: await sha256(key),
       status: "pending",
       created: Date.now(),
@@ -140,6 +140,8 @@ export class Tenant extends DurableObject<Env> {
   async status(id: string, poll: string): Promise<Enrollment | null> {
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${id}`);
     if (!rec || !timingSafeEqual(rec.poll_hash, await sha256(poll))) return null;
+    // An expired pending request can no longer be decided; do not report it as pending forever.
+    if (rec.status === "pending" && rec.created + REQUEST_TTL_MS <= Date.now()) return null;
     return strip(rec);
   }
 }

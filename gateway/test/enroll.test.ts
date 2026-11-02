@@ -70,6 +70,13 @@ describe("interactive enrollment and the approval queue", () => {
     }
   });
 
+  it("stores the signing key in canonical base64", async () => {
+    const x = fresh();
+    const sk = key();
+    await post("/v1/enroll/request", { name: "d", signing_key: ` ${sk.slice(0, 20)}\n${sk.slice(20)} ` }, x.user());
+    expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending[0].signing_key).toBe(sk);
+  });
+
   it("keeps tenants apart", async () => {
     const a = fresh();
     const b = fresh();
@@ -89,11 +96,12 @@ describe("interactive enrollment and the approval queue", () => {
 
   it("drops requests that outlive their TTL", async () => {
     const x = fresh();
-    const { id } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user()));
+    const { id, poll } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user()));
     const { vi } = await import("vitest");
     vi.useFakeTimers({ now: Date.now() + REQUEST_TTL_MS + 1000, toFake: ["Date"] });
     try {
       expect((await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, x.admin)).status).toBe(404);
+      expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(404);
       expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending).toHaveLength(0);
     } finally {
       vi.useRealTimers();
