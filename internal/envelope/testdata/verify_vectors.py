@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # Independent check of vectors.json. Shares no code with the Go package: it
 # parses the header itself, rebuilds the transcript, verifies the Ed25519
 # signature and opens the ciphertext with its own RFC 9180 base-mode
