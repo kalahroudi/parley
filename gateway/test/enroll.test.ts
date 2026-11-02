@@ -261,3 +261,78 @@ describe("routing", () => {
     expect((await worker.fetch(new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } }), { ...env, DEV_AUTH: "1" })).status).toBe(200);
   });
 });
+
+describe("root-signed bindings and the revocation list (relayed, never trusted)", () => {
+  const b64 = (n: number) => btoa(String.fromCharCode(...new Uint8Array(n).fill(7)));
+  let curId = "";
+  const binding = (sk: string, version = 1, extra: object = {}) => ({ tenant: "t", owner: "a", device_id: curId, signing_key: sk, version, signature: b64(64), ...extra });
+  const approved = async (x: ReturnType<typeof fresh>) => {
+    const sk = key();
+    const { id, poll } = await json(await post("/v1/enroll/request", { name: "d", signing_key: sk }, x.user()));
+    curId = id;
+    return { id, poll, sk };
+  };
+  const status = async (x: ReturnType<typeof fresh>, e: { id: string; poll: string }) => json(await post("/v1/enroll/status", { tenant: x.t, id: e.id, poll: e.poll }));
+
+  it("hands the signed binding to the device once the admin approved and posted it", async () => {
+    const x = fresh();
+    const e = await approved(x);
+    expect((await status(x, e)).binding).toBeUndefined();
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk) }, x.admin)).status).toBe(409); // still pending
+    await post("/v1/admin/enrollments/decide", { id: e.id, decision: "approved" }, x.admin);
+    const bnd = binding(e.sk, 1, { owner: "alice@example.test" });
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: bnd }, x.admin)).status).toBe(200);
+    expect(await status(x, e)).toMatchObject({ status: "approved", binding: bnd });
+    // The identical binding again is fine; a higher version replaces it.
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: bnd }, x.admin)).status).toBe(200);
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk, 2) }, x.admin)).status).toBe(200);
+    expect((await status(x, e)).binding.version).toBe(2);
+  });
+
+  it("refuses a lower or conflicting version, another key, another device and bad input", async () => {
+    const x = fresh();
+    const e = await approved(x);
+    await post("/v1/admin/enrollments/decide", { id: e.id, decision: "approved" }, x.admin);
+    // The device id is the request id, even for the first binding.
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk, 1, { device_id: "other" }) }, x.admin)).status).toBe(409);
+    expect((await post("/v1/admin/bindings", { id: e.id, binding: binding(e.sk, 2) }, x.admin)).status).toBe(200);
+    // A body far larger than any legitimate one is refused before it is parsed.
+    expect((await post("/v1/admin/bindings", JSON.stringify({ id: e.id, pad: "x".repeat(200000) }), x.admin)).status).toBe(400);
+    const code = async (body: unknown, auth = x.admin) => (await post("/v1/admin/bindings", body, auth)).status;
+    expect(await code({ id: e.id, binding: binding(e.sk, 1) })).toBe(409);
+    expect(await code({ id: e.id, binding: binding(e.sk, 2, { owner: "other" }) })).toBe(409);
+    expect(await code({ id: e.id, binding: binding(key(), 3) })).toBe(409);
+    expect(await code({ id: e.id, binding: binding(e.sk, 3, { device_id: "dev2" }) })).toBe(409);
+    expect(await code({ id: "zz", binding: binding(e.sk) })).toBe(404);
+    for (const bad of [null, [], "x", { ...binding(e.sk), version: 0 }, { ...binding(e.sk), version: 1.5 }, { ...binding(e.sk), device_id: 5 }, { ...binding(e.sk), pad: "x".repeat(5000) }]) {
+      expect(await code({ id: e.id, binding: bad })).toBe(400);
+    }
+    expect(await code({ id: e.id, binding: binding(e.sk, 3) }, x.user())).toBe(401);
+    // A binding is not posted for another tenant's enrollment.
+    expect(await code({ id: e.id, binding: binding(e.sk, 3) }, fresh().admin)).toBe(404);
+  });
+
+  it("stores the newest signed revocation list and serves it without an identity", async () => {
+    const x = fresh();
+    const l = (version: number, extra: object = {}) => ({ tenant: x.t, version, issued_at: "2026-01-01T00:00:00Z", revoked: [], signature: b64(64), ...extra });
+    expect((await post("/v1/revocations", { tenant: x.t })).status).toBe(404);
+    expect((await post("/v1/admin/revocations", { list: l(1) }, x.admin)).status).toBe(200);
+    expect(await json(await post("/v1/revocations", { tenant: x.t }))).toEqual(l(1));
+    expect((await post("/v1/admin/revocations", { list: l(1) }, x.admin)).status).toBe(200); // identical
+    expect((await post("/v1/admin/revocations", { list: l(2, { revoked: ["d1"] }) }, x.admin)).status).toBe(200);
+    expect((await json(await post("/v1/revocations", { tenant: x.t }))).revoked).toEqual(["d1"]);
+    expect((await post("/v1/admin/revocations", { list: l(1) }, x.admin)).status).toBe(409); // lower
+    expect((await post("/v1/admin/revocations", { list: l(2, { revoked: [] }) }, x.admin)).status).toBe(409); // different, same version
+    expect((await post("/v1/admin/revocations", { list: l(3, { tenant: "other" }) }, x.admin)).status).toBe(400); // not this tenant's
+    // A list with hundreds of revoked devices is larger than a binding may be, and must still be accepted.
+    const many = Array.from({ length: 500 }, (_, i) => `device-${String(i).padStart(24, "0")}`);
+    expect((await post("/v1/admin/revocations", { list: l(3, { revoked: many }) }, x.admin)).status).toBe(200);
+    expect((await json(await post("/v1/revocations", { tenant: x.t }))).revoked).toHaveLength(500);
+    for (const bad of [null, [], { ...l(4), version: 0 }, { ...l(4), pad: "x".repeat(70000) }]) {
+      expect((await post("/v1/admin/revocations", { list: bad }, x.admin)).status).toBe(400);
+    }
+    expect((await post("/v1/admin/revocations", { list: l(4) }, x.user())).status).toBe(401);
+    expect((await post("/v1/revocations", { tenant: "bad tenant!" })).status).toBe(400);
+    expect((await post("/v1/revocations", { tenant: fresh().t })).status).toBe(404); // tenants are separate
+  });
+});

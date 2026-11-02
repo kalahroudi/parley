@@ -6,7 +6,7 @@ Status is `planned` until the test exists and passes, then `passing`. Update thi
 
 | Journey | Test id | Phase | Status | Scenario |
 |---|---|---|---|---|
-| A Admin onboarding | JA-01 | 1 | planned | `admin init` creates the root key and recovery code; the recovery code restores the root (T107) |
+| A Admin onboarding | JA-01 | 1 | passing | `admin init` creates the root key and recovery code; the recovery code restores the root (T107) |
 | A Admin onboarding | JA-02 | 5 | planned | Sign-up, IdP connection, users and groups, retention mode, free tier of 3 devices, install command with root fingerprint |
 | B Employee enrollment | JB-01 | 1 | planned | `login --root <fingerprint>`, SSO, admin approval, binding signed, device shows online; wrong fingerprint refused (T107) |
 | B Employee enrollment | JB-02 | 5 | planned | Install from each channel with checksum and signature verified, service starts on boot, batch approval, `parley-cli test` succeeds |

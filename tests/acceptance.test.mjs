@@ -121,3 +121,12 @@ func Report(l *logx.Logger, task string, res result) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Phase 1 acceptance (T107, spike 2): enroll, approve and revoke; binding
+// rollback rejected; recovery code restores the root; stale revocation list
+// behavior. The checks live in internal/acceptance and cross the root, binding
+// and revocation packages together.
+test("acceptance: JA-01 root, approval, binding rollback, revocation and recovery code", needsGo, () => {
+  const r = spawnSync("go", ["test", "-race", "-count=1", "./internal/acceptance"], { cwd: root, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+});
