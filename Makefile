@@ -1,9 +1,14 @@
-.PHONY: test test-layout test-go test-gateway dev
+.PHONY: test test-layout test-go test-gateway soak dev
 
 test: test-layout test-go test-gateway
 
 test-gateway:
-	cd gateway && npm ci && npm run typecheck && npm test && npm run test:soak
+	cd gateway && npm ci && npm run typecheck && npm test
+
+# T108: the 10k-message reconnect soak. Slow (about 10s on Linux/macOS, minutes on
+# Windows), so it is not part of `make test`; CI runs it as its own step.
+soak:
+	cd gateway && npm ci && npm run test:soak
 
 test-layout:
 	node --test "tests/**/*.test.mjs"

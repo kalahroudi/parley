@@ -14,6 +14,7 @@ import type { Device } from "../src/device";
 
 const TOTAL = 10_000;
 const RECONNECTS = 20;
+const PUSH_CHUNK = 50; // events delivered concurrently
 const BATCH = 600; // new messages per connection; the final connection finishes the rest
 
 const stub = () => env.DEVICE.get(env.DEVICE.idFromName("soak:d1")) as DurableObjectStub<Device>;
@@ -120,14 +121,23 @@ async function pushEvents(limit: number): Promise<void> {
   retried += retry.length;
   const fresh: number[] = [];
   for (let k = 0; k < limit && nextEvent < TOTAL; k++) fresh.push(nextEvent++);
-  for (const i of [...retry, ...fresh]) {
-    const r = await bounded<{ status: string }>(stub().deliver(`e${i}`), `deliver e${i}`);
-    if (r.status === "delivered") sentOn.set(i, epoch);
-    else if (r.status === "offline") {
-      // Not sent; put fresh ones back so they are tried on the next connection.
-      nextEvent = Math.min(nextEvent, i);
-      return;
-    } else throw new Error(`deliver e${i}: ${r.status}`);
+  // Pushed in concurrent chunks: the object serializes them, but its durable writes
+  // overlap, which matters on runners where each write is slow. An event refused as
+  // offline was never sent; it keeps no sentOn mark, so the next push retries it.
+  const all = [...retry, ...fresh];
+  for (let at = 0; at < all.length; at += PUSH_CHUNK) {
+    const chunk = all.slice(at, at + PUSH_CHUNK);
+    const rs = await bounded(
+      Promise.all(chunk.map((i) => stub().deliver(`e${i}`) as Promise<{ status: string }>)),
+      `deliver e${chunk[0]}..e${chunk[chunk.length - 1]}`,
+    );
+    let offline = false;
+    rs.forEach((r, k) => {
+      if (r.status === "delivered") sentOn.set(chunk[k]!, epoch);
+      else if (r.status === "offline") offline = true;
+      else throw new Error(`deliver e${chunk[k]}: ${r.status}`);
+    });
+    if (offline) return;
   }
 }
 
