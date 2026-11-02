@@ -155,3 +155,144 @@ func TestFailedWriteLeavesNoTruncatedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// failingFile fails the named step of Save's temp-file handling.
+type failingFile struct {
+	tempFile
+	failWrite, failSync, failClose bool
+}
+
+func (f failingFile) Write(b []byte) (int, error) {
+	if f.failWrite {
+		return 0, errors.New("injected write failure")
+	}
+	return f.tempFile.Write(b)
+}
+
+func (f failingFile) Sync() error {
+	if f.failSync {
+		return errors.New("injected sync failure")
+	}
+	return f.tempFile.Sync()
+}
+
+func (f failingFile) Close() error {
+	err := f.tempFile.Close()
+	if f.failClose {
+		return errors.New("injected close failure")
+	}
+	return err
+}
+
+// Every step of Save fails closed with ErrStore, leaves no temp file, and leaves
+// the previous store contents alone.
+func TestSaveFailsClosedAtEveryStep(t *testing.T) {
+	recs := []Record{{Tenant: "t", DeviceID: "d", Version: 1, Encoded: []byte{1}}}
+	steps := map[string]func(*FileStore){
+		"marshal": func(f *FileStore) { f.marshal = func(any) ([]byte, error) { return nil, errors.New("injected") } },
+		"create": func(f *FileStore) {
+			f.create = func(string, string) (tempFile, error) { return nil, errors.New("injected") }
+		},
+		"write": func(f *FileStore) { wrapTemp(f, failingFile{failWrite: true}) },
+		"sync":  func(f *FileStore) { wrapTemp(f, failingFile{failSync: true}) },
+		"close": func(f *FileStore) { wrapTemp(f, failingFile{failClose: true}) },
+	}
+	for name, inject := range steps {
+		dir := t.TempDir()
+		fs := NewFileStore(filepath.Join(dir, "seen.json"))
+		if err := fs.Save(recs); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(fs.path)
+		inject(fs)
+		bad := []Record{{Tenant: "t", DeviceID: "d", Version: 2, Encoded: []byte{2}}}
+		if err := fs.Save(bad); !errors.Is(err, ErrStore) {
+			t.Errorf("%s: got %v", name, err)
+		}
+		if after, _ := os.ReadFile(fs.path); string(after) != string(before) {
+			t.Errorf("%s: store changed by a failed write", name)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+			t.Errorf("%s: temp file left behind: %v", name, ents)
+		}
+	}
+}
+
+// A failed directory sync is reported (the rename has happened by then, so only
+// the temp file's absence is checked).
+func TestSaveReportsDirSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	fs := NewFileStore(filepath.Join(dir, "seen.json"))
+	fs.syncDir = func(string) error { return errors.New("injected") }
+	if err := fs.Save(nil); !errors.Is(err, ErrStore) {
+		t.Fatalf("got %v", err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("temp file left behind: %v", ents)
+	}
+}
+
+func wrapTemp(f *FileStore, w failingFile) {
+	f.create = func(dir, pattern string) (tempFile, error) {
+		t, err := createTemp(dir, pattern)
+		w.tempFile = t
+		return w, err
+	}
+}
+
+// Records of several tenants are written sorted by tenant, then device.
+func TestSaveSortsByTenantThenDevice(t *testing.T) {
+	fs := NewFileStore(filepath.Join(t.TempDir(), "seen.json"))
+	mk := func(tn, d string) Record { return Record{Tenant: tn, DeviceID: d, Version: 1, Encoded: []byte{1}} }
+	if err := fs.Save([]Record{mk("b", "1"), mk("a", "2"), mk("a", "1")}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fs.Load()
+	if err != nil || len(got) != 3 || got[0].Tenant != "a" || got[0].DeviceID != "1" || got[1].DeviceID != "2" || got[2].Tenant != "b" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestSyncDirReportsAMissingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directories cannot be synced on Windows")
+	}
+	if err := syncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("want an error")
+	}
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A lock error that is not "someone else holds it" is returned as ErrStore, and
+// the lock file is closed.
+func TestLockReportsTryLockFailure(t *testing.T) {
+	fs := NewFileStore(filepath.Join(t.TempDir(), "seen.json"))
+	fs.try = func(*os.File) (bool, error) { return false, errors.New("injected") }
+	if _, err := fs.Lock(); !errors.Is(err, ErrStore) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// The OS lock calls report errors (here: a closed file) instead of claiming the lock.
+func TestOSLockCallsReportErrors(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if ok, err := tryLock(f); ok || err == nil {
+		t.Fatalf("tryLock on a closed file: %v, %v", ok, err)
+	}
+	if err := unlock(f); err == nil {
+		t.Fatal("unlock on a closed file succeeded")
+	}
+}
+
+func TestLockOpenFailure(t *testing.T) {
+	fs := NewFileStore(filepath.Join(t.TempDir(), "missing-dir", "seen.json"))
+	if _, err := fs.Lock(); !errors.Is(err, ErrStore) {
+		t.Fatalf("got %v", err)
+	}
+}

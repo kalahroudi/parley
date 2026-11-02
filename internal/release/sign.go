@@ -49,10 +49,12 @@ type SecretKey struct {
 // GenerateKey creates a new key pair.
 func GenerateKey() (SecretKey, PublicKey, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if err != nil {
 		return SecretKey{}, PublicKey{}, err
 	}
 	var id KeyID
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if _, err := rand.Read(id[:]); err != nil {
 		return SecretKey{}, PublicKey{}, err
 	}

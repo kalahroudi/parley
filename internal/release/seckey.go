@@ -48,6 +48,7 @@ func pbkdf2(password, salt []byte, iter int) []byte {
 
 func gcm(password string, salt []byte, iter uint32) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(pbkdf2([]byte(password), salt, int(iter)))
+	//cover:ignore NewCipher fails only for a key length other than 16, 24 or 32, and pbkdf2 returns 32 bytes
 	if err != nil {
 		return nil, err
 	}
@@ -64,14 +65,17 @@ func (s SecretKey) MarshalEncrypted(password string) ([]byte, error) {
 	salt, rest := hdr[:saltLen], hdr[saltLen:]
 	binary.BigEndian.PutUint32(rest[:4], kdfIterations)
 	nonce := rest[4 : 4+nonceLen]
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
+	//cover:ignore crypto/rand never fails (Go 1.24 crashes the process instead); nothing to inject
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
 	copy(rest[4+nonceLen:], s.ID[:])
 	aead, err := gcm(password, salt, kdfIterations)
+	//cover:ignore gcm fails only when the AES key length is invalid, and it is always 32 bytes
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +100,7 @@ func ParseSecretKey(data []byte, password string) (SecretKey, error) {
 		return SecretKey{}, errors.New("secret key: bad iteration count")
 	}
 	aead, err := gcm(password, hdr[:saltLen], iter)
+	//cover:ignore gcm fails only when the AES key length is invalid, and it is always 32 bytes
 	if err != nil {
 		return SecretKey{}, err
 	}

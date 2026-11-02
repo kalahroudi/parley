@@ -1,0 +1,16 @@
+{
+  "tiers": {
+    "1": {
+      "line": 100,
+      "packages": ["internal/binding", "internal/revocation", "internal/logx"]
+    },
+    "2": {
+      "line": 95,
+      "packages": ["internal/root", "internal/trust", "internal/tunnel", "internal/release"]
+    },
+    "3": {
+      "line": 85,
+      "packages": ["cmd/parley-cli", "cmd/parley-release", "cmd/parleyd", "scripts/covergate"]
+    }
+  }
+}

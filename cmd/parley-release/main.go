@@ -35,6 +35,7 @@ func password() (string, error) {
 	return p, nil
 }
 
+//cover:ignore main only wires the process (arguments, os.Exit) to run, which is tested
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		//logx:allow fatal startup/CLI error for the operator's terminal; no task content exists in this process path

@@ -403,3 +403,108 @@ func TestRunWaitsForReadLoop(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+func TestNewFillsDefaults(t *testing.T) {
+	c := New(Config{})
+	if c.cfg.HeartbeatTimeout != 10*time.Second || c.cfg.MinBackoff != 250*time.Millisecond || c.cfg.MaxBackoff != 30*time.Second {
+		t.Fatalf("defaults: %+v", c.cfg)
+	}
+	// A max below the min is replaced, not honored.
+	c = New(Config{MinBackoff: time.Second, MaxBackoff: time.Millisecond})
+	if c.cfg.MaxBackoff != 30*time.Second {
+		t.Fatalf("max backoff %v", c.cfg.MaxBackoff)
+	}
+}
+
+func TestRunWithCanceledContextReturnsAtOnce(t *testing.T) {
+	c := New(Config{URL: "ws://127.0.0.1:1", Token: "tok"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, open := <-c.Events(); open {
+		t.Fatal("Events left open")
+	}
+}
+
+// A dial that fails without an HTTP response (nothing is listening) is retried.
+func TestDialFailureRetries(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	url := "ws" + strings.TrimPrefix(dead.URL, "http")
+	dead.Close()
+	c := New(Config{URL: url, Token: "tok", MinBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	// Run keeps going: it is still alive after several backoff periods.
+	select {
+	case err := <-done:
+		t.Fatalf("Run stopped: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A connection that closes before the welcome is retried.
+func TestCloseBeforeWelcomeReconnects(t *testing.T) {
+	var mu sync.Mutex
+	dials := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		_, _, _ = c.Read(r.Context())
+		c.CloseNow()
+	}))
+	defer srv.Close()
+	c := New(Config{URL: "ws" + strings.TrimPrefix(srv.URL, "http"), Token: "tok", MinBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "retries", func() bool { mu.Lock(); defer mu.Unlock(); return dials >= 3 })
+}
+
+// pushRaw sends an arbitrary text message to the newest connection.
+func (g *fakeGateway) pushRaw(msg string) {
+	g.mu.Lock()
+	c := g.conns[len(g.conns)-1]
+	g.mu.Unlock()
+	_ = c.Write(context.Background(), websocket.MessageText, []byte(msg))
+}
+
+// A gateway error message or a message that is not JSON ends the connection,
+// and the client reconnects and carries on.
+func TestBadGatewayMessagesReconnect(t *testing.T) {
+	for name, msg := range map[string]string{"error": `{"t":"error","code":"overloaded"}`, "not json": "{"} {
+		g := newFakeGateway(t)
+		start(t, g, nil)
+		waitFor(t, name+": connected", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.conns) == 1 })
+		g.pushRaw(msg)
+		waitFor(t, name+": reconnect", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.hellos) >= 2 })
+	}
+}
+
+// Without heartbeat_ms in the welcome the client uses its default period and still works.
+func TestWelcomeWithoutHeartbeatUsesDefault(t *testing.T) {
+	g := newFakeGateway(t)
+	g.welcome = func(bool) map[string]any {
+		return map[string]any{"t": "welcome", "v": 1, "session": "s", "resumed": false, "rx_seq": 0}
+	}
+	c, _, _ := start(t, g, nil)
+	waitFor(t, "connected", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.conns) == 1 })
+	g.push(1, "hello")
+	select {
+	case ev := <-c.Events():
+		if ev.Body != "hello" {
+			t.Fatalf("got %+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event")
+	}
+}

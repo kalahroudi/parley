@@ -29,6 +29,19 @@ make test
 
 Go tests run with the race detector (`go test -race ./...`).
 
+## Coverage gates
+
+```
+make coverage   # tier gates for Go and the gateway
+make mutation   # mutation testing of the tier 1 Go packages
+```
+
+The tiers come from the plan: tier 1 (security-critical packages) at 100% with no exclusions and mutation testing, tier 2 at 95% line and 90% branch, tier 3 at 85%. Which package is in which tier is in [`tests/coverage/tiers.json`](tests/coverage/tiers.json); a new Go package with statements must be added there or CI fails.
+
+- Go reports statement coverage only. Branches in Go are checked by mutation testing (tier 1); the 90% branch gate is enforced for the TypeScript gateway.
+- Exclude a Go statement or function only with a comment on the line above it, `//cover:ignore <reason>`; the gate lists every exclusion in its output for review sign-off. In TypeScript use `/* istanbul ignore next -- reason */`. Tier 1 allows none.
+- Mutation survivors that no test can tell apart from the original are explained in `scripts/mutation.sh`. Any other survivor is a missing test.
+
 ## Local harness
 
 ```

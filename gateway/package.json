@@ -7,6 +7,8 @@
   "description": "Parley gateway Worker (A2A transport, Durable Objects, admin API)",
   "scripts": {
     "test": "vitest run --exclude test/soak.test.ts",
+    "test:oidc-coverage": "node --test --experimental-test-coverage --test-coverage-include=src/oidc.ts --test-coverage-include=src/auth.ts --test-coverage-lines=95 --test-coverage-branches=90 --test-coverage-functions=95 ../tests/gateway-oidc.test.mjs",
+    "test:coverage": "vitest run --exclude test/soak.test.ts --coverage",
     "test:soak": "vitest run test/soak.test.ts",
     "typecheck": "tsc",
     "dev": "wrangler dev --port ${PORT:-8787}"
@@ -14,6 +16,7 @@
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.12",
     "@cloudflare/workers-types": "^5.20261102.1",
+    "@vitest/coverage-istanbul": "^4.1.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12",
     "wrangler": "^4.156.1"

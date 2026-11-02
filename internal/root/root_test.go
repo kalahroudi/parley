@@ -142,3 +142,46 @@ func TestFileStoreSaveFailureLeavesNothing(t *testing.T) {
 		t.Fatalf("leftovers: %v", ents)
 	}
 }
+
+// Each step of Save can fail (create, write, close, link); none leaves a file behind.
+func TestFileStoreSaveFailsAtEveryStep(t *testing.T) {
+	r, _ := New()
+	steps := map[string]func() func(){
+		"create": func() func() {
+			old := createTemp
+			createTemp = func(string, string) (*os.File, error) { return nil, errors.New("injected") }
+			return func() { createTemp = old }
+		},
+		"write": func() func() { // a closed temp file cannot be written
+			old := createTemp
+			createTemp = func(d, p string) (*os.File, error) {
+				f, err := os.CreateTemp(d, p)
+				f.Close()
+				return f, err
+			}
+			return func() { createTemp = old }
+		},
+		"close": func() func() { // closed during sync, so the final close fails
+			old := syncFile
+			syncFile = func(f *os.File) error { f.Close(); return nil }
+			return func() { syncFile = old }
+		},
+		"link": func() func() {
+			old := link
+			link = func(string, string) error { return errors.New("injected") }
+			return func() { link = old }
+		},
+	}
+	for name, inject := range steps {
+		dir := t.TempDir()
+		restore := inject()
+		err := FileStore{Dir: dir}.Save(r.Private)
+		restore()
+		if err == nil || errors.Is(err, ErrExists) {
+			t.Errorf("%s: got %v", name, err)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+			t.Errorf("%s: leftovers: %v", name, ents)
+		}
+	}
+}

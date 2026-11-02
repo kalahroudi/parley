@@ -92,3 +92,27 @@ func TestKeysAreNotPayloadNames(t *testing.T) {
 		}
 	}
 }
+
+// The edges of each rule: zero is a size, 64 characters is an identifier and 65
+// is not, and the first and last character of every allowed class pass.
+func TestBoundaries(t *testing.T) {
+	var b bytes.Buffer
+	l := New(&b)
+	for n, want := range map[int64]string{0: "size=0", -5: "size=-1", 1: "size=1"} {
+		b.Reset()
+		l.Info("sizes", Size("size", n))
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("Size(%d): missing %q in %q", n, want, b.String())
+		}
+	}
+	for _, id := range []string{strings.Repeat("a", maxIDLen), "a", "z", "A", "Z", "0", "9", "-", "_"} {
+		if got := safeID(id); got != id {
+			t.Errorf("safeID(%q) = %q", id, got)
+		}
+	}
+	for _, id := range []string{"", strings.Repeat("a", maxIDLen+1), "`", "{", "@", "[", "/", ":", "."} {
+		if got := safeID(id); got != Redacted {
+			t.Errorf("safeID(%q) = %q, want redacted", id, got)
+		}
+	}
+}

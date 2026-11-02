@@ -218,3 +218,97 @@ test("worker routes reuse discovery and JWKS across requests with distinct env o
     assert.equal(hits.filter((u) => u.endsWith("/.well-known/openid-configuration")).length, 1);
     assert.equal(hits.filter((u) => u.endsWith("/jwks")).length, 1);
   }));
+
+// Rewrites the id_token the mock IdP returns, to hit the token parser's edges.
+const rewriteToken = (fn) => async (u, i) => {
+  const res = await fetch(u, i);
+  if (!String(u).endsWith("/token")) return res;
+  const body = await res.json();
+  return Response.json({ ...body, id_token: fn(body.id_token) });
+};
+const segs = (jwt) => jwt.split(".").slice(0, 2).map((s) => JSON.parse(Buffer.from(s, "base64url").toString()));
+
+test("id_token parser: malformed tokens, unsupported alg, unknown key, odd claims", () =>
+  withIdp(async (idp) => {
+    const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const cases = [
+      ["bad_token", (t) => "only.two", "segment count"],
+      ["bad_token", (t) => `${t}.extra`, "extra segment"],
+      ["bad_token", (t) => `!!!.${t.split(".")[1]}.${t.split(".")[2]}`, "undecodable header"],
+      ["bad_token", (t) => `${Buffer.from("not json").toString("base64url")}.${t.split(".")[1]}.${t.split(".")[2]}`, "header is not JSON"],
+      ["bad_token", (t) => { const [h] = segs(t); return `${enc({ ...h, alg: "none" })}.${t.split(".").slice(1).join(".")}`; }, "alg"],
+      ["bad_token", (t) => { const [h] = segs(t); return `${enc({ ...h, kid: "unknown" })}.${t.split(".").slice(1).join(".")}`; }, "unknown key"],
+    ];
+    for (const [code, fn, what] of cases) {
+      const p = google({ clientId: "cid", issuer: idp.issuer });
+      const { url, flow } = await startLogin(ctx, p, REDIRECT);
+      await rejects(completeLogin({ ...ctx, fetch: rewriteToken(fn) }, p, flow, await browse(url)), code);
+    }
+    // Claims the mock IdP can mint directly.
+    const claimCases = [
+      ["bad_token", { iat: Math.floor(Date.now() / 1000) + 3600 }],
+      ["bad_token", { sub: "" }],
+      ["audience_mismatch", { aud: ["cid", "other"], azp: "other" }],
+      ["audience_mismatch", { aud: ["other"] }],
+      ["token_expired", { exp: "never" }],
+    ];
+    for (const [code, claims] of claimCases) {
+      idp.tweak.claims = claims;
+      const p = google({ clientId: "cid", issuer: idp.issuer });
+      const { url, flow } = await startLogin(ctx, p, REDIRECT);
+      await rejects(completeLogin(ctx, p, flow, await browse(url)), code);
+    }
+    // An audience list that names this client and sets azp to it is fine.
+    idp.tweak.claims = { aud: ["cid", "other"], azp: "cid" };
+    const p = google({ clientId: "cid", issuer: idp.issuer });
+    const { url, flow } = await startLogin(ctx, p, REDIRECT);
+    assert.equal((await completeLogin(ctx, p, flow, await browse(url))).email, "alice@example.test");
+  }));
+
+test("flow cookie with an undecodable signature is rejected, not thrown", () =>
+  withIdp(async (idp) => {
+    const p = google({ clientId: "cid", issuer: idp.issuer });
+    const { url, flow } = await startLogin(ctx, p, REDIRECT);
+    const q = await browse(url);
+    await rejects(completeLogin(ctx, p, `${flow.split(".")[0]}.!!!`, q), "bad_flow");
+  }));
+
+test("token endpoint reply without an id_token, and discovery without endpoints", () =>
+  withIdp(async (idp) => {
+    const p = google({ clientId: "cid", issuer: idp.issuer });
+    const { url, flow } = await startLogin(ctx, p, REDIRECT);
+    const noToken = async (u, i) => {
+      const res = await fetch(u, i);
+      return String(u).endsWith("/token") ? Response.json({ access_token: "x" }) : res;
+    };
+    await rejects(completeLogin({ ...ctx, fetch: noToken }, p, flow, await browse(url)), "idp_error");
+
+    const q2 = google({ clientId: "cid", issuer: idp.issuer });
+    const stripped = async (u, i) => {
+      const doc = await (await fetch(u, i)).json();
+      delete doc.token_endpoint;
+      return Response.json(doc);
+    };
+    await rejects(startLogin({ ...ctx, fetch: stripped }, q2, REDIRECT), "idp_error");
+  }));
+
+test("login_hint is forwarded to the IdP and scopes differ per provider", () =>
+  withIdp(async (idp) => {
+    const p = entra({ clientId: "cid", tenantId: "t1", issuer: idp.issuer });
+    const { url } = await startLogin(ctx, p, REDIRECT, "bob@example.test");
+    assert.equal(new URL(url).searchParams.get("login_hint"), "bob@example.test");
+    assert.equal(new URL(url).searchParams.get("scope"), "openid email profile");
+  }));
+
+test("callback over https sets a Secure cookie; unknown paths are 404", () =>
+  withIdp(async (idp) => {
+    const env = { FLOW_SECRET: "s", GOOGLE_CLIENT_ID: "cid", GOOGLE_ISSUER: idp.issuer };
+    const login = await handle(new Request("https://gw.test/auth/google/login"), env);
+    assert.match(login.headers.get("set-cookie"), /; Secure/);
+    assert.equal((await handle(new Request("https://gw.test/other"), env)).status, 404);
+    // The IdP reporting an error is relayed as a generic 401 and never as IdP text.
+    const state = new URL(login.headers.get("location")).searchParams.get("state");
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const cb = await handle(new Request(`https://gw.test/auth/google/callback?state=${state}&error=access_denied`, { headers: { cookie } }), env);
+    assert.equal(cb.status, 401);
+  }));
