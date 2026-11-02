@@ -8,7 +8,6 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
-      miniflare: { bindings: { DEV_AUTH: "1" } },
     }),
   ],
   test: {

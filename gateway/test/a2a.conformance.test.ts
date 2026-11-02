@@ -9,14 +9,13 @@
 // SDK's client must work against it. T306 runs the full lifecycle on top of this;
 // the deviations from the spec are listed in the header of src/a2a.ts.
 
-import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { AgentCard, Message, Role, SendMessageRequest, SendMessageResponse, Task, TaskState, taskStateFromJSON } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
 import { TaskNotFoundError, UnsupportedOperationError, PushNotificationNotSupportedError, ContentTypeNotSupportedError } from "@a2a-js/sdk/errors";
 import { agentCard, SEALED_MEDIA_TYPE, STATE_NAME } from "../src/a2a";
 import type { SignedKind } from "../src/parts";
-import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
+import { b64, encodeWire, header, taskBytes, taskHex, gw } from "./wire";
 
 // What toJSON leaves out: defaults (empty strings and lists, false, 0).
 function strip(v: any): any {
@@ -46,7 +45,7 @@ const sealedPart = (T: string, kind: SignedKind, task: string, from: string, to:
 });
 
 async function connect(T: string, device: string) {
-  const ws = (await SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: `Bearer dev:${T}:${device}` } })).webSocket!;
+  const ws = (await gw("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: `Bearer dev:${T}:${device}` } })).webSocket!;
   ws.accept();
   const inbox: any[] = [];
   const waiters: ((m: any) => void)[] = [];
@@ -66,16 +65,16 @@ async function connect(T: string, device: string) {
 async function sdkClient(T: string, device: string, seen: any[] = []) {
   const fetchImpl = (async (url: any, init: any) => {
     seen.push(JSON.parse(init.body));
-    return SELF.fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer dev:${T}:${device}` } });
+    return gw(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer dev:${T}:${device}` } });
   }) as typeof fetch;
   const f = new ClientFactory(ClientFactoryOptions.createFrom(ClientFactoryOptions.default, { transports: [new JsonRpcTransportFactory({ fetchImpl })] }));
-  const card = await (await SELF.fetch("https://gw/.well-known/agent-card.json")).json();
+  const card = await (await gw("https://gw/.well-known/agent-card.json")).json();
   return f.createFromAgentCard(AgentCard.fromJSON(card));
 }
 
 describe("A2A v1.0 shapes, by the official SDK", () => {
   it("the agent card is a v1.0 card, served at the well-known path", async () => {
-    const card: any = await (await SELF.fetch("https://gw/.well-known/agent-card.json")).json();
+    const card: any = await (await gw("https://gw/.well-known/agent-card.json")).json();
     expect(card).toEqual(agentCard("https://gw"));
     conforms(AgentCard, "agent card", card);
     expect(card.supportedInterfaces[0]).toMatchObject({ protocolBinding: "JSONRPC", protocolVersion: "1.0" });
@@ -110,7 +109,7 @@ describe("A2A v1.0 shapes, by the official SDK", () => {
     const alice = await connect(T, "alice");
     const bob = await connect(T, "bob");
     const rpc = async (device: string, method: string, params: unknown) =>
-      (await (await SELF.fetch("https://gw/a2a", { method: "POST", headers: { Authorization: `Bearer dev:${T}:${device}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).json()) as any;
+      (await (await gw("https://gw/a2a", { method: "POST", headers: { Authorization: `Bearer dev:${T}:${device}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).json()) as any;
     const send = (device: string, kind: SignedKind, task: string, from: string, to: string, seq?: number, role = device === "alice" ? "ROLE_USER" : "ROLE_AGENT") =>
       rpc(device, "SendMessage", { message: { messageId: `m${++n}`, role, parts: [sealedPart(T, kind, task, from, to, seq)] } });
     const check = (what: string, task: any) => {

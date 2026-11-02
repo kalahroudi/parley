@@ -81,7 +81,7 @@ Deliverable: a real MCP client (Claude Code) finds and calls a bot across two ma
 Deliverable: pilot-ready build. Gate to start: spikes 2, 3, 4 and 9 have passed.
 
 - [ ] T501 Admin page (metadata only)
-  - **RELEASE BLOCKER:** real admin/user session auth (from T102 OIDC sessions) must replace the `DEV_AUTH` placeholder identity in `gateway/src/enroll.ts` before any release; `DEV_AUTH` must not be set in production.
+  - ~~**RELEASE BLOCKER:** real admin/user session auth must replace the `DEV_AUTH` placeholder identity.~~ Done by dashboard task T001 (gateway admin sessions; `DEV_AUTH` removed). `scripts/check-dev-auth.mjs` is the release gate (run by the Release workflow and `tests/dev-auth-gate.test.mjs`).
 - [ ] T502 Stripe billing in test mode with seat enforcement at enrollment, 7-day grace
 - [ ] T503 Offboarding cascade, audit CSV, tenant export and deletion
 - [ ] T504 Auto-update from the pinned project key; distribution channels (GitHub releases, Homebrew tap, Linux package repo, `go install`, source)

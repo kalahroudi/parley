@@ -1,12 +1,12 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { MAX_REQUEST_BYTES, SEALED_MEDIA_TYPE, STATE_NAME } from "../src/a2a";
 import { MAX_BUCKET, SIGNED_TYPE, type SignedKind } from "../src/parts";
 import { NEXT, type TaskState } from "../src/task";
-import { b64, encodeWire, header, taskBytes, taskHex, type Header } from "./wire";
+import { gw, b64, encodeWire, header, taskBytes, taskHex, type Header } from "./wire";
 
 // Each test gets its own tenant, so devices and tasks never collide.
 let n = 0;
@@ -16,7 +16,7 @@ const fresh = () => {
 };
 
 async function connect(T: string, device: string) {
-  const res = await SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: `Bearer dev:${T}:${device}` } });
+  const res = await gw("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: `Bearer dev:${T}:${device}` } });
   const ws = res.webSocket!;
   ws.accept();
   const inbox: any[] = [];
@@ -40,7 +40,7 @@ const ROLE: Record<string, string> = { TASK: "ROLE_USER", REPLY: "ROLE_USER", CA
 function world() {
   const { T, bearer } = fresh();
   const rpc = async (device: string, method: string, params: unknown, id: unknown = 1) => {
-    const r = await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer(device), body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
+    const r = await gw("https://gw/a2a", { method: "POST", headers: bearer(device), body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
     expect(r.status).toBe(200);
     return (await r.json()) as any;
   };
@@ -73,27 +73,27 @@ function world() {
 
 describe("agent card and endpoint", () => {
   it("serves the card at the well-known path with the transport facts", async () => {
-    const r = await SELF.fetch("https://gw/.well-known/agent-card.json");
+    const r = await gw("https://gw/.well-known/agent-card.json");
     expect(r.status).toBe(200);
     const c: any = await r.json();
     expect(c.supportedInterfaces).toEqual([{ url: "https://gw/a2a", protocolBinding: "JSONRPC", protocolVersion: "1.0" }]);
     expect(c.capabilities).toEqual({ streaming: false, pushNotifications: false });
     expect(c.defaultInputModes).toEqual([SEALED_MEDIA_TYPE]);
-    expect((await SELF.fetch("https://gw/.well-known/agent-card.json", { method: "POST" })).status).toBe(405);
+    expect((await gw("https://gw/.well-known/agent-card.json", { method: "POST" })).status).toBe(405);
   });
 
   it("needs a device identity and a POST, and bounds the body", async () => {
     const { bearer } = fresh();
-    expect((await SELF.fetch("https://gw/a2a", { method: "POST", body: "{}" })).status).toBe(401);
-    expect((await SELF.fetch("https://gw/a2a", { headers: bearer("a") })).status).toBe(405);
+    expect((await gw("https://gw/a2a", { method: "POST", body: "{}" })).status).toBe(401);
+    expect((await gw("https://gw/a2a", { headers: bearer("a") })).status).toBe(405);
     const big = "x".repeat(MAX_REQUEST_BYTES + 1);
-    expect((await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a"), body: big })).status).toBe(413);
-    const lie = await SELF.fetch("https://gw/a2a", { method: "POST", headers: { ...bearer("a"), "content-length": String(MAX_REQUEST_BYTES + 1) }, body: "{}" });
+    expect((await gw("https://gw/a2a", { method: "POST", headers: bearer("a"), body: big })).status).toBe(413);
+    const lie = await gw("https://gw/a2a", { method: "POST", headers: { ...bearer("a"), "content-length": String(MAX_REQUEST_BYTES + 1) }, body: "{}" });
     expect(lie.status).toBe(413);
     // Multi-byte text is measured in bytes, not characters.
     const wide = "é".repeat(MAX_REQUEST_BYTES / 2 + 1);
     expect(wide.length).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
-    expect((await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a"), body: wide })).status).toBe(413);
+    expect((await gw("https://gw/a2a", { method: "POST", headers: bearer("a"), body: wide })).status).toBe(413);
   });
 
   it("cuts off a body with no declared length at the cap, and reads one that fits", async () => {
@@ -108,7 +108,7 @@ describe("agent card and endpoint", () => {
         if (pulled >= 4 * MAX_REQUEST_BYTES) c.close();
       },
     });
-    const r = await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a"), body: endless, duplex: "half" } as RequestInit);
+    const r = await gw("https://gw/a2a", { method: "POST", headers: bearer("a"), body: endless, duplex: "half" } as RequestInit);
     expect(r.status).toBe(413);
     expect(pulled).toBeLessThan(4 * MAX_REQUEST_BYTES); // not read to the end
     // The same body split over several chunks is read whole.
@@ -121,17 +121,17 @@ describe("agent card and endpoint", () => {
         c.close();
       },
     });
-    const ok = await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a"), body: parts, duplex: "half" } as RequestInit);
+    const ok = await gw("https://gw/a2a", { method: "POST", headers: bearer("a"), body: parts, duplex: "half" } as RequestInit);
     expect(errCode(await ok.json())).toBe(-32001);
     // A body that is not UTF-8 is a parse error, and an empty one too.
-    const bad = await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a"), body: Uint8Array.of(0xff, 0xfe, 0x7b) });
+    const bad = await gw("https://gw/a2a", { method: "POST", headers: bearer("a"), body: Uint8Array.of(0xff, 0xfe, 0x7b) });
     expect(errCode(await bad.json())).toBe(-32700);
-    expect(errCode(await (await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a") })).json())).toBe(-32700);
+    expect(errCode(await (await gw("https://gw/a2a", { method: "POST", headers: bearer("a") })).json())).toBe(-32700);
   });
 
   it("answers malformed JSON-RPC with the standard errors and never echoes input", async () => {
     const { bearer } = fresh();
-    const post = async (body: string) => (await (await SELF.fetch("https://gw/a2a", { method: "POST", headers: bearer("a"), body })).json()) as any;
+    const post = async (body: string) => (await (await gw("https://gw/a2a", { method: "POST", headers: bearer("a"), body })).json()) as any;
     expect(errCode(await post("{nope"))).toBe(-32700);
     for (const b of ['[]', '"x"', '{"jsonrpc":"1.0","method":"GetTask"}', '{"jsonrpc":"2.0"}', '{"jsonrpc":"2.0","method":"GetTask","id":{}}', '{"jsonrpc":"2.0","method":"GetTask","id":true}', `{"jsonrpc":"2.0","method":"GetTask","id":"${"x".repeat(129)}"}`]) {
       expect(errCode(await post(b)), b).toBe(-32600);
@@ -434,7 +434,7 @@ describe("lifecycle over the transport", () => {
     expect(errCode(await w.bob("STATUS", "nope", 1))).toBe(-32001);
     expect(errCode(await w.cancel("nope", 1, "bob", "alice"))).toBe(-32001);
     const other = fresh();
-    const r = await SELF.fetch("https://gw/a2a", { method: "POST", headers: other.bearer("alice"), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: taskHex("tk") } }) });
+    const r = await gw("https://gw/a2a", { method: "POST", headers: other.bearer("alice"), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: taskHex("tk") } }) });
     expect(errCode(await r.json())).toBe(-32001);
     for (const id of ["a/b", "tk", "nope", taskHex("tk").toUpperCase(), taskHex("tk") + "0", taskHex("tk").slice(1), "CANARY-id"]) {
       expect(errCode(await w.rpc("alice", "GetTask", { id })), id).toBe(-32602);
@@ -452,7 +452,7 @@ describe("lifecycle over the transport", () => {
     expect(r.result.task.status.state).toBe("TASK_STATE_SUBMITTED");
     // One bucket larger is over the request cap, refused unparsed.
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: w.msg("TASK", "bigger", "alice", "bob", undefined, { bucket: MAX_BUCKET * 2 }) });
-    expect((await SELF.fetch("https://gw/a2a", { method: "POST", headers: w.bearer("alice"), body })).status).toBe(413);
+    expect((await gw("https://gw/a2a", { method: "POST", headers: w.bearer("alice"), body })).status).toBe(413);
     // Under the cap but not a bucket: refused as malformed.
     const odd = { raw: b64(encodeWire({ header: header("TASK", { tenant: w.T, sender: "alice", target: "bob", task: taskBytes("odd") }), ctLen: 600_000 })), mediaType: SEALED_MEDIA_TYPE };
     expect(errCode(await w.rpc("alice", "SendMessage", { message: { messageId: "m1", role: "ROLE_USER", parts: [odd] } }))).toBe(-32602);

@@ -6,17 +6,24 @@ import { describe, expect, it } from "vitest";
 import { REQUEST_TTL_MS, MAX_PENDING, MAX_PENDING_PER_OWNER, DECIDED_RETENTION_MS } from "../src/tenant";
 
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
-const post = (path: string, body: unknown, auth?: string) =>
+const post = async (path: string, body: unknown, auth?: string | Promise<string>) =>
   SELF.fetch(`https://gw${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    headers: { "content-type": "application/json", ...(auth ? { Authorization: await auth } : {}) },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
+
+// A session as the OIDC callback would issue it, minted straight in the tenant's
+// Durable Object (there is no HTTP route that does this without a verified login).
+const session = async (t: string, role: "admin" | "user", email: string) => {
+  const s = await env.TENANT.get(env.TENANT.idFromName(t)).createSession(email, role);
+  return `Bearer ps_${t}.${s.secret}`;
+};
 
 let n = 0;
 const fresh = () => {
   const t = `ten${++n}`;
-  return { t, admin: `Bearer dev-admin:${t}`, user: (e = "alice@example.test") => `Bearer dev-user:${t}:${e}` };
+  return { t, admin: session(t, "admin", "admin@example.test"), user: (e = "alice@example.test") => session(t, "user", e) };
 };
 const json = async (r: Response) => (await r.json()) as any;
 
@@ -64,7 +71,7 @@ describe("interactive enrollment and the approval queue", () => {
   it("requires a signed-in user and a valid key and name", async () => {
     const x = fresh();
     expect((await post("/v1/enroll/request", { name: "d", signing_key: key() })).status).toBe(401);
-    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.admin)).status).toBe(401);
+    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.admin)).status).toBe(403);
     for (const body of [{ name: "d", signing_key: "AAAA" }, { name: "d", signing_key: "%%%" }, { name: "", signing_key: key() }, { name: "x".repeat(101), signing_key: key() }]) {
       expect((await post("/v1/enroll/request", body, x.user())).status).toBe(400);
     }
@@ -100,9 +107,10 @@ describe("interactive enrollment and the approval queue", () => {
     const { vi } = await import("vitest");
     vi.useFakeTimers({ now: Date.now() + REQUEST_TTL_MS + 1000, toFake: ["Date"] });
     try {
-      expect((await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, x.admin)).status).toBe(404);
+      const admin = session(x.t, "admin", "admin@example.test"); // the earlier session has expired by now
+      expect((await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, admin)).status).toBe(404);
       expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(404);
-      expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending).toHaveLength(0);
+      expect((await json(await post("/v1/admin/enrollments", {}, admin))).pending).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }
@@ -180,8 +188,8 @@ describe("admin-minted pod tokens", () => {
   it("is admin only", async () => {
     const x = fresh();
     expect((await post("/v1/admin/enrollment-tokens", { owner: "svc" })).status).toBe(401);
-    expect((await post("/v1/admin/enrollment-tokens", { owner: "svc" }, x.user())).status).toBe(401);
-    expect((await post("/v1/admin/enrollments", {}, x.user())).status).toBe(401);
+    expect((await post("/v1/admin/enrollment-tokens", { owner: "svc" }, x.user())).status).toBe(403);
+    expect((await post("/v1/admin/enrollments", {}, x.user())).status).toBe(403);
     expect((await post("/v1/admin/enrollment-tokens", { owner: "" }, x.admin)).status).toBe(400);
   });
 
@@ -243,22 +251,12 @@ describe("admin-minted pod tokens", () => {
 });
 
 describe("routing", () => {
-  it("rejects non-POST, bad JSON and unknown admin paths; fails closed without dev auth", async () => {
+  it("rejects non-POST, bad JSON and unknown admin paths", async () => {
     const x = fresh();
-    expect((await SELF.fetch("https://gw/v1/admin/enrollments", { headers: { Authorization: x.admin } })).status).toBe(405);
+    expect((await SELF.fetch("https://gw/v1/admin/enrollments", { headers: { Authorization: await x.admin } })).status).toBe(405);
     expect((await post("/v1/admin/enrollments", "{", x.admin)).status).toBe(400);
     expect((await post("/v1/admin/enrollments", "[]", x.admin)).status).toBe(400);
     expect((await post("/v1/admin/nope", {}, x.admin)).status).toBe(404);
-    const { default: worker } = await import("../src/index");
-    const req = new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } });
-    expect((await worker.fetch(req, { ...env, DEV_AUTH: undefined })).status).toBe(401);
-    for (const v of ["0", "true", "", "2", " 1", "yes"]) {
-      const mk = () => new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } });
-      expect((await worker.fetch(mk(), { ...env, DEV_AUTH: v })).status, `DEV_AUTH=${v}`).toBe(401);
-      const u = new Request("https://gw/v1/enroll/request", { method: "POST", body: JSON.stringify({ name: "d", signing_key: key() }), headers: { Authorization: x.user() } });
-      expect((await worker.fetch(u, { ...env, DEV_AUTH: v })).status, `DEV_AUTH=${v}`).toBe(401);
-    }
-    expect((await worker.fetch(new Request("https://gw/v1/admin/enrollments", { method: "POST", body: "{}", headers: { Authorization: x.admin } }), { ...env, DEV_AUTH: "1" })).status).toBe(200);
   });
 });
 
@@ -307,7 +305,7 @@ describe("root-signed bindings and the revocation list (relayed, never trusted)"
     for (const bad of [null, [], "x", { ...binding(e.sk), version: 0 }, { ...binding(e.sk), version: 1.5 }, { ...binding(e.sk), device_id: 5 }, { ...binding(e.sk), pad: "x".repeat(5000) }]) {
       expect(await code({ id: e.id, binding: bad })).toBe(400);
     }
-    expect(await code({ id: e.id, binding: binding(e.sk, 3) }, x.user())).toBe(401);
+    expect(await code({ id: e.id, binding: binding(e.sk, 3) }, x.user())).toBe(403);
     // A binding is not posted for another tenant's enrollment.
     expect(await code({ id: e.id, binding: binding(e.sk, 3) }, fresh().admin)).toBe(404);
   });
@@ -331,7 +329,7 @@ describe("root-signed bindings and the revocation list (relayed, never trusted)"
     for (const bad of [null, [], { ...l(4), version: 0 }, { ...l(4), pad: "x".repeat(70000) }]) {
       expect((await post("/v1/admin/revocations", { list: bad }, x.admin)).status).toBe(400);
     }
-    expect((await post("/v1/admin/revocations", { list: l(4) }, x.user())).status).toBe(401);
+    expect((await post("/v1/admin/revocations", { list: l(4) }, x.user())).status).toBe(403);
     expect((await post("/v1/revocations", { tenant: "bad tenant!" })).status).toBe(400);
     expect((await post("/v1/revocations", { tenant: fresh().t })).status).toBe(404); // tenants are separate
   });
