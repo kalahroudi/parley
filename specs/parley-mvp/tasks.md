@@ -19,13 +19,13 @@ Deliverable: repository, CI on three OSes, local harness that boots a gateway an
 - [x] T005 Log-redaction wrapper (ids, states, sizes, timestamps only) with a build test that fails on a leaked payload field
 - [x] T006 Canary test scaffold
 - [x] T007 `tests/journeys.md` journey matrix
-- [ ] T008 Acceptance: harness boots; a release build is reproducible and verifiable with the project key; the redaction build test fails on a leaked payload field
+- [x] T008 Acceptance: harness boots; a release build is reproducible and verifiable with the project key; the redaction build test fails on a leaked payload field
 
 ## Phase 1: Tunnel and identity (about 3 weeks)
 
 Deliverable: two daemons enroll under an admin root and show online; revocation works. Spikes 1, 2 and 8.
 
-- [ ] T101 WSS to Device DO with hibernation, reconnect and resume
+- [x] T101 WSS to Device DO with hibernation, reconnect and resume
 - [ ] T102 OIDC login (Google and Entra) with a mock IdP for tests
 - [ ] T103 `parley-cli admin init`: root key and recovery code
 - [ ] T104 Enrollment tokens and the approval queue

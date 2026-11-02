@@ -1,6 +1,9 @@
-.PHONY: test test-layout test-go dev
+.PHONY: test test-layout test-go test-gateway dev
 
-test: test-layout test-go
+test: test-layout test-go test-gateway
+
+test-gateway:
+	cd gateway && npm ci && npm run typecheck && npm test
 
 test-layout:
 	node --test "tests/**/*.test.mjs"

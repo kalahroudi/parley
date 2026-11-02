@@ -4,5 +4,17 @@
   "version": "0.0.0",
   "license": "Apache-2.0",
   "type": "module",
-  "description": "Parley gateway Worker (A2A transport, Durable Objects, admin API)"
+  "description": "Parley gateway Worker (A2A transport, Durable Objects, admin API)",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc",
+    "dev": "wrangler dev --port ${PORT:-8787}"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.12",
+    "@cloudflare/workers-types": "^5.20261102.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.156.1"
+  }
 }

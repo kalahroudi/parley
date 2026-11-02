@@ -44,5 +44,14 @@ jobs:
         run: go vet ./...
       - name: Go test
         run: go test -race ./...
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      - name: Gateway typecheck
+        working-directory: gateway
+        run: npm run typecheck
+      - name: Gateway tests
+        working-directory: gateway
+        run: npm test
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
