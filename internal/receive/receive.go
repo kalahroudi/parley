@@ -143,7 +143,8 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 	if err != nil {
 		return err
 	}
-	if err := r.cfg.Replay.Accept(replay.Key{Sender: h.SenderDevice, Task: h.TaskID, Seq: h.Seq}, h.Expiry); err != nil {
+	rk := replay.Key{Sender: h.SenderDevice, Task: h.TaskID, Seq: h.Seq}
+	if err := r.cfg.Replay.Accept(rk, h.Expiry); err != nil {
 		if errors.Is(err, replay.ErrReplay) {
 			return fmt.Errorf("%w: %w", ErrDropped, err)
 		}
@@ -151,10 +152,14 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 	}
 
 	// Erase. Exactly one of any concurrent deliveries wins this.
+	// Nothing has run if erase or ack fails, so the resend must not meet our
+	// own replay entry.
 	if err := r.cfg.Pool.Consume(id); err != nil {
+		r.cfg.Replay.Forget(rk)
 		return fmt.Errorf("%w: %w", ErrDropped, err)
 	}
 	if err := ack(); err != nil {
+		r.cfg.Replay.Forget(rk)
 		return fmt.Errorf("%w: %w", ErrAck, err)
 	}
 	return execute(Delivered{Header: h, Owner: owner, Plaintext: pt})

@@ -192,6 +192,23 @@ func TestAckFailureSkipsExecuteAndKeyStaysErased(t *testing.T) {
 	}
 }
 
+// Nothing ran, so the caller's resend (same task and sequence, fresh prekey)
+// must not be dropped by our own replay entry.
+func TestResendAfterAckFailureExecutes(t *testing.T) {
+	f := newFixture(t, nil)
+	var task [16]byte
+	rand.Read(task[:])
+	fix := func(h *envelope.Header) { h.TaskID = task }
+	m, _ := f.seal(fix)
+	if _, err := f.receive(m, errors.New("socket closed"), nil); !errors.Is(err, ErrAck) {
+		t.Fatal(err)
+	}
+	m, _ = f.seal(fix)
+	if ru, err := f.receive(m, nil, nil); err != nil || len(ru.events) != 2 {
+		t.Fatalf("resend: %v %v", err, ru.events)
+	}
+}
+
 func TestRedeliveryDropped(t *testing.T) {
 	f := newFixture(t, nil)
 	m, _ := f.seal(nil)
@@ -418,6 +435,9 @@ func TestLostRaceAtErase(t *testing.T) {
 	ru, err := f.receive(m, nil, nil)
 	if !errors.Is(err, ErrDropped) || len(ru.events) != 0 {
 		t.Fatalf("%v %v", err, ru.events)
+	}
+	if f.table.Len() != 0 {
+		t.Fatal("replay entry kept for a message that never ran")
 	}
 }
 
