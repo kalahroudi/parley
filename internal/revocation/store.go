@@ -21,12 +21,40 @@ var ErrStore = errors.New("revocation: store unavailable or corrupt")
 // FileStore is a Store backed by one JSON file, replaced atomically (temp file,
 // fsync, rename) so a failed write never leaves a truncated file behind.
 type FileStore struct {
-	path   string
-	rename func(oldpath, newpath string) error // replaceable in tests
+	path string
+	// Replaceable in tests, to reach the failure paths of a real disk.
+	create  func(dir, pattern string) (tmpFile, error)
+	rename  func(oldpath, newpath string) error
+	syncDir func(dir string) error
+}
+
+type tmpFile interface {
+	io.Writer
+	Name() string
+	Sync() error
+	Close() error
+}
+
+func createTemp(dir, pattern string) (tmpFile, error) { return os.CreateTemp(dir, pattern) } // 0600
+
+var goos = runtime.GOOS // replaceable in tests
+
+func syncDir(dir string) error {
+	if goos == "windows" { // Windows cannot open or sync directories.
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // NewFileStore returns a store at path. The parent directory must exist.
-func NewFileStore(path string) *FileStore { return &FileStore{path: path, rename: os.Rename} }
+func NewFileStore(path string) *FileStore {
+	return &FileStore{path: path, create: createTemp, rename: os.Rename, syncDir: syncDir}
+}
 
 func (f *FileStore) Load() (*Signed, error) {
 	data, err := os.ReadFile(f.path)
@@ -51,7 +79,7 @@ func (f *FileStore) Load() (*Signed, error) {
 func (f *FileStore) Save(s *Signed) (err error) {
 	data, _ := json.Marshal(s) // Signed holds only strings, numbers, times and bytes: cannot fail.
 	dir := filepath.Dir(f.path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(f.path)+".tmp*") // created 0600
+	tmp, err := f.create(dir, filepath.Base(f.path)+".tmp*")
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStore, err)
 	}
@@ -74,15 +102,5 @@ func (f *FileStore) Save(s *Signed) (err error) {
 	if err = f.rename(tmp.Name(), f.path); err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" { // Windows cannot open or sync directories.
-		d, derr := os.Open(dir)
-		if derr != nil {
-			return derr
-		}
-		defer d.Close()
-		if err = d.Sync(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return f.syncDir(dir)
 }
