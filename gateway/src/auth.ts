@@ -16,30 +16,40 @@ export type AuthEnv = {
   ENTRA_ISSUER?: string;
 };
 
-// oidc.ts caches discovery and JWKS per Provider object, so build the providers
-// once per env object rather than on every request.
-const providerCache = new WeakMap<AuthEnv, Record<string, Provider>>();
+// oidc.ts caches discovery and JWKS per Provider object, and a Worker may hand
+// us a different env object on each request. Keep one Provider per distinct
+// config (module-level, in memory only) so those caches survive across requests.
+const providerCache = new Map<string, Provider>();
+const cached = (config: unknown[], make: () => Provider): Provider => {
+  const key = JSON.stringify(config);
+  let p = providerCache.get(key);
+  if (!p) providerCache.set(key, (p = make()));
+  return p;
+};
 
 export function providers(env: AuthEnv): Record<string, Provider> {
-  const cached = providerCache.get(env);
-  if (cached) return cached;
   const out: Record<string, Provider> = {};
-  providerCache.set(env, out);
   if (env.GOOGLE_CLIENT_ID) {
-    out.google = google({
-      clientId: env.GOOGLE_CLIENT_ID,
-      clientSecret: env.GOOGLE_CLIENT_SECRET,
-      hostedDomain: env.GOOGLE_HOSTED_DOMAIN,
-      issuer: env.GOOGLE_ISSUER,
-    });
+    const c = [env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_HOSTED_DOMAIN, env.GOOGLE_ISSUER];
+    out.google = cached(["google", ...c], () =>
+      google({
+        clientId: env.GOOGLE_CLIENT_ID!,
+        clientSecret: env.GOOGLE_CLIENT_SECRET,
+        hostedDomain: env.GOOGLE_HOSTED_DOMAIN,
+        issuer: env.GOOGLE_ISSUER,
+      }),
+    );
   }
   if (env.ENTRA_CLIENT_ID && env.ENTRA_TENANT_ID) {
-    out.entra = entra({
-      clientId: env.ENTRA_CLIENT_ID,
-      clientSecret: env.ENTRA_CLIENT_SECRET,
-      tenantId: env.ENTRA_TENANT_ID,
-      issuer: env.ENTRA_ISSUER,
-    });
+    const c = [env.ENTRA_CLIENT_ID, env.ENTRA_CLIENT_SECRET, env.ENTRA_TENANT_ID, env.ENTRA_ISSUER];
+    out.entra = cached(["entra", ...c], () =>
+      entra({
+        clientId: env.ENTRA_CLIENT_ID!,
+        clientSecret: env.ENTRA_CLIENT_SECRET,
+        tenantId: env.ENTRA_TENANT_ID!,
+        issuer: env.ENTRA_ISSUER,
+      }),
+    );
   }
   return out;
 }
