@@ -11,6 +11,7 @@
 #
 #   scripts/malgw-mutations.sh            # all mutants
 #   scripts/malgw-mutations.sh receive    # only labels containing "receive"
+#   MALGW_RUN='Crash|Junk' scripts/malgw-mutations.sh   # which tests must kill them (go test -run)
 #
 # Fields are separated by "@@": file, original text, replacement, label.
 set -eu
@@ -40,6 +41,12 @@ internal/binding/binding.go@@return ErrRollback@@return nil@@binding: rollback a
 internal/prekey/prekey.go@@!bytes.Equal(s.Nonce, e.Nonce)@@false@@prekey: nonce not matched
 internal/prekey/prekey.go@@!ed25519.Verify(signingKey, s.Encode(), s.Signature)@@false@@prekey: signature not verified
 internal/prekey/prekey.go@@!e.Now.Before(s.ExpiresAt)@@false@@prekey: expiry not checked
+internal/prekey/prekey.go@@held >= p.cfg.PerCaller@@false@@prekey: per-caller request limit ignored
+internal/prekey/prekey.go@@err = fn(p.scalar(s.index))@@err = fn(p.scalar(s.index)); if err != nil { return err }@@prekey: a failed open burns the key
+internal/prekey/prekey.go@@return slot{}, ErrExpired@@return s, nil@@prekey: expired key still found
+internal/receive/receive.go@@started = true@@_ = started@@receive: replay entry forgotten after execute started
+internal/receive/receive.go@@case errors.Is(err, prekey.ErrExpired):@@case false:@@receive: expired prekey not reported as expired
+internal/receive/receive.go@@errors.Is(err, prekey.ErrUnknown), @@@@receive: a gone prekey not dropped
 internal/replay/replay.go@@if _, dup := t.seen[k]; dup {@@if _, dup := t.seen[k]; false \&\& dup {@@replay: duplicate accepted
 internal/acceptance/malgw_test.go@@h.Seq > out.nextSeq@@false@@harness reply path: gap not detected
 internal/acceptance/malgw_test.go@@!bytes.Equal(h.PrevHash, out.last)@@false@@harness reply path: chain not checked
@@ -64,7 +71,7 @@ for row in $table; do
 	if ! go test -count=1 -run '^$' ./internal/acceptance >/dev/null 2>&1; then
 		echo "BROKEN   $label: the mutant does not compile"
 		survived=$((survived + 1))
-	elif go test -count=1 ./internal/acceptance >/dev/null 2>&1; then
+	elif go test -count=1 -run "${MALGW_RUN:-.}" ./internal/acceptance >/dev/null 2>&1; then
 		echo "SURVIVED $label"
 		survived=$((survived + 1))
 	else

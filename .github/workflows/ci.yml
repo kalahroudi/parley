@@ -89,3 +89,8 @@ jobs:
       - name: Mutation testing (tier 1)
         if: runner.os == 'Linux'
         run: scripts/mutation.sh
+      # Slow and Linux-only: each defence the malicious-gateway and prekey crash
+      # tests exercise is removed in turn and the acceptance suite must go red.
+      - name: Mutation testing (malicious gateway and prekey crash points)
+        if: runner.os == 'Linux'
+        run: scripts/malgw-mutations.sh
