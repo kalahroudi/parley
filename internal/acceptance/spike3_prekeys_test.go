@@ -25,7 +25,7 @@ import (
 
 const taskText = "review this diff"
 
-type world struct {
+type crashWorld struct {
 	t       *testing.T
 	now     time.Time
 	callerK ed25519.PrivateKey
@@ -41,11 +41,11 @@ type world struct {
 	acks  int
 }
 
-func (w *world) clock() time.Time { return w.now }
+func (w *crashWorld) clock() time.Time { return w.now }
 
-func newWorld(t *testing.T) *world {
+func newCrashWorld(t *testing.T) *crashWorld {
 	t.Helper()
-	w := &world{t: t, now: t0}
+	w := &crashWorld{t: t, now: t0}
 	rootPub, rootPriv, _ := ed25519.GenerateKey(rand.Reader)
 	w.rootPub = rootPub
 	cpub, cpriv, _ := ed25519.GenerateKey(rand.Reader)
@@ -63,7 +63,7 @@ func newWorld(t *testing.T) *world {
 
 // restart models the target daemon dying and coming back: a fresh pool with
 // new random keys and an empty replay table.
-func (w *world) restart() {
+func (w *crashWorld) restart() {
 	w.t.Helper()
 	if w.pool != nil {
 		w.pool.Close()
@@ -97,7 +97,7 @@ func (w *world) restart() {
 }
 
 // send is one caller attempt: a fresh prekey, a fresh task id, wire bytes.
-func (w *world) send(taskID [16]byte) []byte {
+func (w *crashWorld) send(taskID [16]byte) []byte {
 	w.t.Helper()
 	nonce := make([]byte, 16)
 	rand.Read(nonce)
@@ -122,7 +122,7 @@ func (w *world) send(taskID [16]byte) []byte {
 }
 
 // deliver parses wire bytes and runs the receive path.
-func (w *world) deliver(wire []byte) error {
+func (w *crashWorld) deliver(wire []byte) error {
 	m, err := envelope.Unmarshal(wire)
 	if err != nil {
 		return err
@@ -139,7 +139,7 @@ func (w *world) deliver(wire []byte) error {
 		})
 }
 
-func (w *world) wantRuns(n int) {
+func (w *crashWorld) wantRuns(n int) {
 	w.t.Helper()
 	if len(w.runs) != n {
 		w.t.Fatalf("executed %d times, want %d", len(w.runs), n)
@@ -177,7 +177,7 @@ func TestCrashPointsFailCleanAndResend(t *testing.T) {
 				name = c.name + "/restart"
 			}
 			t.Run(name, func(t *testing.T) {
-				w := newWorld(t)
+				w := newCrashWorld(t)
 				var task [16]byte
 				rand.Read(task[:])
 				first := w.send(task)
@@ -241,7 +241,7 @@ func TestCrashPointsFailCleanAndResend(t *testing.T) {
 // Junk of every kind, sent before the real frame, cannot burn the key, fill the
 // replay table or stop the real frame from running.
 func TestJunkFramesCannotBurnKeys(t *testing.T) {
-	w := newWorld(t)
+	w := newCrashWorld(t)
 	var task [16]byte
 	rand.Read(task[:])
 	good := w.send(task)
