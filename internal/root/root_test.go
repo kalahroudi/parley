@@ -107,7 +107,9 @@ func TestFileStore(t *testing.T) {
 	if fi, _ := os.Stat(filepath.Join(dir, "root.key")); fi.Mode().Perm()&0o077 != 0 && os.PathSeparator == '/' {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	if _, err := (FileStore{Dir: filepath.Join(dir, "root.key", "x")}).Exists(); err == nil {
+	// A NUL in the path is a stat error on every OS. (A path through a regular
+	// file is ENOTDIR on Unix but "not found" on Windows, so it can't be used.)
+	if _, err := (FileStore{Dir: "bad\x00dir"}).Exists(); err == nil {
 		t.Fatal("want stat error")
 	}
 	if err := (FileStore{Dir: filepath.Join(dir, "root.key")}).Save(r.Private); err == nil {
