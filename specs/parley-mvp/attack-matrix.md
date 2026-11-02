@@ -86,5 +86,5 @@ plan.md), attack, outcome, test, subtest (exact `t.Run` name, or `-`).
 | A64 | late reply after CANCEL | reply key erased on CANCEL; late reply refused (shipped state machine) | pending T301 | TestPending_LateReplyAfterCancelIsRejected | - |
 | A65 | disk clone | disk clone or restored backup holds no usable keys | rejected | TestDiskCloneAndBackupHoldNoKeys | - |
 | A66 | restart invariant | replay safety across a restart relies on memory-only prekeys | rejected | TestRestartInvariant | - |
-| A67 | core dump and swap | core-dump and swap scans find no key bytes | pending T209 | TestPending_CoreDumpAndSwapScansFindNoKeyBytes | - |
+| A67 | core dump and swap | core-dump and swap scans find no key bytes (T209 must convert: when T209 ticks, replace TestPending_CoreDumpAndSwapScansFindNoKeyBytes with the real scan test, rename it, and change this row to rejected with the new test name) | pending T209 | TestPending_CoreDumpAndSwapScansFindNoKeyBytes | - |
 | A68 | harness control | no attack: an honest gateway delivers tasks, replies and CANCEL (so the attack tests fail only because of the attack) | control | TestHonestGateway | - |

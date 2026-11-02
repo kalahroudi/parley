@@ -1,0 +1,1 @@
+FAIL	./internal/revocation FuzzDecodeVerify [setup failed]

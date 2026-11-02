@@ -65,7 +65,7 @@ def parse_header(h):
     return f
 
 def main_msg(path):
-    d = json.load(open(path))
+    d = json.load(open(path, encoding="utf-8"))
     pub = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(d["sender_signing_public_key"]))
     assert ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(d["sender_signing_seed"])).public_key().public_bytes_raw() == pub.public_bytes_raw()
     priv = bytes.fromhex(d["recipient_prekey_private"])
@@ -121,7 +121,7 @@ def encrypt_file(key, pt):
     return out
 
 def main_padfile(path):
-    d = json.load(open(path))
+    d = json.load(open(path, encoding="utf-8"))
     for v in d["pad"]:
         p = pad(plaintext(v["plaintext_len"]))
         assert len(p) == v["padded_len"] and hashlib.sha256(p).hexdigest() == v["padded_sha256"], v
@@ -142,7 +142,7 @@ def main_padfile(path):
 # --- root-signed bindings (../../binding/testdata/vectors.json) --------------
 
 def main_binding(path):
-    d = json.load(open(path))
+    d = json.load(open(path, encoding="utf-8"))
     root = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(d["root_seed"]))
     pub = root.public_key()
     assert pub.public_bytes_raw().hex() == d["root_public_key"]
