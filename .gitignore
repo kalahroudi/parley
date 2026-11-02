@@ -10,3 +10,6 @@ dist/
 .DS_Store
 /gateway/reports/
 /gateway/.stryker-tmp/
+
+# T109: results of a real-Cloudflare check (timings and counters only)
+tests/reality/results.json

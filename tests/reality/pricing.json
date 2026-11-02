@@ -1,0 +1,18 @@
+{
+  "pricingSource": "UNVERIFIED: copy from https://developers.cloudflare.com/durable-objects/platform/pricing/ and /workers/platform/pricing/ when the check is run",
+  "pricingAsOf": "NOT SET",
+  "wsMessageRatio": 20,
+  "prices": {
+    "planPerMonth": 5,
+    "includedRequests": 1000000,
+    "perMillionRequests": 0.15,
+    "includedGbSeconds": 400000,
+    "perMillionGbSeconds": 12.5,
+    "includedRowsRead": 25000000000,
+    "perMillionRowsRead": 0.001,
+    "includedRowsWritten": 50000000,
+    "perMillionRowsWritten": 1,
+    "includedStorageGb": 5,
+    "perGbMonthStorage": 0.2
+  }
+}
