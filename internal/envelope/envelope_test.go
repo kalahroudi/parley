@@ -480,3 +480,23 @@ func TestDecodeHeaderTruncated(t *testing.T) {
 		t.Fatal("malformed header accepted")
 	}
 }
+
+// Times are encoded as whole seconds, so a header that Seal accepts must
+// still decode: an expiry less than a second after issue is rejected up front.
+func TestSubSecondExpiryRejected(t *testing.T) {
+	k := newKeys(t)
+	h := taskHeader()
+	h.IssuedAt = t0.Add(100 * time.Millisecond)
+	h.Expiry = t0.Add(900 * time.Millisecond)
+	if _, err := Seal(k.sign, k.prekeyPub, h, []byte("x")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Seal accepted sub-second validity window: %v", err)
+	}
+	h.Expiry = t0.Add(1500 * time.Millisecond)
+	m, err := Seal(k.sign, k.prekeyPub, h, []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unmarshal(m.Marshal()); err != nil {
+		t.Fatalf("sealed message does not round-trip: %v", err)
+	}
+}

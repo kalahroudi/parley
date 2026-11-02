@@ -77,7 +77,7 @@ func (h Header) validate() error {
 	if h.Tenant == "" || h.SenderDevice == "" || h.SenderKeyID == "" || h.BindingVersion == 0 ||
 		h.TargetDevice == "" || h.PrekeyID == "" || h.ContextID == "" ||
 		h.Type < TypeTask || h.Type > TypeCancel ||
-		h.IssuedAt.IsZero() || !h.Expiry.After(h.IssuedAt) ||
+		h.IssuedAt.IsZero() || h.Expiry.Unix() <= h.IssuedAt.Unix() ||
 		(len(h.RPK) != 0 && len(h.RPK) != KeySize) {
 		return ErrInvalid
 	}
