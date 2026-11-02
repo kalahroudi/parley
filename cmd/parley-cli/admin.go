@@ -39,7 +39,9 @@ func adminInit(args []string, out, errw io.Writer, store root.Store, defaultBack
 		fmt.Fprintln(errw, "error:", err)
 		return 1
 	}
-	if err := os.WriteFile(*backupPath, r.Backup, 0o600); err != nil {
+	// O_EXCL: never overwrite an existing backup, which may belong to a root
+	// whose recovery code someone already holds.
+	if err := writeNew(*backupPath, r.Backup); err != nil {
 		fmt.Fprintln(errw, "error:", err)
 		return 1
 	}
@@ -56,4 +58,21 @@ func adminInit(args []string, out, errw io.Writer, store root.Store, defaultBack
 	fmt.Fprintln(out, "Write the recovery code down now; it is shown only once and cannot be recovered.")
 	fmt.Fprintln(out, "Share the fingerprint with your users through a channel other than Parley (chat or email).")
 	return 0
+}
+
+func writeNew(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
