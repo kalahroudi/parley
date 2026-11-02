@@ -72,10 +72,14 @@ func (g *fakeGateway) handle(w http.ResponseWriter, r *http.Request) {
 	if g.welcome != nil {
 		wel = g.welcome(resumed)
 	}
-	g.conns = append(g.conns, c)
 	g.mu.Unlock()
 	b, _ := json.Marshal(wel)
 	_ = c.Write(ctx, websocket.MessageText, b)
+	// Registered only once the welcome is on the wire, so a push can never overtake
+	// it (the client rejects an event before the welcome).
+	g.mu.Lock()
+	g.conns = append(g.conns, c)
+	g.mu.Unlock()
 	for {
 		_, data, err := c.Read(ctx)
 		if err != nil {
