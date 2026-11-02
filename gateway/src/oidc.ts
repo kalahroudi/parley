@@ -96,7 +96,7 @@ export type Ctx = { flowSecret: string; fetch?: Fetch; now?: () => number };
 // the isolate; an unknown kid triggers one JWKS refetch to follow key rotation.
 type Meta = { authorization_endpoint: string; token_endpoint: string; jwks_uri: string };
 const metaCache = new WeakMap<Provider, Meta>();
-const jwksCache = new WeakMap<Provider, { keys: JsonWebKey[] & { kid?: string }[] }>();
+const jwksCache = new WeakMap<Provider, { keys: (JsonWebKey & { kid?: string })[] }>();
 
 async function getJson(f: Fetch, url: string, init?: RequestInit) {
   const res = await f(url, init);
@@ -148,12 +148,12 @@ export async function startLogin(
 }
 
 async function verifyIdToken(p: Provider, f: Fetch, meta: Meta, jwt: string, nonce: string, nowMs: number) {
-  const parts = jwt.split(".");
-  if (parts.length !== 3) throw new OidcError("bad_token");
+  const [h, c, s, extra] = jwt.split(".");
+  if (!h || !c || !s || extra !== undefined) throw new OidcError("bad_token");
   let header: any, claims: any;
   try {
-    header = parseJson(unb64u(parts[0]));
-    claims = parseJson(unb64u(parts[1]));
+    header = parseJson(unb64u(h));
+    claims = parseJson(unb64u(c));
   } catch {
     throw new OidcError("bad_token");
   }
@@ -166,7 +166,7 @@ async function verifyIdToken(p: Provider, f: Fetch, meta: Meta, jwt: string, non
   }
   if (!jwk) throw new OidcError("bad_token", "unknown signing key");
   const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
-  const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, unb64u(parts[2]), enc.encode(`${parts[0]}.${parts[1]}`));
+  const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, unb64u(s), enc.encode(`${h}.${c}`));
   if (!valid) throw new OidcError("bad_signature");
 
   const nowS = nowMs / 1000;

@@ -107,10 +107,38 @@ func TestFileStore(t *testing.T) {
 	if fi, _ := os.Stat(filepath.Join(dir, "root.key")); fi.Mode().Perm()&0o077 != 0 && os.PathSeparator == '/' {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	if _, err := (FileStore{Dir: filepath.Join(dir, "root.key", "x")}).Exists(); err == nil {
+	// A NUL in the path is a stat error on every OS. (A path through a regular
+	// file is ENOTDIR on Unix but "not found" on Windows, so it can't be used.)
+	if _, err := (FileStore{Dir: "bad\x00dir"}).Exists(); err == nil {
 		t.Fatal("want stat error")
 	}
 	if err := (FileStore{Dir: filepath.Join(dir, "root.key")}).Save(r.Private); err == nil {
 		t.Fatal("want mkdir error")
+	}
+}
+
+func TestFileStoreSaveFailureLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := New()
+	old := syncFile
+	syncFile = func(*os.File) error { return errors.New("disk full") }
+	err := FileStore{Dir: dir}.Save(r.Private)
+	syncFile = old
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("leftovers: %v", ents)
+	}
+	// An existing key is untouched and no temp file remains.
+	s := FileStore{Dir: dir}
+	if err := s.Save(r.Private); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(r.Private); !errors.Is(err, ErrExists) {
+		t.Fatal(err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("leftovers: %v", ents)
 	}
 }

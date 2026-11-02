@@ -193,11 +193,28 @@ test("worker routes: login redirects, callback returns identity, errors are gene
     assert.equal((await handle(new Request("http://gw.test/auth/google/login", { method: "POST" }), env)).status, 404);
     assert.equal((await handle(new Request("http://gw.test/healthz"), env)).status, 200);
 
-    const idpDown = await handle(new Request("http://gw.test/auth/google/login"), env, async () => new Response("x", { status: 503 }));
+    const idpDown = await handle(new Request("http://gw.test/auth/google/login"), { ...env, GOOGLE_CLIENT_ID: "uncached" }, async () => new Response("x", { status: 503 }));
     assert.equal(idpDown.status, 502);
-    const boom = await handle(new Request("http://gw.test/auth/entra/login"), env, async () => {
+    const boom = await handle(new Request("http://gw.test/auth/entra/login"), { ...env, ENTRA_CLIENT_ID: "uncached" }, async () => {
       throw new TypeError("net");
     });
     assert.equal(boom.status, 500);
     assert.deepEqual(await boom.json(), { error: "server_error" });
+  }));
+
+test("worker routes reuse discovery and JWKS across requests with distinct env objects", () =>
+  withIdp(async (idp) => {
+    const hits = [];
+    const f = (u, i) => (hits.push(String(u)), fetch(u, i));
+    for (let i = 0; i < 2; i++) {
+      // a fresh env object per request, as a Worker may provide
+      const env = { FLOW_SECRET: "s", GOOGLE_CLIENT_ID: "cid", GOOGLE_ISSUER: idp.issuer };
+      const login = await handle(new Request("http://gw.test/auth/google/login"), env, f);
+      const q = await browse(login.headers.get("location"));
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      const cb = await handle(new Request(`http://gw.test/auth/google/callback?${q}`, { headers: { cookie } }), env, f);
+      assert.equal(cb.status, 200);
+    }
+    assert.equal(hits.filter((u) => u.endsWith("/.well-known/openid-configuration")).length, 1);
+    assert.equal(hits.filter((u) => u.endsWith("/jwks")).length, 1);
   }));

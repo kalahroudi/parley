@@ -66,6 +66,18 @@ func TestAdminInitErrors(t *testing.T) {
 	if adminInit(nil, &out, &errw, failStore{}, dir) != 1 {
 		t.Fatal("write")
 	}
+	// An existing backup file is never overwritten or removed.
+	keep := filepath.Join(dir, "keep.json")
+	os.WriteFile(keep, []byte("old"), 0o600)
+	if adminInit([]string{"-backup", keep}, &out, &errw, failStore{saveErr: root.ErrExists}, "") != 1 {
+		t.Fatal("existing backup")
+	}
+	if got, _ := os.ReadFile(keep); string(got) != "old" {
+		t.Fatalf("existing backup clobbered: %q", got)
+	}
+	if !strings.Contains(errw.String(), "already exists") || !strings.Contains(errw.String(), "-backup") {
+		t.Fatalf("unhelpful message: %q", errw.String())
+	}
 	// Save fails: backup is removed, nothing printed.
 	b := filepath.Join(dir, "b.json")
 	out.Reset()
@@ -78,18 +90,5 @@ func TestAdminInitErrors(t *testing.T) {
 	// Save loses a race with another init.
 	if adminInit([]string{"-backup", b}, &out, &errw, failStore{saveErr: root.ErrExists}, "") != 1 {
 		t.Fatal("race")
-	}
-}
-
-func TestAdminInitKeepsExistingBackup(t *testing.T) {
-	dir := t.TempDir()
-	b := filepath.Join(dir, "b.json")
-	os.WriteFile(b, []byte("old"), 0o600)
-	var out, errw bytes.Buffer
-	if adminInit([]string{"-backup", b}, &out, &errw, root.FileStore{Dir: filepath.Join(dir, "cfg")}, "") != 1 || out.Len() != 0 {
-		t.Fatalf("out=%q err=%q", out.String(), errw.String())
-	}
-	if got, _ := os.ReadFile(b); string(got) != "old" {
-		t.Fatalf("backup overwritten: %q", got)
 	}
 }

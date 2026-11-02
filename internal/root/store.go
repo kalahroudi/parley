@@ -35,23 +35,38 @@ func (s FileStore) Exists() (bool, error) {
 	return err == nil, err
 }
 
+// syncFile is a seam so tests can force a failure after the write.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
+// Save writes the seed to a temp file, syncs it, then hard-links it into place.
+// The link fails if root.key exists, so nothing is overwritten, and a failure
+// at any step leaves no partial root.key and no temp file behind.
 func (s FileStore) Save(priv ed25519.PrivateKey) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.path(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return ErrExists
-	}
+	f, err := os.CreateTemp(s.Dir, ".root.key.*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
 	if _, err := f.Write(priv.Seed()); err != nil {
 		f.Close()
-		return err
+		return fmt.Errorf("root: write key: %w", err)
+	}
+	if err := syncFile(f); err != nil {
+		f.Close()
+		return fmt.Errorf("root: sync key: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("root: write key: %w", err)
+	}
+	if err := os.Link(tmp, s.path()); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrExists
+		}
+		return err
 	}
 	return nil
 }
