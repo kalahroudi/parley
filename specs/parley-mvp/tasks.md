@@ -41,7 +41,7 @@ Deliverable: two daemons enroll under an admin root and show online; revocation 
 Deliverable: `parley-cli test` sends an end-to-end encrypted echo between two machines. Spikes 3 and 4.
 
 - [x] T201 HPKE plus signed transcripts, with published test vectors
-- [ ] T202 On-demand prekeys (in-memory, locked, zeroed on use)
+- [x] T202 On-demand prekeys (in-memory, locked, zeroed on use)
 - [ ] T203 Local replay table
 - [ ] T204 Receive order: open, verify, erase, ack, execute
 - [ ] T205 Padding to power-of-two buckets and client-side encrypted files
