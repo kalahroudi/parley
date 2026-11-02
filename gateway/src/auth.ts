@@ -66,14 +66,15 @@ export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch)
   const url = new URL(req.url);
   if (url.pathname === "/healthz") return json(200, { ok: true });
   const m = /^\/auth\/([a-z]+)\/(login|callback)$/.exec(url.pathname);
-  if (!m || req.method !== "GET") return json(404, { error: "not_found" });
-  const p = providers(env)[m[1]];
+  const [, name, action] = m ?? [];
+  if (!name || req.method !== "GET") return json(404, { error: "not_found" });
+  const p = providers(env)[name];
   if (!p) return json(404, { error: "unknown_provider" });
   const ctx = { flowSecret: env.FLOW_SECRET, fetch: fetchFn };
   const redirectUri = `${url.origin}/auth/${p.name}/callback`;
   const cookieAttrs = `Path=/auth/${p.name}/callback; HttpOnly; SameSite=Lax; Max-Age=600${url.protocol === "https:" ? "; Secure" : ""}`;
   try {
-    if (m[2] === "login") {
+    if (action === "login") {
       const { url: to, flow } = await startLogin(ctx, p, redirectUri);
       return new Response(null, { status: 302, headers: { location: to, "set-cookie": `${COOKIE}=${flow}; ${cookieAttrs}` } });
     }
