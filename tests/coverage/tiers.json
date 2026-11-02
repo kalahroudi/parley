@@ -2,7 +2,7 @@
   "tiers": {
     "1": {
       "line": 100,
-      "packages": ["internal/binding", "internal/envelope", "internal/revocation", "internal/logx", "internal/prekey"]
+      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey"]
     },
     "2": {
       "line": 95,

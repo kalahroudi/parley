@@ -42,7 +42,7 @@ Deliverable: `parley-cli test` sends an end-to-end encrypted echo between two ma
 
 - [x] T201 HPKE plus signed transcripts, with published test vectors
 - [x] T202 On-demand prekeys (in-memory, locked, zeroed on use)
-- [ ] T203 Local replay table
+- [x] T203 Local replay table
 - [ ] T204 Receive order: open, verify, erase, ack, execute
 - [ ] T205 Padding to power-of-two buckets and client-side encrypted files
 - [ ] T206 Malicious-gateway harness (key substitution, replay, reorder, drop, swapped replies, withheld and reused prekeys)
