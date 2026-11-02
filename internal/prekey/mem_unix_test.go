@@ -7,6 +7,7 @@ package prekey
 
 import (
 	"math"
+	"math/bits"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -16,7 +17,13 @@ import (
 // past its end, so the range always includes unmapped addresses. Unlike
 // unmapping b and reusing it, no other thread can map the range meanwhile, so
 // the system calls on it fail deterministically.
-func beyondMapping(b []byte) []byte { return unsafe.Slice(&b[0], math.MaxInt>>20) }
+func beyondMapping(b []byte) []byte {
+	n := math.MaxInt >> 20 // 8 TiB on 64-bit systems
+	if bits.UintSize == 32 {
+		n = 1 << 30 // MaxInt>>20 would be 2 KiB, inside the page
+	}
+	return unsafe.Slice(&b[0], n)
+}
 
 func TestSysMapLockUnmap(t *testing.T) {
 	b, err := sysMap(4096)
