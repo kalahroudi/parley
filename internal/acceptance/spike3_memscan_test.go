@@ -65,7 +65,8 @@ type childReport struct {
 	Hits       map[string]int         `json:"hits,omitempty"`
 	InRegion   map[string]int         `json:"in_region,omitempty"` // hits inside the locked key region
 	AfterClose map[string]int         `json:"after_close,omitempty"`
-	Raw        map[string]string      `json:"raw,omitempty"` // unhardened control only
+	CloseInReg map[string]int         `json:"close_in_region,omitempty"` // hits in the key region after Close
+	Raw        map[string]string      `json:"raw,omitempty"`             // unhardened control only
 	Extra      map[string]interface{} `json:"extra,omitempty"`
 }
 
@@ -278,10 +279,18 @@ func TestUnhardenedControlCanDump(t *testing.T) {
 		b, _ := hex.DecodeString(h)
 		raws = append(raws, b)
 	}
+	// Scan the core file itself: /cores holds other processes' dumps.
 	found := 0
 	for _, c := range cores {
-		found += len(filesHolding(t, filepath.Dir(c), raws...))
-		break
+		b, err := os.ReadFile(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range raws {
+			if bytes.Contains(b, raw) {
+				found++
+			}
+		}
 	}
 	if found == 0 {
 		t.Log("a core was written but holds no scalar: the key region is excluded from dumps (MADV_DONTDUMP)")

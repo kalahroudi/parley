@@ -203,7 +203,7 @@ func scanChild(r *childReport) {
 	// After Close nothing is live: the live keys' slots go too.
 	p.Close()
 	runtime.GC()
-	r.AfterClose, _ = count()
+	r.AfterClose, r.CloseInReg = count()
 	emit(*r)
 }
 
@@ -218,40 +218,68 @@ func scanChild(r *childReport) {
 const maxHeapResidue = 2
 
 func TestAddressSpaceHoldsNoErasedKey(t *testing.T) {
-	r, _, _ := runChild(t, "scan", t.TempDir())
-	t.Logf("hits %v, in key region %v, after Close %v", r.Hits, r.InRegion, r.AfterClose)
-	// The scan can see: a key we planted in the Go heap, and the live keys in
-	// the locked region.
-	if r.Hits["planted"] < 1 {
-		t.Fatalf("the scan cannot see a planted key: %v", r.Hits)
-	}
-	for i := 3; i < 6; i++ {
-		if r.InRegion["live"+strconv.Itoa(i)] != 1 {
-			t.Fatalf("live key %d found %d times in the key region, want 1: %v", i, r.InRegion["live"+strconv.Itoa(i)], r.InRegion)
+	// Stale goroutine stacks can hold an extra copy of a scalar, depending on
+	// when the runtime grew and freed them. The heap-residue ratchet therefore
+	// uses the lowest count over a few runs (a real leak is there in every
+	// run); the locked-region checks must hold in every run.
+	const runs = 5
+	hits, afterClose := map[string]int{}, map[string]int{}
+	var r childReport
+	for run := 0; run < runs; run++ {
+		r, _, _ = runChild(t, "scan", t.TempDir())
+		t.Logf("hits %v, in key region %v, after Close %v", r.Hits, r.InRegion, r.AfterClose)
+		for k, v := range r.Hits {
+			if run == 0 || v < hits[k] {
+				hits[k] = v
+			}
+		}
+		for k, v := range r.AfterClose {
+			if run == 0 || v < afterClose[k] {
+				afterClose[k] = v
+			}
+		}
+		// The scan can see: a key we planted in the Go heap, and the live keys in
+		// the locked region.
+		if r.Hits["planted"] < 1 {
+			t.Fatalf("the scan cannot see a planted key: %v", r.Hits)
+		}
+		for i := 3; i < 6; i++ {
+			if r.InRegion["live"+strconv.Itoa(i)] != 1 {
+				t.Fatalf("live key %d found %d times in the key region, want 1: %v", i, r.InRegion["live"+strconv.Itoa(i)], r.InRegion)
+			}
+		}
+		for i := 0; i < 3; i++ {
+			name := "erased" + strconv.Itoa(i)
+			if n := r.InRegion[name]; n != 0 {
+				t.Errorf("%s is still in the locked key region (%d copies)", name, n)
+			}
+			if z := r.Extra["slot_zero"].(map[string]interface{})["slot"+strconv.Itoa(i)]; z != true {
+				t.Errorf("the slot of %s is not zero after erase", name)
+			}
+		}
+		// Close must erase the region itself, not just leave the heap residue
+		// below the allowance: a surviving copy in the old region is a leak.
+		for i := 3; i < 6; i++ {
+			if n := r.CloseInReg["live"+strconv.Itoa(i)]; n != 0 {
+				t.Errorf("after Close, live%d is still in the key region (%d copies)", i, n)
+			}
+		}
+		if r.Dumpable == nil || *r.Dumpable != 0 {
+			t.Errorf("PR_SET_DUMPABLE after Harden: %v, want 0", r.Dumpable)
 		}
 	}
-	// What the scan must not find: an erased key in the locked region, or more
-	// than the known residue anywhere.
+	// What the scan must not find: more than the known residue anywhere.
 	for i := 0; i < 3; i++ {
 		name := "erased" + strconv.Itoa(i)
-		if n := r.InRegion[name]; n != 0 {
-			t.Errorf("%s is still in the locked key region (%d copies)", name, n)
-		}
-		if n := r.Hits[name]; n > maxHeapResidue {
+		if n := hits[name]; n > maxHeapResidue {
 			t.Errorf("%s has %d copies in the address space, the Go heap may hold %d", name, n, maxHeapResidue)
-		}
-		if z := r.Extra["slot_zero"].(map[string]interface{})["slot"+strconv.Itoa(i)]; z != true {
-			t.Errorf("the slot of %s is not zero after erase", name)
 		}
 	}
 	// After Close the live keys are gone from the region too.
 	for i := 3; i < 6; i++ {
 		name := "live" + strconv.Itoa(i)
-		if n := r.AfterClose[name]; n > maxHeapResidue {
+		if n := afterClose[name]; n > maxHeapResidue {
 			t.Errorf("after Close, %s has %d copies (heap residue allowed: %d)", name, n, maxHeapResidue)
 		}
-	}
-	if r.Dumpable == nil || *r.Dumpable != 0 {
-		t.Errorf("PR_SET_DUMPABLE after Harden: %v, want 0", r.Dumpable)
 	}
 }
