@@ -1,0 +1,4 @@
+go test fuzz v1
+string(";")
+[]byte("0")
+int64(1099511627860)

@@ -64,7 +64,7 @@ def parse_header(h):
     assert not r.b, "trailing bytes"
     return f
 
-def main(path):
+def main_msg(path):
     d = json.load(open(path))
     pub = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(d["sender_signing_public_key"]))
     assert ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(d["sender_signing_seed"])).public_key().public_bytes_raw() == pub.public_bytes_raw()
@@ -84,4 +84,81 @@ def main(path):
         assert frames.hex() == v["message"], "message framing"
         print("ok", v["name"])
 
-main(sys.argv[1] if len(sys.argv) > 1 else __file__.rsplit("/", 1)[0] + "/vectors.json" if "/" in __file__ else "vectors.json")
+
+# --- padding and file chunks (vectors_padfile.json) -------------------------
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+def plaintext(n): return bytes(i % 251 for i in range(n))
+
+def pad(pt):
+    size = max(4096, 1 << len(pt).bit_length())
+    return (pt + b"\x80").ljust(size, b"\0")
+
+def unpad_ok(p):
+    n = len(p)
+    if n < 4096 or n > 1 << 23 or n & (n - 1): return False
+    s = p.rstrip(b"\0")
+    if not s or s[-1] != 0x80: return False
+    return not (n > 4096 and len(s) <= n // 2)
+
+def reject_input(name):
+    if name == "all-zeros-4096": return bytes(4096)
+    if name == "short-4095": return b"\x80" + bytes(4094)
+    if name == "not-power-of-two-4097": return b"\x80" + bytes(4096)
+    if name == "noncanonical-bucket": return bytes(100) + b"\x80" + bytes(8091)
+    if name == "marker-not-last": return bytes(10) + b"\x80" + bytes(9) + b"\x01" + bytes(4075)
+    raise AssertionError("unknown reject vector " + name)
+
+def encrypt_file(key, pt):
+    target = 1 << (max(len(pt), 4096) - 1).bit_length()
+    body = pt.ljust(target, b"\0")
+    aead, out, chunk = AESGCM(key), b"", 65536
+    for i, off in enumerate(range(0, target, chunk)):
+        final = off + chunk >= target
+        nonce = struct.pack(">Q", i) + b"\0\0\0" + (b"\1" if final else b"\0")
+        out += aead.encrypt(nonce, body[off:off + chunk], b"parley/file/v1" + nonce)
+    return out
+
+def main_padfile(path):
+    d = json.load(open(path))
+    for v in d["pad"]:
+        p = pad(plaintext(v["plaintext_len"]))
+        assert len(p) == v["padded_len"] and hashlib.sha256(p).hexdigest() == v["padded_sha256"], v
+        assert unpad_ok(p), v
+    print("ok pad (%d vectors)" % len(d["pad"]))
+    for r in d["pad_reject"]:
+        assert not unpad_ok(reject_input(r["name"])), r["name"]
+    print("ok pad_reject (%d vectors)" % len(d["pad_reject"]))
+    key = bytes.fromhex(d["file_key"])
+    for v in d["file"]:
+        pt = plaintext(v["plaintext_len"])
+        ct = encrypt_file(key, pt)
+        assert hashlib.sha256(pt).hexdigest() == v["plaintext_sha256"], v["name"]
+        assert len(ct) == v["ciphertext_len"] and hashlib.sha256(ct).hexdigest() == v["ciphertext_sha256"], v["name"]
+        if v.get("ciphertext"): assert ct.hex() == v["ciphertext"], v["name"]
+        print("ok file", v["name"])
+
+# --- root-signed bindings (../../binding/testdata/vectors.json) --------------
+
+def main_binding(path):
+    d = json.load(open(path))
+    root = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(d["root_seed"]))
+    pub = root.public_key()
+    assert pub.public_bytes_raw().hex() == d["root_public_key"]
+    f = lambda b: struct.pack(">I", len(b)) + b
+    for v in d["vectors"]:
+        enc = (f(b"parley/binding/v1") + f(v["tenant"].encode()) + f(v["owner"].encode()) + f(v["device_id"].encode())
+               + f(bytes.fromhex(v["signing_key"])) + struct.pack(">QQ", int(v["version"]), int(v["not_after"])))
+        assert enc.hex() == v["encoded"], v["name"]
+        pub.verify(bytes.fromhex(v["signature"]), enc)
+        assert root.sign(enc).hex() == v["signature"], v["name"]
+        print("ok binding", v["name"])
+
+def main(argv):
+    here = __file__.replace("\\", "/").rsplit("/", 1)[0] if "/" in __file__.replace("\\", "/") else "."
+    main_msg(argv[0] if argv else here + "/vectors.json")
+    main_padfile(here + "/vectors_padfile.json")
+    main_binding(here + "/../../binding/testdata/vectors.json")
+
+main(sys.argv[1:])

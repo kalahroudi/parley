@@ -1,0 +1,4 @@
+go test fuzz v1
+string("000000000000")
+[]byte("\x7f)\xfcqTv\x01")
+int64(98)

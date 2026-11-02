@@ -1,4 +1,4 @@
-.PHONY: malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
+.PHONY: fuzz-smoke fuzz-long malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
 
 test: test-layout test-go test-gateway
 
@@ -40,3 +40,12 @@ dev:
 # Proof that the T206 malicious-gateway tests fail when each defence is removed.
 malgw-mutations:
 	scripts/malgw-mutations.sh
+
+# T207: every fuzz target for a few seconds (what CI runs on every push, on all OSes).
+fuzz-smoke:
+	node scripts/fuzz.mjs smoke
+
+# T207: every fuzz target for FUZZTIME each (default 10m, so about 1 h 45 min for
+# the ten targets). The weekly "Fuzz (long)" workflow runs this too.
+fuzz-long:
+	node scripts/fuzz.mjs long
