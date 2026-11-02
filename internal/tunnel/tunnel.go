@@ -57,9 +57,10 @@ type outFrame struct {
 
 // Client maintains one resumable tunnel. Create it with New and call Run.
 type Client struct {
-	cfg    Config
-	events chan Event
-	wake   chan struct{}
+	cfg           Config
+	events        chan Event
+	beforeDeliver func() // test seam: called before an event is handed to Events
+	wake          chan struct{}
 
 	mu      sync.Mutex
 	closed  bool
@@ -240,6 +241,9 @@ func (c *Client) connect(ctx context.Context) (welcomed bool, err error) {
 	err = <-errc
 	cancel()
 	conn.Close(websocket.StatusNormalClosure, "")
+	// Wait for the other loop too: a leftover readLoop could otherwise deliver to
+	// Events after the next connection starts, or after Run has closed it.
+	<-errc
 	return true, err
 }
 
@@ -319,6 +323,9 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idle time.D
 			c.mu.Unlock()
 			if dup {
 				continue
+			}
+			if c.beforeDeliver != nil {
+				c.beforeDeliver()
 			}
 			select {
 			case c.events <- Event{Seq: m.Seq, Body: m.Body}:

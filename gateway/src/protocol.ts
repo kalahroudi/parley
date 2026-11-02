@@ -54,3 +54,8 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return null;
   }
 }
+
+const utf8 = new TextEncoder();
+
+// Size in bytes on the wire (UTF-16 length undercounts non-ASCII text).
+export const byteLength = (s: string): number => utf8.encode(s).byteLength;

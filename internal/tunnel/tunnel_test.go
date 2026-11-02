@@ -371,3 +371,31 @@ func TestBackoffBounds(t *testing.T) {
 		t.Fatalf("capped: %v", d)
 	}
 }
+
+// Regression: connect must wait for both loops. A readLoop that outlived connect
+// could send on Events after Run closed it (a panic) or into the next connection.
+// The seam holds the readLoop just before delivery while the client shuts down.
+func TestRunWaitsForReadLoop(t *testing.T) {
+	for i := 0; i < 12; i++ {
+		g := newFakeGateway(t)
+		entered := make(chan struct{}, 1)
+		c := New(Config{URL: g.url(), Token: "tok", MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond, HeartbeatTimeout: time.Second})
+		c.beforeDeliver = func() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- c.Run(ctx) }()
+		waitFor(t, "connect", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.conns) > 0 })
+		g.push(1, "e")
+		<-entered
+		cancel()
+		<-done
+		// Without the fix the held readLoop now sends on the closed Events channel.
+		time.Sleep(100 * time.Millisecond)
+	}
+}

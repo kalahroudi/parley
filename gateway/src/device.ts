@@ -10,6 +10,7 @@ import {
   HEARTBEAT_MS,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  byteLength,
   parseClientMessage,
   type ServerMessage,
 } from "./protocol";
@@ -27,7 +28,10 @@ interface Session {
   acked_tx: number; // highest event seq the daemon acknowledged
 }
 
-export type DeliverResult = { status: "delivered"; seq: number } | { status: "offline" };
+export type DeliverResult =
+  | { status: "delivered"; seq: number }
+  | { status: "offline" }
+  | { status: "too_large" };
 
 // One Device DO per enrolled device (named `${tenant}:${device}`), holding the
 // device's hibernating socket. It stores no frame bodies. Frames from a daemon
@@ -58,8 +62,13 @@ export class Device extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
-  // Pushes an opaque event to the connected daemon.
+  // Pushes an opaque event to the connected daemon. An event whose encoded frame
+  // would exceed MAX_FRAME_BYTES is refused here (the daemon could not read it).
   async deliver(body: string): Promise<DeliverResult> {
+    // The envelope is under 64 bytes; seq is at most 16 digits.
+    if (byteLength(JSON.stringify({ t: "event", seq: Number.MAX_SAFE_INTEGER, body })) > MAX_FRAME_BYTES) {
+      return { status: "too_large" };
+    }
     const ws = this.ctx.getWebSockets().find((s) => (s.deserializeAttachment() as Attachment | null)?.ready);
     const session = await this.ctx.storage.get<Session>("session");
     if (!ws || !session) return { status: "offline" };
@@ -71,7 +80,8 @@ export class Device extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
     if (typeof data !== "string") return ws.close(CLOSE_PROTOCOL, "text frames only");
-    if (data.length > MAX_FRAME_BYTES) return ws.close(CLOSE_TOO_LARGE, "frame too large");
+    // UTF-16 length never exceeds the byte length, so only measure bytes when needed.
+    if (data.length > MAX_FRAME_BYTES || byteLength(data) > MAX_FRAME_BYTES) return ws.close(CLOSE_TOO_LARGE, "frame too large");
     const msg = parseClientMessage(data);
     if (!msg) return reject(ws, "bad_message");
     const att = (ws.deserializeAttachment() as Attachment | null) ?? { ready: false };

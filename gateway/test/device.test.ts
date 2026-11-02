@@ -105,6 +105,10 @@ describe("handshake", () => {
     const b = await connect("t1", dev + "x");
     b.send("x".repeat((1 << 20) + 1));
     expect((await b.closed())?.code).toBe(1009);
+    // 600k two-byte characters: under the limit in UTF-16 units, over it in bytes.
+    const c = await connect("t1", dev + "y");
+    c.send("é".repeat(600_000));
+    expect((await c.closed())?.code).toBe(1009);
   });
 
   it("a new connection supersedes the old one", async () => {
@@ -144,6 +148,17 @@ describe("frames from the daemon", () => {
 });
 
 describe("events to the daemon", () => {
+  it("refuses an event too large for the daemon to read, without consuming a seq", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    // Under the limit as raw bytes, over it once JSON-escaped.
+    expect(await stubFor().deliver('"'.repeat(600_000))).toEqual({ status: "too_large" });
+    expect(await stubFor().deliver("é".repeat(600_000))).toEqual({ status: "too_large" });
+    expect(await stubFor().deliver("ok")).toEqual({ status: "delivered", seq: 1 });
+    expect(await c.next()).toEqual({ t: "event", seq: 1, body: "ok" });
+  });
+
   it("is offline until a hello completes, then delivers with increasing seq", async () => {
     expect(await stubFor().deliver("x")).toEqual({ status: "offline" });
     const c = await connect();
