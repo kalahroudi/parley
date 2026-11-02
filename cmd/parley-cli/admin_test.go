@@ -66,6 +66,15 @@ func TestAdminInitErrors(t *testing.T) {
 	if adminInit(nil, &out, &errw, failStore{}, dir) != 1 {
 		t.Fatal("write")
 	}
+	// An existing backup file is never overwritten or removed.
+	keep := filepath.Join(dir, "keep.json")
+	os.WriteFile(keep, []byte("old"), 0o600)
+	if adminInit([]string{"-backup", keep}, &out, &errw, failStore{saveErr: root.ErrExists}, "") != 1 {
+		t.Fatal("existing backup")
+	}
+	if got, _ := os.ReadFile(keep); string(got) != "old" {
+		t.Fatalf("existing backup clobbered: %q", got)
+	}
 	// Save fails: backup is removed, nothing printed.
 	b := filepath.Join(dir, "b.json")
 	out.Reset()
