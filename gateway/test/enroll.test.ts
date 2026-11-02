@@ -3,7 +3,7 @@
 
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { REQUEST_TTL_MS, MAX_PENDING } from "../src/tenant";
+import { REQUEST_TTL_MS, MAX_PENDING, MAX_PENDING_PER_OWNER } from "../src/tenant";
 
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 const post = (path: string, body: unknown, auth?: string) =>
@@ -82,18 +82,26 @@ describe("interactive enrollment and the approval queue", () => {
   it("caps the pending queue", async () => {
     const x = fresh();
     const stub = env.TENANT.get(env.TENANT.idFromName(x.t));
-    for (let i = 0; i < MAX_PENDING; i++) await stub.request({ user: "a@example.test", name: "d", signing_key: key() });
+    for (let i = 0; i < MAX_PENDING; i++) await stub.request({ user: `u${i}@example.test`, name: "d", signing_key: key() });
     const r = await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user());
     expect(r.status).toBe(429);
   });
 
+  it("caps pending requests per owner so one user cannot fill the queue", async () => {
+    const x = fresh();
+    for (let i = 0; i < MAX_PENDING_PER_OWNER; i++) expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user())).status).toBe(202);
+    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user())).status).toBe(429);
+    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user("bob@example.test"))).status).toBe(202);
+  });
+
   it("drops requests that outlive their TTL", async () => {
     const x = fresh();
-    const { id } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user()));
+    const { id, poll } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, x.user()));
     const { vi } = await import("vitest");
     vi.useFakeTimers({ now: Date.now() + REQUEST_TTL_MS + 1000, toFake: ["Date"] });
     try {
       expect((await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, x.admin)).status).toBe(404);
+      expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(404);
       expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending).toHaveLength(0);
     } finally {
       vi.useRealTimers();

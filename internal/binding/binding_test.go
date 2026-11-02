@@ -157,3 +157,14 @@ func TestTrackerRollback(t *testing.T) {
 		t.Fatal("version advanced by rejected binding:", err)
 	}
 }
+
+func TestSubSecondNotAfterDoesNotExtend(t *testing.T) {
+	pub, priv := keys(t)
+	b := sample(t, 1)
+	b.NotAfter = now.Add(time.Hour)
+	s, _ := Sign(priv, b)
+	s.NotAfter = s.NotAfter.Add(900 * time.Millisecond) // not covered by the signature
+	if err := Verify(pub, s, now.Add(time.Hour+500*time.Millisecond)); !errors.Is(err, ErrExpired) {
+		t.Fatalf("got %v, want ErrExpired", err)
+	}
+}

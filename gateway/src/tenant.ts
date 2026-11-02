@@ -8,6 +8,7 @@ export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
 export const TOKEN_TTL_MAX_MS = 7 * 24 * 3600_000;
 export const REQUEST_TTL_MS = 7 * 24 * 3600_000;
 export const MAX_PENDING = 200;
+export const MAX_PENDING_PER_OWNER = 10;
 
 export type EnrollmentStatus = "pending" | "approved" | "rejected";
 
@@ -90,7 +91,11 @@ export class Tenant extends DurableObject<Env> {
       owner = tok.owner;
     }
     if (!owner) return { error: "bad_request" };
-    if ((await this.pending()).length >= MAX_PENDING) return { error: "queue_full" };
+    const queue = await this.pending();
+    // One owner must not be able to fill the shared queue and lock out the rest.
+    if (queue.length >= MAX_PENDING || queue.filter((e) => e.owner === owner).length >= MAX_PENDING_PER_OWNER) {
+      return { error: "queue_full" };
+    }
 
     const id = random(16);
     const poll = random(24);
@@ -105,8 +110,10 @@ export class Tenant extends DurableObject<Env> {
       created: Date.now(),
       poll_hash: await sha256(poll),
     };
-    if (tokKey) await this.ctx.storage.put(tokKey, { ...(await this.ctx.storage.get<StoredToken>(tokKey))!, used: rec.created });
-    await this.ctx.storage.put(`enr:${id}`, rec);
+    // One atomic write: a token is never burned without its request being queued.
+    const writes: Record<string, unknown> = { [`enr:${id}`]: rec };
+    if (tokKey) writes[tokKey] = { ...(await this.ctx.storage.get<StoredToken>(tokKey))!, used: rec.created };
+    await this.ctx.storage.put(writes);
     return { id, poll };
   }
 
@@ -140,6 +147,7 @@ export class Tenant extends DurableObject<Env> {
   async status(id: string, poll: string): Promise<Enrollment | null> {
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${id}`);
     if (!rec || !timingSafeEqual(rec.poll_hash, await sha256(poll))) return null;
+    if (rec.status === "pending" && rec.created + REQUEST_TTL_MS <= Date.now()) return null; // expired: matches decide()
     return strip(rec);
   }
 }

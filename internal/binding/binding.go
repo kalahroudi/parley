@@ -92,7 +92,8 @@ func Verify(root ed25519.PublicKey, s *Signed, now time.Time) error {
 	if !ed25519.Verify(root, s.Encode(), s.Signature) {
 		return ErrBadSignature
 	}
-	if !now.Before(s.NotAfter) {
+	// The signature covers whole seconds only, so ignore any sub-second extension.
+	if !now.Before(s.NotAfter.Truncate(time.Second)) {
 		return ErrExpired
 	}
 	return nil
