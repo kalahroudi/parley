@@ -58,6 +58,13 @@ type Signed struct {
 	Signature []byte `json:"signature"`
 }
 
+func (s *Signed) clone() *Signed {
+	c := *s
+	c.Revoked = slices.Clone(s.Revoked)
+	c.Signature = slices.Clone(s.Signature)
+	return &c
+}
+
 func (l List) validate() error {
 	if l.Tenant == "" || l.Version == 0 || l.IssuedAt.IsZero() {
 		return ErrInvalid
@@ -119,6 +126,16 @@ func Next(root ed25519.PrivateKey, tenant string, prev *Signed, add []string, no
 // Verify checks the signature against the pinned root key. It does not check
 // versions or age; see Guard.
 func Verify(root ed25519.PublicKey, s *Signed, now time.Time) error {
+	if err := verifySignature(root, s); err != nil {
+		return err
+	}
+	if s.IssuedAt.Truncate(time.Second).After(now.Add(MaxSkew)) {
+		return ErrFuture
+	}
+	return nil
+}
+
+func verifySignature(root ed25519.PublicKey, s *Signed) error {
 	if s == nil || len(root) != ed25519.PublicKeySize {
 		return ErrInvalid
 	}
@@ -127,9 +144,6 @@ func Verify(root ed25519.PublicKey, s *Signed, now time.Time) error {
 	}
 	if !ed25519.Verify(root, s.Encode(), s.Signature) {
 		return ErrBadSignature
-	}
-	if s.IssuedAt.Truncate(time.Second).After(now.Add(MaxSkew)) {
-		return ErrFuture
 	}
 	return nil
 }
@@ -164,7 +178,7 @@ type Guard struct {
 // NewGuard pins the root key and tenant and loads any saved list, re-verifying
 // it. It fails if the store is unreadable or holds a list that does not verify;
 // callers must not fall back to an empty state.
-func NewGuard(root ed25519.PublicKey, tenant string, store Store, now time.Time) (*Guard, error) {
+func NewGuard(root ed25519.PublicKey, tenant string, store Store, _ time.Time) (*Guard, error) {
 	g := &Guard{root: root, tenant: tenant, store: store}
 	if store == nil {
 		return g, nil
@@ -174,10 +188,15 @@ func NewGuard(root ed25519.PublicKey, tenant string, store Store, now time.Time)
 		return nil, err
 	}
 	if s != nil {
-		if err := g.check(s, now); err != nil {
+		// The skew check was applied when the list was first accepted; a
+		// clock set back since must not stop the daemon from starting.
+		if err := verifySignature(root, s); err != nil {
 			return nil, err
 		}
-		g.adopt(s)
+		if s.Tenant != tenant {
+			return nil, ErrTenant
+		}
+		g.adopt(s.clone())
 	}
 	return g, nil
 }
@@ -204,11 +223,16 @@ func (g *Guard) adopt(s *Signed) {
 // version is rejected; the identical list may be presented again; a different
 // list at the same version is rejected.
 func (g *Guard) Accept(s *Signed, now time.Time) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.acceptLocked(s, now)
+}
+
+func (g *Guard) acceptLocked(s *Signed, now time.Time) error {
 	if err := g.check(s, now); err != nil {
 		return err
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	s = s.clone() // the caller keeps no handle on the held list
 	if g.cur != nil {
 		if s.Version < g.cur.Version {
 			return ErrRollback
@@ -284,23 +308,28 @@ type Renewer struct {
 	Tenant string
 	Guard  *Guard                               // the root holder's own copy
 	Push   func(context.Context, *Signed) error // publish to the gateway
+	mu     sync.Mutex                           // one renewal at a time, so pushes arrive in version order
 }
 
 // Renew signs the successor of the held list (adding any revocations), accepts
 // it locally and publishes it. The local copy is updated first, so a failed
 // publish still leaves the root holder's own sends correct; call again to retry.
 func (r *Renewer) Renew(ctx context.Context, add []string, now time.Time) (*Signed, error) {
-	r.Guard.mu.Lock()
-	prev := r.Guard.cur
-	r.Guard.mu.Unlock()
-	s, err := Next(r.Root, r.Tenant, prev, add, now)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Read, sign and adopt under one lock so concurrent renewals (the timer
+	// and a manual revoke) get consecutive versions and none is lost.
+	g := r.Guard
+	g.mu.Lock()
+	s, err := Next(r.Root, r.Tenant, g.cur, add, now)
+	if err == nil {
+		err = g.acceptLocked(s, now)
+	}
+	g.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	if err := r.Guard.Accept(s, now); err != nil {
-		return nil, err
-	}
-	return s, r.Push(ctx, s)
+	return s.clone(), r.Push(ctx, s)
 }
 
 // Due reports whether the held list is old enough that the root holder's

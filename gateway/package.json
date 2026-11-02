@@ -6,7 +6,8 @@
   "type": "module",
   "description": "Parley gateway Worker (A2A transport, Durable Objects, admin API)",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --exclude test/soak.test.ts",
+    "test:soak": "vitest run test/soak.test.ts",
     "typecheck": "tsc",
     "dev": "wrangler dev --port ${PORT:-8787}"
   },

@@ -8,9 +8,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -336,5 +338,131 @@ func TestGuardFailsClosedWhenSaveFails(t *testing.T) {
 	}
 	if g.IsRevoked("d1") || g.CheckSend("x", now) == nil {
 		t.Fatal("unsaved list must not be adopted")
+	}
+}
+
+// Concurrent renewals (timer plus manual revokes) must all succeed, take
+// consecutive versions, be pushed in version order and lose no revocation.
+func TestRenewerConcurrent(t *testing.T) {
+	pub, priv := keys(t)
+	g := guard(t, pub, nil)
+	var mu sync.Mutex
+	var versions []uint64
+	r := &Renewer{Root: priv, Tenant: "t1", Guard: g, Push: func(_ context.Context, s *Signed) error {
+		mu.Lock()
+		defer mu.Unlock()
+		versions = append(versions, s.Version)
+		return nil
+	}}
+	const n = 32
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var add []string
+			if i%2 == 0 { // odd ones are plain refreshes
+				add = []string{fmt.Sprintf("d%02d", i)}
+			}
+			if _, err := r.Renew(context.Background(), add, now); err != nil {
+				t.Error(i, err)
+			}
+			g.CheckSend("x", now) // readers run alongside
+			g.Status(now)
+		}()
+	}
+	wg.Wait()
+	for i, v := range versions {
+		if v != uint64(i+1) {
+			t.Fatalf("pushed out of order: %v", versions)
+		}
+	}
+	if len(versions) != n {
+		t.Fatal(versions)
+	}
+	for i := 0; i < n; i += 2 {
+		if !g.IsRevoked(fmt.Sprintf("d%02d", i)) {
+			t.Errorf("revocation d%02d lost", i)
+		}
+	}
+}
+
+// A refresh from the gateway racing a renewal must never leave a lower version.
+func TestRefreshRacesRenew(t *testing.T) {
+	pub, priv := keys(t)
+	g := guard(t, pub, nil)
+	r := &Renewer{Root: priv, Tenant: "t1", Guard: g, Push: func(context.Context, *Signed) error { return nil }}
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := r.Renew(context.Background(), nil, now); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			s := signed(t, priv, uint64(i+1), now)
+			// Losing the race to a newer or different list is fine; only
+			// rollback/conflict errors are expected.
+			err := g.Refresh(context.Background(), func(context.Context) (*Signed, error) { return s, nil }, now)
+			if err != nil && !errors.Is(err, ErrRollback) && !errors.Is(err, ErrConflict) {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if v := g.Status(now).Version; v < 20 {
+		t.Fatalf("version %d after 20 renewals", v)
+	}
+}
+
+// A saved list issued "in the future" (clock since set back) still loads;
+// a daemon must not be unable to start, and rollback protection must hold.
+func TestNewGuardAcceptsSavedListAfterClockSetBack(t *testing.T) {
+	pub, priv := keys(t)
+	path := filepath.Join(t.TempDir(), "r.json")
+	later := now.Add(48 * time.Hour)
+	g := guard(t, pub, NewFileStore(path))
+	if err := g.Accept(signed(t, priv, 3, later, "d1"), later); err != nil {
+		t.Fatal(err)
+	}
+	g2, err := NewGuard(pub, "t1", NewFileStore(path), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g2.IsRevoked("d1") {
+		t.Fatal("list not loaded")
+	}
+	if err := g2.Accept(signed(t, priv, 2, now), now); !errors.Is(err, ErrRollback) {
+		t.Fatal(err)
+	}
+}
+
+// The guard owns its copy: mutating what was passed in, or what Renew returned,
+// must not change what the guard enforces.
+func TestGuardOwnsItsList(t *testing.T) {
+	pub, priv := keys(t)
+	g := guard(t, pub, nil)
+	in := signed(t, priv, 1, now, "d1")
+	if err := g.Accept(in, now); err != nil {
+		t.Fatal(err)
+	}
+	in.Version, in.Revoked[0], in.Signature[0] = 99, "zzz", in.Signature[0]^1
+	if st := g.Status(now); st.Version != 1 {
+		t.Fatal(st)
+	}
+	if err := g.Accept(signed(t, priv, 1, now, "d1"), now); err != nil { // identical to the held list
+		t.Fatal("held list was altered through the caller's pointer:", err)
+	}
+	r := &Renewer{Root: priv, Tenant: "t1", Guard: g, Push: func(context.Context, *Signed) error { return nil }}
+	out, err := r.Renew(context.Background(), []string{"d2"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Revoked[0] = "zzz"
+	if err := g.Accept(signed(t, priv, 2, now, "d1", "d2"), now); err != nil {
+		t.Fatal("held list was altered through Renew's result:", err)
 	}
 }

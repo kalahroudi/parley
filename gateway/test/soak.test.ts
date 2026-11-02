@@ -14,12 +14,28 @@ import type { Device } from "../src/device";
 
 const TOTAL = 10_000;
 const RECONNECTS = 20;
+const PUSH_CHUNK = 50; // events delivered concurrently
 const BATCH = 600; // new messages per connection; the final connection finishes the rest
 
 const stub = () => env.DEVICE.get(env.DEVICE.idFromName("soak:d1")) as DurableObjectStub<Device>;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function until(cond: () => boolean, what: string, ms = 20_000): Promise<void> {
-  for (const end = Date.now() + ms; !cond(); await sleep(2)) if (Date.now() > end) throw new Error(`timed out: ${what}`);
+const snapshot = () =>
+  JSON.stringify({ epoch, nextSeq: daemon.nextSeq, outbox: daemon.outbox.length, lastRx: daemon.lastRx, delivered: daemon.delivered.size, nextEvent, retried });
+async function until(cond: () => boolean, what: string, ms = 90_000): Promise<void> {
+  for (const end = Date.now() + ms; !cond(); await sleep(2)) if (Date.now() > end) throw new Error(`timed out: ${what} ${snapshot()}`);
+}
+// Every call into the gateway is bounded, so a stuck socket or object fails with a
+// message naming the step instead of silently consuming the whole test timeout.
+async function bounded<T>(p: Promise<T>, what: string, ms = 90_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, rej) => (timer = setTimeout(() => rej(new Error(`timed out: ${what} ${snapshot()}`)), ms))),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 // Daemon state that outlives any one connection.
@@ -32,11 +48,14 @@ const daemon = {
   eventSeqs: [] as number[],
   unackedAtResume: 0, // frames still unacknowledged when a connection died
 };
+let epoch = 0; // connection counter; events are tagged with the connection they were sent on
 
 async function connect() {
-  const res = await SELF.fetch("https://gw/v1/connect", {
-    headers: { Upgrade: "websocket", Authorization: "Bearer dev:soak:d1" },
-  });
+  epoch++;
+  const res = await bounded(
+    SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: "Bearer dev:soak:d1" } }),
+    "connect",
+  );
   const ws = res.webSocket!;
   ws.accept();
   let dead = false;
@@ -93,18 +112,32 @@ async function connect() {
 // not received. `limit` bounds new events per connection.
 let nextEvent = 0;
 let retried = 0; // events resent because the daemon never received the first copy
+const sentOn = new Map<number, number>(); // event -> connection it was last sent on
 async function pushEvents(limit: number): Promise<void> {
+  // Only events sent on an earlier connection are known lost; one sent on this
+  // connection may simply still be in flight, and resending it would duplicate it.
   const retry: number[] = [];
-  for (let i = 0; i < nextEvent; i++) if (!daemon.delivered.has(`e${i}`)) retry.push(i);
+  for (let i = 0; i < nextEvent; i++) if (!daemon.delivered.has(`e${i}`) && (sentOn.get(i) ?? 0) < epoch) retry.push(i);
   retried += retry.length;
   const fresh: number[] = [];
   for (let k = 0; k < limit && nextEvent < TOTAL; k++) fresh.push(nextEvent++);
-  for (const i of [...retry, ...fresh]) {
-    if ((await stub().deliver(`e${i}`)).status === "offline") {
-      // Not sent; put fresh ones back so they are tried on the next connection.
-      nextEvent = Math.min(nextEvent, i);
-      return;
-    }
+  // Pushed in concurrent chunks: the object serializes them, but its durable writes
+  // overlap, which matters on runners where each write is slow. An event refused as
+  // offline was never sent; it keeps no sentOn mark, so the next push retries it.
+  const all = [...retry, ...fresh];
+  for (let at = 0; at < all.length; at += PUSH_CHUNK) {
+    const chunk = all.slice(at, at + PUSH_CHUNK);
+    const rs = await bounded(
+      Promise.all(chunk.map((i) => stub().deliver(`e${i}`) as Promise<{ status: string }>)),
+      `deliver e${chunk[0]}..e${chunk[chunk.length - 1]}`,
+    );
+    let offline = false;
+    rs.forEach((r, k) => {
+      if (r.status === "delivered") sentOn.set(chunk[k]!, epoch);
+      else if (r.status === "offline") offline = true;
+      else throw new Error(`deliver e${chunk[k]}: ${r.status}`);
+    });
+    if (offline) return;
   }
 }
 
@@ -128,12 +161,12 @@ describe("soak (spike 1)", () => {
         // Deploy: the object is evicted and its sockets closed mid-traffic.
         c.mute();
         await pushEvents(BATCH);
-        await evictDurableObject(stub(), { webSockets: "close" });
+        await bounded(evictDurableObject(stub(), { webSockets: "close" }), "evict (deploy)");
         await c.lost();
       } else {
         // Hibernation only: the socket stays open across eviction, then we hang up.
         await pushEvents(BATCH);
-        await evictDurableObject(stub());
+        await bounded(evictDurableObject(stub()), "evict (hibernate)");
         await sleep(2);
         await c.drop();
       }
@@ -142,10 +175,13 @@ describe("soak (spike 1)", () => {
     // The final connection drains whatever is left.
     const c = await connect();
     expect(c.welcome.resumed).toBe(true);
+    const deadline = Date.now() + 300_000;
     while (daemon.nextSeq < TOTAL || daemon.outbox.length > 0 || nextEvent < TOTAL || daemon.delivered.size < TOTAL) {
+      if (Date.now() > deadline) throw new Error(`final drain made no progress ${snapshot()}`);
       c.sendFrames(BATCH);
       await pushEvents(BATCH);
       await until(() => daemon.outbox.length === 0, "final acks");
+      await until(() => daemon.delivered.size === nextEvent, "final events in flight");
     }
     await until(() => daemon.delivered.size === TOTAL, "final events");
 
@@ -155,7 +191,7 @@ describe("soak (spike 1)", () => {
     expect(retried).toBeGreaterThan(0);
 
     // Daemon to gateway: every frame accepted exactly once, in order.
-    const st = (await stub().status()).session!;
+    const st = (await bounded(stub().status(), "status")).session!;
     expect(st.rx_seq).toBe(TOTAL);
     expect(daemon.nextSeq).toBe(TOTAL);
     expect(daemon.outbox).toEqual([]);
@@ -167,5 +203,5 @@ describe("soak (spike 1)", () => {
     expect(counts.every((n) => n === 1)).toBe(true);
     for (let i = 0; i < TOTAL; i++) if (!daemon.delivered.has(`e${i}`)) throw new Error(`event e${i} lost`);
     expect(daemon.eventSeqs.every((s, k) => k === 0 || s > daemon.eventSeqs[k - 1]!)).toBe(true);
-  }, 180_000);
+  }, 600_000);
 });
