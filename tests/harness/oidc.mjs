@@ -19,11 +19,15 @@ export async function startMockOidc({ port = 0, defaultEmail = "alice@example.te
   const jwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
   const codes = new Map();
   let issuer = "";
+  // Test hooks: `claims` are merged over the minted claims; `badSignature`
+  // signs with a throwaway key so the token fails verification.
+  const tweak = { claims: {}, badSignature: false };
+  const other = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
 
   const sign = (claims) => {
     const head = b64u(JSON.stringify({ alg: "RS256", typ: "JWT", kid }));
     const body = b64u(JSON.stringify(claims));
-    const sig = createSign("RSA-SHA256").update(`${head}.${body}`).sign(privateKey);
+    const sig = createSign("RSA-SHA256").update(`${head}.${body}`).sign(tweak.badSignature ? other : privateKey);
     return `${head}.${body}.${b64u(sig)}`;
   };
   const json = (res, status, obj) => {
@@ -100,6 +104,7 @@ export async function startMockOidc({ port = 0, defaultEmail = "alice@example.te
         email_verified: true,
       };
       if (entry.nonce) claims.nonce = entry.nonce;
+      Object.assign(claims, tweak.claims);
       return json(res, 200, {
         access_token: b64u(randomBytes(16)),
         token_type: "Bearer",
@@ -121,6 +126,7 @@ export async function startMockOidc({ port = 0, defaultEmail = "alice@example.te
   issuer = `http://127.0.0.1:${server.address().port}`;
   return {
     issuer,
+    tweak,
     close: () => new Promise((r) => (server.closeAllConnections(), server.close(r))),
   };
 }

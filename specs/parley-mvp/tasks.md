@@ -26,7 +26,7 @@ Deliverable: repository, CI on three OSes, local harness that boots a gateway an
 Deliverable: two daemons enroll under an admin root and show online; revocation works. Spikes 1, 2 and 8.
 
 - [x] T101 WSS to Device DO with hibernation, reconnect and resume
-- [ ] T102 OIDC login (Google and Entra) with a mock IdP for tests
+- [x] T102 OIDC login (Google and Entra) with a mock IdP for tests
 - [ ] T103 `parley-cli admin init`: root key and recovery code
 - [ ] T104 Enrollment tokens and the approval queue
 - [ ] T105 Root-signed device bindings with versions and not_after
