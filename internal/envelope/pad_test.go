@@ -49,7 +49,10 @@ func TestUnpadRejectsNonCanonical(t *testing.T) {
 	noMarker := make([]byte, 4096)
 	zeroMarker := make([]byte, 4096)
 	zeroMarker[5] = 1
+	huge := make([]byte, 2*MaxPadded)
+	huge[MaxPadded+5] = padMarker // canonical size-wise, but Pad refuses this plaintext
 	for name, p := range map[string][]byte{
+		"too big":     huge,
 		"empty":       nil,
 		"short":       good[:100],
 		"not pow2":    make([]byte, 5000),

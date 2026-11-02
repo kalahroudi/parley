@@ -43,7 +43,7 @@ func Pad(plaintext []byte) ([]byte, error) {
 // one plaintext has exactly one padded form.
 func Unpad(padded []byte) ([]byte, error) {
 	n := len(padded)
-	if n < MinBucket || n&(n-1) != 0 {
+	if n < MinBucket || n > MaxPadded || n&(n-1) != 0 {
 		return nil, ErrPadding
 	}
 	end := len(bytes.TrimRight(padded, "\x00"))
