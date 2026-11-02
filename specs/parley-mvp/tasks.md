@@ -28,8 +28,8 @@ Deliverable: two daemons enroll under an admin root and show online; revocation 
 - [x] T101 WSS to Device DO with hibernation, reconnect and resume
 - [x] T102 OIDC login (Google and Entra) with a mock IdP for tests
 - [x] T103 `parley-cli admin init`: root key and recovery code
-- [ ] T104 Enrollment tokens and the approval queue
-- [ ] T105 Root-signed device bindings with versions and not_after
+- [x] T104 Enrollment tokens and the approval queue
+- [x] T105 Root-signed device bindings with versions and not_after
 - [ ] T106 Signed revocation list with refresh, staleness warning and send refusal
 - [ ] T107 Acceptance: enroll, approve and revoke; binding rollback rejected; recovery code restores the root; stale revocation list behavior
 - [ ] T108 Acceptance: 20 forced reconnects and a deploy during a 10k-message soak lose or duplicate nothing
@@ -81,6 +81,7 @@ Deliverable: a real MCP client (Claude Code) finds and calls a bot across two ma
 Deliverable: pilot-ready build. Gate to start: spikes 2, 3, 4 and 9 have passed.
 
 - [ ] T501 Admin page (metadata only)
+  - **RELEASE BLOCKER:** real admin/user session auth (from T102 OIDC sessions) must replace the `DEV_AUTH` placeholder identity in `gateway/src/enroll.ts` before any release; `DEV_AUTH` must not be set in production.
 - [ ] T502 Stripe billing in test mode with seat enforcement at enrollment, 7-day grace
 - [ ] T503 Offboarding cascade, audit CSV, tenant export and deletion
 - [ ] T504 Auto-update from the pinned project key; distribution channels (GitHub releases, Homebrew tap, Linux package repo, `go install`, source)
