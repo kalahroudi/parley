@@ -182,27 +182,53 @@ A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage 
 
 ## Real logins (pending the user)
 
-**Pending user.** Google and Entra OAuth clients can only be created in your own consoles. `tests/reality/logins/verify.mjs` runs the gateway's own OIDC code (`gateway/src/auth.ts`) on loopback against the real providers, needs no Cloudflare account, and is tested against the mock IdP (`verify.test.mjs`). It prints the login URL, waits for you to sign in, and reports `PASS` with the provider, issuer, email domain and whether the tenant check ran, or `REFUSED` with the code. It never prints the credentials, and shows neither you nor the browser the identity.
+**Google: pending user: add redirect URI + set secret + one consent click.** **Entra: pending user: needs client id.** Everything else is built and was exercised against Cloudflare with a throwaway fake secret (see "What was already proven" below).
 
-### Google
+### Google (the OAuth client created for this check)
 
-1. console.cloud.google.com: create or choose a project (not shared with anything important).
-2. Google Auth Platform (APIs and Services, OAuth consent screen): set up. For the Workspace case choose **Internal**; for a personal Gmail account choose **External** and add the account under Test users while in Testing. Scopes: `openid` and `email` (not sensitive, no verification needed).
-3. Clients, Create client, application type **Web application**. Authorized redirect URI: `http://127.0.0.1:8787/auth/google/callback`. Copy the client ID and secret.
-4. In a shell (do not put these in a file in the repo):
-   ```
-   export GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=...
-   export GOOGLE_HOSTED_DOMAIN=yourworkspace.example   # optional
-   node tests/reality/logins/verify.mjs google
-   ```
-   Open the printed URL and sign in.
+The client id is public and is baked into `tests/reality/logins/google.mjs`: `221774361645-4isrhvs33j1eft8133hsk239s831d33r.apps.googleusercontent.com`. The **client secret never goes into chat, a file or this repo**; you type it into wrangler's hidden prompt yourself. The secret must be the one for **this** client; an older client's secret will not work.
 
-| Case | Setup | Expected |
+The check always uses the fixed throwaway Worker `parley-test-login` on account `b891d462...`, so one redirect URI is registered once and stays valid. The account's workers.dev subdomain is `hello-891` (read from a real deploy; the CLI has no command for it). The callback path is `/auth/google/callback` (`gateway/src/auth.ts`).
+
+**Step 1: register the redirect URI (once).** In console.cloud.google.com open the project that owns the client, then Google Auth Platform, Clients, open the client whose id is the one above (its type must be **Web application**), Authorized redirect URIs, Add URI, paste exactly:
+
+```
+https://parley-test-login.hello-891.workers.dev/auth/google/callback
+```
+
+Save. Google can take a few minutes (rarely longer) to apply it. If the console refuses the URI, send me the exact message. Nothing else on the client needs to change.
+
+**Step 2: consent screen settings that must be true** (Google Auth Platform, Audience / Branding / Data Access):
+
+- Publishing status **Testing** is fine, but then your own Google account must be listed under **Test users** (Audience). Without that, Google shows "Access blocked" and the check cannot pass. **In production** needs no test user.
+- User type **Internal** only admits accounts of your Workspace organization; **External** admits any Google account (in Testing, the test users).
+- Scopes (Data Access): `openid` and `.../auth/userinfo.email` only. They are not sensitive, so no verification is needed.
+
+**Step 3: run the check.**
+
+```
+node tests/reality/logins/google.mjs
+```
+
+It verifies the account, deploys the Worker with the client id as a plain variable, and prints the redirect URI and then this command (with the real temp-config path filled in), which you run in a second terminal and answer at the prompt:
+
+```
+cd gateway && npx wrangler secret put GOOGLE_CLIENT_SECRET --name parley-test-login --config "<temp config pinned to account b891d462...>"
+```
+
+The script notices the secret (it lists secret *names* only) and then runs its first check, before anyone is asked to click: the login redirect must go to Google and name **exactly** the client id above and **exactly** the callback above (compared to fixed constants, not to wherever the Worker happened to deploy), with PKCE S256, a state and a nonce. A mismatch, such as another workers.dev host or a different client, fails there with the exact difference, and the Worker is deleted. If it passes, the script opens the login URL. Sign in and click **Allow** once. The gateway's own callback validates the id token's signature, issuer, audience, nonce and expiry plus the state and PKCE, and, if you run with `GOOGLE_HOSTED_DOMAIN=yourdomain.example`, the `hd` claim. The script then prints `PASS` or `REFUSED` with only the provider, issuer, email **domain** and flags (never the email, subject id or tokens; the browser is shown a plain "signed in" page), deletes the Worker in a `finally` block and lists `parley-test-*` Workers to show none remain. Deleting the Worker also deletes the secret, so each run needs the command again. If a run is abandoned, `node tests/reality/logins/google.mjs cleanup` deletes the Worker.
+
+Expected results:
+
+| Case | Run | Expected |
 |---|---|---|
-| Workspace member | `GOOGLE_HOSTED_DOMAIN` set to their domain | `PASS`, `tenantChecked: true` |
-| Workspace member, wrong domain configured | `GOOGLE_HOSTED_DOMAIN=other.example` | `REFUSED status=401 ... tenant_mismatch` |
-| Personal Gmail | `GOOGLE_HOSTED_DOMAIN` unset | `PASS`, `tenantChecked: false` (any Google account is accepted when no domain is set) |
-| Personal Gmail | `GOOGLE_HOSTED_DOMAIN` set | `REFUSED ... tenant_mismatch` |
+| Personal Gmail (a test user) | no `GOOGLE_HOSTED_DOMAIN` | `PASS`, `personalAccount: true`, `hostedDomainChecked: false` |
+| Workspace member | `GOOGLE_HOSTED_DOMAIN=their.domain` | `PASS`, `hostedDomainChecked: true` |
+| Personal Gmail | `GOOGLE_HOSTED_DOMAIN=their.domain` | `REFUSED ... tenant_mismatch` |
+| Consent denied (click Cancel) | any | `REFUSED ... idp_denied` |
+| Account not a test user (Testing mode) | any | Google's own "Access blocked" page; no result arrives and the script times out and cleans up |
+
+**What was already proven (2026-11-03, with a fake secret).** The full pipeline ran on Cloudflare with a junk value as the secret: deploy, the printed secret command run verbatim, the secret detected, the redirect check against Google's real authorize URL (client id, callback, PKCE S256, state, nonce all correct), a bogus callback instead of a browser (refused as `bad_flow`, recorded as a redacted summary), then delete and a final listing of `[]`. It was run again with the new client id and the exact-match check passed against Google's live authorize URL. What remains unproven is only what needs you: Google accepting the redirect URI and the real consent.
 
 ### Microsoft Entra
 
@@ -223,16 +249,16 @@ A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage 
 | Guest (B2B) user invited to the tenant | Entra signs them in with `tid` of your tenant, so expect `PASS`; **decide whether guests should be allowed**, since the gateway does not tell members from guests |
 | Account in another tenant, or a personal Microsoft account | Refused by Entra itself (single tenant), which the gateway reports as `idp_denied`; if it ever reaches the gateway, `tenant_mismatch` |
 
-### Against the deployed gateway
+### Entra against the deployed gateway
 
-After the loopback checks pass: add `https://<worker>.workers.dev/auth/<provider>/callback` as a second redirect URI, set the same values as Worker secrets with `wrangler secret put` (`FLOW_SECRET` is a random 32-byte hex string; `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`), and run `node tests/reality/probe.mjs logins --url https://<worker>.workers.dev` to check the redirect to the real provider, then sign in once in a browser. Use a `parley-test-*` Worker name and delete it afterwards, as above.
+**Pending user: needs client id.** Entra has no existing client yet. After you create the app registration above, send the client id and tenant id (both are identifiers, not secrets; the client secret stays with you) and the Entra check will get the same fixed-name treatment as Google (`parley-test-login`, a registered `/auth/entra/callback` redirect URI, `wrangler secret put ENTRA_CLIENT_SECRET`, one sign-in, clean delete). Until then the loopback script above works on its own.
 
 When done, record in the table below which cases passed, without emails or subject ids.
 
 | Case | Date | Result |
 |---|---|---|
-| Google, Workspace | | pending user |
-| Google, personal | | pending user |
-| Entra, member | | pending user |
-| Entra, guest | | pending user |
-| Entra, other tenant | | pending user |
+| Google, personal | | pending user: add redirect URI + set secret + one consent click |
+| Google, Workspace (with `GOOGLE_HOSTED_DOMAIN`) | | pending user: same steps, plus a Workspace account |
+| Entra, member | | pending user: needs client id |
+| Entra, guest | | pending user: needs client id |
+| Entra, other tenant | | pending user: needs client id |
