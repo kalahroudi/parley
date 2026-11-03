@@ -723,7 +723,7 @@ func pending(t *testing.T, task, reason string) {
 // receives them yet (the harness's reply path reuses one reply key per task),
 // so there is nothing real to assert against.
 func TestPending_FollowUpChainErasesEachKey(t *testing.T) {
-	pending(t, "T302", "needs the shipped follow-up send/receive path (next-key in inner, INPUT_REQUIRED); assert five messages, each key erased on receipt, each earlier frame unopenable, across a restart")
+	pending(t, "T405", "needs the shipped follow-up send/receive path (next-key in inner, INPUT_REQUIRED); assert five messages, each key erased on receipt, each earlier frame unopenable, across a restart")
 }
 
 // (g) A late reply after CANCEL is rejected, on both sides of the wire. The
