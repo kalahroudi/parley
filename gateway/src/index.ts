@@ -1,6 +1,7 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { agentCard, handleA2A } from "./a2a";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { Device } from "./device";
 import { handleEnroll } from "./enroll";
@@ -40,6 +41,13 @@ export default {
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
     if (pathname.startsWith("/auth/")) return handleAuth(request, env);
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
+    if (pathname === "/.well-known/agent-card.json") {
+      return request.method === "GET" ? Response.json(agentCard(new URL(request.url).origin)) : new Response("method not allowed", { status: 405 });
+    }
+    if (pathname === "/a2a") {
+      const who = authenticate(request, env);
+      return who ? handleA2A(request, env, who) : new Response("unauthorized", { status: 401 });
+    }
     if (pathname !== "/v1/connect") return new Response("not found", { status: 404 });
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });

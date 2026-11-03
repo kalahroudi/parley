@@ -17,6 +17,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"testing"
@@ -27,7 +28,18 @@ import (
 
 type canaryFrame struct {
 	Type string `json:"type"`
-	Body string `json:"body"` // base64 of the wire bytes
+	Body string `json:"body"`           // base64 of the wire bytes
+	Task string `json:"task,omitempty"` // the task id in hex, as the A2A task id
+}
+
+// canaryStep is one message of an A2A chain; the TASK is built from the first frame's header.
+type canaryStep struct {
+	kind string
+	typ  envelope.Type
+	from string
+	to   string
+	seq  uint64
+	text string
 }
 
 type canaryBlob struct {
@@ -67,7 +79,7 @@ func TestEmitCanaryFrames(t *testing.T) {
 				t.Fatalf("%s frame holds a canary in the clear", kind)
 			}
 		}
-		frames = append(frames, canaryFrame{kind, base64.StdEncoding.EncodeToString(wire)})
+		frames = append(frames, canaryFrame{kind, base64.StdEncoding.EncodeToString(wire), ""})
 	}
 
 	// The file: sealed under a random key, uploaded under a random object key.
@@ -130,7 +142,54 @@ func TestEmitCanaryFrames(t *testing.T) {
 		prev = m.Header.Hash()
 	}
 
-	b, _ := json.Marshal(map[string]any{"frames": frames, "blobs": blobs})
+	// The A2A transport carries the same messages one task at a time, and the
+	// caller's answer to the question (a REPLY), so each content field is sent
+	// over POST /a2a too: a full chain, then tasks that end in ERROR and in a
+	// refusal (also an ERROR on the wire).
+	chains := [][]canaryFrame{{}, {}, {}, {}}
+	chain := func(i int, taskID [16]byte, steps []canaryStep) {
+		var prev [envelope.HashSize]byte
+		for j, st := range steps {
+			var m *envelope.Message
+			if st.typ == envelope.TypeTask {
+				th := h
+				th.TaskID = taskID
+				m, err = envelope.SealPadded(w.callerK, sp.PublicKey, th, inner)
+			} else {
+				hh := envelope.Header{Tenant: "acme", SenderDevice: st.from, SenderKeyID: "k-" + st.from, BindingVersion: 1,
+					TargetDevice: st.to, PrekeyID: "next", ContextID: "ctx", TaskID: taskID, Seq: st.seq,
+					Type: st.typ, IssuedAt: w.now, Expiry: exp, PrevHash: prev[:]}
+				key := w.callerK
+				if st.from == "target" {
+					key = ed25519.PrivateKey(w.targetK)
+				}
+				m, err = envelope.SealPadded(key, rsk.PublicKey().Bytes(), hh, []byte(st.text))
+			}
+			if err != nil {
+				t.Fatalf("chain %d step %d: %v", i, j, err)
+			}
+			for _, n := range needles {
+				if bytes.Contains(m.Marshal(), n) {
+					t.Fatalf("chain %d step %d holds a canary in the clear", i, j)
+				}
+			}
+			chains[i] = append(chains[i], canaryFrame{st.kind, base64.StdEncoding.EncodeToString(m.Marshal()), hex.EncodeToString(taskID[:])})
+			prev = m.Header.Hash()
+		}
+	}
+	chain(0, newTask(), []canaryStep{
+		{kind: "TASK", typ: envelope.TypeTask},
+		{"STATUS", envelope.TypeStatus, "target", "caller", 1, c["status"]},
+		{"INPUT_REQUIRED", envelope.TypeInputRequired, "target", "caller", 2, c["question"]},
+		{"REPLY", envelope.TypeReply, "caller", "target", 1, "the answer is " + c["input"]},
+		{"RESULT", envelope.TypeResult, "target", "caller", 3, c["result"]},
+	})
+	chain(1, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"ERROR", envelope.TypeError, "target", "caller", 1, c["error"]}})
+	chain(2, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"REJECTED", envelope.TypeError, "target", "caller", 1, c["error"]}})
+
+	chain(3, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"CANCEL", envelope.TypeCancel, "caller", "target", 1, ""}})
+
+	b, _ := json.Marshal(map[string]any{"frames": frames, "blobs": blobs, "chains": chains})
 	if err := os.WriteFile(out, b, 0o600); err != nil {
 		t.Fatal(err)
 	}

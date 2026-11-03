@@ -6,7 +6,8 @@
   },
   "mutate": [
     "src/task.ts",
-    "src/device.ts"
+    "src/device.ts",
+    "src/parts.ts"
   ],
   "coverageAnalysis": "off",
   "reporters": [
@@ -20,6 +21,6 @@
   },
   "timeoutMS": 30000,
   "concurrency": 2,
-  "disableTypeChecks": "src/{task,device}.ts",
+  "disableTypeChecks": "src/{task,device,parts}.ts",
   "tsconfigFile": "tsconfig.stryker-none.json"
 }

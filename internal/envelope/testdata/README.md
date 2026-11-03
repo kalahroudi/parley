@@ -25,7 +25,7 @@ Header encoding, all integers big-endian: `field(label="parley/msg/v1")`,
 `u16 kem, u16 kdf, u16 aead`, `field(tenant)`, `field(sender device)`,
 `field(sender key id)`, `u64 binding version`, `field(target device)`,
 `field(prekey id)`, `field(task id, 16 bytes)`, `field(context id)`,
-`u64 seq`, `u8 type`, `u64 issued_at`, `u64 expiry` (unix seconds),
+`u64 seq`, `u8 type` (1 TASK, 2 STATUS, 3 INPUT_REQUIRED, 4 RESULT, 5 ERROR, 6 CANCEL, 7 REPLY), `u64 issued_at`, `u64 expiry` (unix seconds),
 `field(rpk)`, `field(prev hash)`, `field(prekey object)`; `field(x)` is
 `u32 len || x`. `prev hash` is the `header_hash` of the previous message in the
 task (the `result` vector chains to the `task` vector).

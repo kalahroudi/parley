@@ -186,7 +186,7 @@ func TestInputValidation(t *testing.T) {
 		"prekeyid":    func(h *Header) { h.PrekeyID = "" },
 		"context":     func(h *Header) { h.ContextID = "" },
 		"type0":       func(h *Header) { h.Type = 0 },
-		"type7":       func(h *Header) { h.Type = 7 },
+		"type8":       func(h *Header) { h.Type = 8 },
 		"issued":      func(h *Header) { h.IssuedAt = time.Time{} },
 		"expiry":      func(h *Header) { h.Expiry = h.IssuedAt },
 		"rpk-len":     func(h *Header) { h.RPK = []byte{1} },
@@ -533,7 +533,7 @@ func TestFieldAndPayloadLimits(t *testing.T) {
 		t.Fatalf("longest field rejected: %v", err)
 	}
 	h = replyHeader()
-	h.Type = TypeCancel // the last valid message type
+	h.Type = TypeReply // the last valid message type
 	if _, err := Seal(k.sign, k.prekeyPub, h, nil); err != nil {
 		t.Fatalf("cancel rejected: %v", err)
 	}

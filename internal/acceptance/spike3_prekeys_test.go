@@ -13,9 +13,10 @@ package acceptance
 //	(h) TestDiskCloneAndBackupHoldNoKeys    a disk clone or restored backup holds no usable keys
 //	(i) TestRestartInvariant                replay safety across a restart relies on memory-only prekeys
 //
-// (f) the five-message follow-up chain, (g) a late reply after CANCEL and the
-// gateway-side flood limit are not testable yet; they are the named pending
-// tests at the bottom of this file, which fail once their task is ticked.
+// (f) the five-message follow-up chain and (g) a late reply after CANCEL are
+// TestFollowUpChainErasesEachKey and TestLateReplyAfterCancelIsRejected below;
+// the gateway-side flood limit is not testable yet and is the named pending test
+// at the bottom of this file, which fails once its task is ticked.
 //
 // A crash is modelled the way a kill is: the old pool, replay table and
 // receiver are abandoned (never closed, never read again) and the daemon is
@@ -31,10 +32,13 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -718,12 +722,336 @@ func pending(t *testing.T, task, reason string) {
 	t.Skipf("pending %s: %s", task, reason)
 }
 
-// (f) A five-message follow-up chain erases each key. Follow-ups travel to the
-// next-key carried inside the previous message; no shipped code sends or
-// receives them yet (the harness's reply path reuses one reply key per task),
-// so there is nothing real to assert against.
-func TestPending_FollowUpChainErasesEachKey(t *testing.T) {
-	pending(t, "T302", "needs the shipped follow-up send/receive path (next-key in inner, INPUT_REQUIRED); assert five messages, each key erased on receipt, each earlier frame unopenable, across a restart")
+// (f) A five-message follow-up chain erases each key. Every message carries,
+// inside the ciphertext, a fresh prekey its sender issued from its own pool for
+// the peer's next message; the peer seals to it and the receiver erases it on
+// receipt. The first reply goes to the one-time key the caller put in the task's
+// RPK field, which also comes from the caller's pool. All of it is shipped code
+// (prekey.Pool, envelope, receive.Receiver). The test adds only the encoding of
+// the next key inside inner and the chain bookkeeping (sequence numbers and the
+// previous-message hash), which belongs to the daemon's task layer.
+var chainLinks = []struct {
+	typ      envelope.Type
+	from, to string
+	next     bool // carries a next-key for the peer; the last message does not
+}{
+	{envelope.TypeTask, "alice", "bob", false}, // its RPK is the key for the reply
+	{envelope.TypeInputRequired, "bob", "alice", true},
+	{envelope.TypeReply, "alice", "bob", true},
+	{envelope.TypeInputRequired, "bob", "alice", true},
+	{envelope.TypeReply, "alice", "bob", false},
+}
+
+func putField(out, f []byte) []byte {
+	return append(binary.BigEndian.AppendUint32(out, uint32(len(f))), f...)
+}
+
+func getField(p []byte) (f, rest []byte) {
+	if len(p) < 4 || len(p)-4 < int(binary.BigEndian.Uint32(p)) {
+		return nil, nil
+	}
+	n := 4 + int(binary.BigEndian.Uint32(p))
+	return p[4:n], p[n:]
+}
+
+// packNext is inner: a flag, the signed next-key if there is one, the content.
+func packNext(s *prekey.Signed, content []byte) []byte {
+	if s == nil {
+		return append([]byte{0}, content...)
+	}
+	out := []byte{1}
+	for _, f := range [][]byte{[]byte(s.Tenant), []byte(s.DeviceID), []byte(s.SigningKeyID), s.ID[:], s.PublicKey,
+		[]byte(s.CallerDeviceID), s.Nonce, s.Signature} {
+		out = putField(out, f)
+	}
+	for _, n := range []uint64{s.BindingVersion, uint64(s.CreatedAt.Unix()), uint64(s.ExpiresAt.Unix())} {
+		out = binary.BigEndian.AppendUint64(out, n)
+	}
+	return append(out, content...)
+}
+
+func unpackNext(t *testing.T, p []byte) (*prekey.Signed, []byte) {
+	t.Helper()
+	if len(p) == 0 || p[0] > 1 {
+		t.Fatal("inner has no next-key flag")
+	}
+	if p[0] == 0 {
+		return nil, p[1:]
+	}
+	rest := p[1:]
+	var f [8][]byte
+	for i := range f {
+		if f[i], rest = getField(rest); f[i] == nil {
+			t.Fatal("short inner")
+		}
+	}
+	if len(rest) < 24 || len(f[3]) != 16 {
+		t.Fatal("short inner")
+	}
+	s := &prekey.Signed{Signature: bytes.Clone(f[7])}
+	s.Tenant, s.DeviceID, s.SigningKeyID, s.CallerDeviceID = string(f[0]), string(f[1]), string(f[2]), string(f[5])
+	copy(s.ID[:], f[3])
+	s.PublicKey, s.Nonce = bytes.Clone(f[4]), bytes.Clone(f[6])
+	s.BindingVersion = binary.BigEndian.Uint64(rest)
+	s.CreatedAt = time.Unix(int64(binary.BigEndian.Uint64(rest[8:])), 0).UTC()
+	s.ExpiresAt = time.Unix(int64(binary.BigEndian.Uint64(rest[16:])), 0).UTC()
+	return s, rest[24:]
+}
+
+type chain struct {
+	t      *testing.T
+	w      *world
+	id     [16]byte
+	expiry time.Time
+	last   []byte // header hash of the previous message
+	seq    map[string]uint64
+	carry  *prekey.Signed // the key the next message is sealed to; held by the pool that issued it
+	frames [][]byte       // every message so far, as sent
+	done   int
+	execs  int
+}
+
+func newChain(t *testing.T, w *world) *chain {
+	c := &chain{t: t, w: w, seq: map[string]uint64{}, expiry: w.now.Add(taskTTL)}
+	copy(c.id[:], w.bytes(16))
+	return c
+}
+
+func (c *chain) dev(n string) *device { return c.w.dev(n) }
+
+func (c *chain) issue(from, to string) *prekey.Signed {
+	c.t.Helper()
+	s, err := c.dev(from).pool.Issue(prekey.Request{Caller: to, Nonce: c.w.bytes(16), TaskExpiry: c.expiry})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return s
+}
+
+func (c *chain) header(from, to *device, typ envelope.Type, sealed *prekey.Signed, seq uint64) envelope.Header {
+	return envelope.Header{Tenant: tenant, SenderDevice: from.id, SenderKeyID: keyID(from.bind.SigningKey), BindingVersion: from.bind.Version,
+		TargetDevice: to.id, PrekeyID: hex.EncodeToString(sealed.ID[:]), TaskID: c.id, ContextID: "ctx", Seq: seq, Type: typ,
+		IssuedAt: from.now(), Expiry: c.expiry, PrevHash: c.last}
+}
+
+// recv hands wire to the device's shipped receive path and returns what execute saw.
+func (c *chain) recv(d *device, wire []byte) (receive.Delivered, error) {
+	c.t.Helper()
+	m, err := envelope.Unmarshal(wire)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	var got receive.Delivered
+	err = d.rx.Receive(m, func() error { return nil }, func(dl receive.Delivered) error {
+		got = dl
+		got.Plaintext = bytes.Clone(dl.Plaintext)
+		c.execs++
+		return nil
+	})
+	return got, err
+}
+
+// forge signs a valid message from one device to another, sealed to an arbitrary key.
+func (c *chain) forge(from, to *device, key *prekey.Signed, seq uint64) []byte {
+	c.t.Helper()
+	m, err := envelope.Seal(from.sign, key.PublicKey, c.header(from, to, envelope.TypeStatus, key, seq), []byte("x"))
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return m.Marshal()
+}
+
+func (c *chain) wantDropped(d *device, wire []byte, what string) {
+	c.t.Helper()
+	before := c.execs
+	if _, err := c.recv(d, wire); !errors.Is(err, receive.ErrDropped) {
+		c.t.Fatalf("%s: err=%v, want ErrDropped", what, err)
+	}
+	if c.execs != before {
+		c.t.Fatalf("%s: executed", what)
+	}
+}
+
+// step sends message i, delivers it through the receiver and checks the chain.
+func (c *chain) step(i int) {
+	c.t.Helper()
+	l := chainLinks[i]
+	from, to := c.dev(l.from), c.dev(l.to)
+	sealed := c.carry
+	var h envelope.Header
+	var inner, content = []byte(nil), []byte("content-" + strconv.Itoa(i))
+	var carry *prekey.Signed
+	if i == 0 {
+		var err error
+		if sealed, _, err = from.fetchPrekey(l.to, c.expiry); err != nil {
+			c.t.Fatal(err)
+		}
+		carry = c.issue(l.from, l.to)
+		h = c.header(from, to, l.typ, sealed, 0)
+		h.RPK, h.Prekey, h.PrevHash = carry.PublicKey, prekeyBlob(sealed), nil
+		inner = packNext(nil, content)
+	} else {
+		c.seq[l.from]++
+		h = c.header(from, to, l.typ, sealed, c.seq[l.from])
+		if l.next {
+			carry = c.issue(l.from, l.to)
+		}
+		inner = packNext(carry, content)
+	}
+	m, err := envelope.Seal(from.sign, sealed.PublicKey, h, inner)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	wire := m.Marshal()
+	c.frames = append(c.frames, wire)
+	c.arrive(i, wire, sealed, carry, content)
+}
+
+// arrive delivers message i and asserts what the receiver did to the keys.
+func (c *chain) arrive(i int, wire []byte, sealed, carry *prekey.Signed, content []byte) {
+	c.t.Helper()
+	l := chainLinks[i]
+	from, to := c.dev(l.from), c.dev(l.to)
+	dl, err := c.recv(to, wire)
+	if err != nil {
+		c.t.Fatalf("message %d: %v", i, err)
+	}
+	// Identity, type, order and chain come from the signed header and the
+	// sender's root-signed binding, never from anything the gateway added.
+	h := dl.Header
+	if h.SenderDevice != l.from || h.Type != l.typ || h.TaskID != c.id || dl.Owner != from.bind.Owner || h.Seq != c.seq[l.from] ||
+		!bytes.Equal(h.PrevHash, c.last) && i != 0 {
+		c.t.Fatalf("message %d: header does not continue the chain", i)
+	}
+	hh := h.Hash()
+	c.last = hh[:]
+	nk, got := unpackNext(c.t, dl.Plaintext)
+	if !bytes.Equal(got, content) {
+		c.t.Fatalf("message %d: content changed", i)
+	}
+	inInner := carry // the task's key travels in the RPK field, not inside
+	if i == 0 {
+		inInner = nil
+	}
+	if inInner == nil != (nk == nil) {
+		c.t.Fatalf("message %d: next-key presence", i)
+	}
+	if nk != nil {
+		tb := from.bind
+		if err := prekey.Verify(tb.SigningKey, nk, prekey.Expect{Tenant: tenant, DeviceID: l.from, SigningKeyID: keyID(tb.SigningKey),
+			Caller: l.to, Nonce: nk.Nonce, BindingVersion: tb.Version, Now: to.now()}); err != nil || nk.ID != inInner.ID {
+			c.t.Fatalf("message %d: next-key does not verify: %v", i, err)
+		}
+	}
+	c.carry, c.done = carry, i+1
+
+	// The key it was sealed to is gone from the receiver, for good.
+	if err := to.pool.With(sealed.ID, func(*[32]byte) error { return nil }); !errors.Is(err, prekey.ErrConsumed) {
+		c.t.Fatalf("message %d: key still usable: %v", i, err)
+	}
+	if err := to.pool.Consume(sealed.ID); !errors.Is(err, prekey.ErrConsumed) {
+		c.t.Fatalf("message %d: key erased twice: %v", i, err)
+	}
+	// Each side holds exactly the one key it is waiting for, and only the sender of the last message holds it.
+	want := map[string]int{"alice": 0, "bob": 0}
+	if carry != nil {
+		want[l.from] = 1
+	}
+	for n, w := range want {
+		if got := c.dev(n).pool.Outstanding(); got != w {
+			c.t.Fatalf("message %d: %s holds %d keys, want %d", i, n, got, w)
+		}
+	}
+	// Every message so far, resent, is dropped; and with the one live key in hand none of them opens.
+	for k, f := range c.frames {
+		c.wantDropped(c.dev(chainLinks[k].to), f, "resent message "+strconv.Itoa(k))
+	}
+	if carry != nil {
+		for _, sk := range scalars(c.t, from.pool, carry.ID) {
+			for k, f := range c.frames {
+				m, _ := envelope.Unmarshal(f)
+				if pt, err := m.Open(sk); err == nil {
+					clear(pt)
+					c.t.Fatalf("message %d opens with the current key", k)
+				}
+			}
+		}
+	}
+	// A second message sealed to the key that was just used is dropped, valid signature or not needed.
+	c.wantDropped(to, c.forge(from, to, sealed, 100+uint64(i)), "second message to a used key")
+	if carry != nil {
+		// A key from the sender's own pool is unknown at the receiver: dropped, and nothing is burnt.
+		c.wantDropped(to, c.forge(from, to, carry, 200+uint64(i)), "message to a key from another pool")
+		if from.pool.Outstanding() != 1 {
+			c.t.Fatalf("message %d: a junk frame changed the sender's keys", i)
+		}
+	}
+	// A frame for another device is not ours.
+	if _, err := c.recv(to, mutate(c.t, c.forge(from, to, sealed, 300+uint64(i)), func(m *envelope.Message) { m.Header.TargetDevice = "carol" })); !errors.Is(err, receive.ErrNotForUs) {
+		c.t.Fatalf("message %d: misaddressed frame: %v", i, err)
+	}
+}
+
+func TestFollowUpChainErasesEachKey(t *testing.T) {
+	t.Run("five messages, each key erased on receipt", func(t *testing.T) {
+		w := newWorld(t, "alice", "bob")
+		c := newChain(t, w)
+		for i := range chainLinks {
+			c.step(i)
+		}
+		if c.execs != len(chainLinks) || c.carry != nil {
+			t.Fatalf("executed %d of %d, key left over: %v", c.execs, len(chainLinks), c.carry != nil)
+		}
+	})
+
+	// A restart loses every key and the replay table. The in-flight message and
+	// all earlier ones are dropped, the chain ends there, and a fresh task works.
+	t.Run("after a restart", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, restarts string
+			after          int // messages delivered before the restart
+		}{
+			{"bob", "bob", 2}, // bob holds the key for message 3
+			{"caller", "alice", 3},
+			{"both", "both", 3},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				w := newWorld(t, "alice", "bob")
+				c := newChain(t, w)
+				for i := range tc.after {
+					c.step(i)
+				}
+				// The in-flight message is sealed before the crash and arrives after it.
+				l := chainLinks[tc.after]
+				from := c.dev(l.from)
+				c.seq[l.from]++
+				h := c.header(from, c.dev(l.to), l.typ, c.carry, c.seq[l.from])
+				m, err := envelope.Seal(from.sign, c.carry.PublicKey, h, packNext(nil, []byte("late")))
+				if err != nil {
+					t.Fatal(err)
+				}
+				inflight := m.Marshal()
+				for _, n := range []string{"alice", "bob"} {
+					if tc.restarts == n || tc.restarts == "both" {
+						c.dev(n).restart()
+					}
+				}
+				c.frames = append(c.frames, inflight)
+				for k, f := range c.frames {
+					target := c.dev(chainLinks[k].to)
+					if target.pool.Outstanding() != 0 {
+						t.Fatalf("restarted %s still holds keys", target.id)
+					}
+					c.wantDropped(target, f, "message "+strconv.Itoa(k)+" after the restart")
+				}
+				// The chain is over; a new task between the same devices runs end to end.
+				n := newChain(t, w)
+				for i := range chainLinks {
+					n.step(i)
+				}
+			})
+		}
+	})
 }
 
 // (g) A late reply after CANCEL is rejected, on both sides of the wire. The
