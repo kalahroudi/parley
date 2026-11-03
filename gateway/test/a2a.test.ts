@@ -317,41 +317,44 @@ describe("lifecycle over the transport", () => {
   });
 
   it("moves a task only where the Task DO's state machine allows, from every state", async () => {
-    const reach: Record<TaskState, (w: ReturnType<typeof world>) => Promise<number>> = {
+    const reach: Record<TaskState, (w: ReturnType<typeof world>, id: string) => Promise<number>> = {
       SUBMITTED: async () => 0,
-      WORKING: async (w) => (await w.bob("STATUS", "tk", 1), 1),
-      INPUT_REQUIRED: async (w) => (await w.bob("INPUT_REQUIRED", "tk", 1), 1),
-      COMPLETED: async (w) => (await w.bob("RESULT", "tk", 1), 1),
-      FAILED: async (w) => (await w.bob("ERROR", "tk", 1), 1),
-      REJECTED: async (w) => (await w.bob("ERROR", "tk", 1, "REJECTED"), 1),
-      CANCELED: async (w) => (await w.cancel("tk", 1), 0),
+      WORKING: async (w, id) => (await w.bob("STATUS", id, 1), 1),
+      INPUT_REQUIRED: async (w, id) => (await w.bob("INPUT_REQUIRED", id, 1), 1),
+      COMPLETED: async (w, id) => (await w.bob("RESULT", id, 1), 1),
+      FAILED: async (w, id) => (await w.bob("ERROR", id, 1), 1),
+      REJECTED: async (w, id) => (await w.bob("ERROR", id, 1, "REJECTED"), 1),
+      CANCELED: async (w, id) => (await w.cancel(id, 1), 0),
     };
     // Each probe: how to send it, and the state it asks for.
-    const probes: [string, TaskState, (w: ReturnType<typeof world>, tseq: number) => Promise<any>][] = [
-      ["STATUS", "WORKING", (w, s) => w.bob("STATUS", "tk", s + 1)],
-      ["INPUT_REQUIRED", "INPUT_REQUIRED", (w, s) => w.bob("INPUT_REQUIRED", "tk", s + 1)],
-      ["RESULT", "COMPLETED", (w, s) => w.bob("RESULT", "tk", s + 1)],
-      ["ERROR", "FAILED", (w, s) => w.bob("ERROR", "tk", s + 1)],
-      ["REJECTED", "REJECTED", (w, s) => w.bob("ERROR", "tk", s + 1, "REJECTED")],
-      ["REPLY", "WORKING", (w) => w.alice("REPLY", "tk", 1)],
-      ["CANCEL", "CANCELED", async (w, s) => w.cancel("tk", s === 0 ? 1 : 2)],
+    const probes: [string, TaskState, (w: ReturnType<typeof world>, id: string, tseq: number) => Promise<any>][] = [
+      ["STATUS", "WORKING", (w, id, s) => w.bob("STATUS", id, s + 1)],
+      ["INPUT_REQUIRED", "INPUT_REQUIRED", (w, id, s) => w.bob("INPUT_REQUIRED", id, s + 1)],
+      ["RESULT", "COMPLETED", (w, id, s) => w.bob("RESULT", id, s + 1)],
+      ["ERROR", "FAILED", (w, id, s) => w.bob("ERROR", id, s + 1)],
+      ["REJECTED", "REJECTED", (w, id, s) => w.bob("ERROR", id, s + 1, "REJECTED")],
+      ["REPLY", "WORKING", (w, id) => w.alice("REPLY", id, 1)],
+      ["CANCEL", "CANCELED", async (w, id, s) => w.cancel(id, s === 0 ? 1 : 2)],
     ];
+    // One pair of tunnels, one task per (state, event): connections and storage writes are the slow part on some runners.
+    const w = world();
+    await connect(w.T, "alice");
+    await connect(w.T, "bob");
+    let k = 0;
     for (const from of Object.keys(reach) as TaskState[]) {
       for (const [name, to, probe] of probes) {
-        const w = world();
-        await connect(w.T, "alice");
-        await connect(w.T, "bob");
-        await w.task("tk");
-        const seq = await reach[from](w);
-        expect(await w.state("tk"), `reached ${from}`).toBe(STATE_NAME[from]);
+        const id = `x${++k}`;
+        await w.task(id);
+        const seq = await reach[from](w, id);
+        expect(await w.state(id), `reached ${from}`).toBe(STATE_NAME[from]);
         const allowed = name === "REPLY" ? from === "INPUT_REQUIRED" : NEXT[from].includes(to);
-        const r = await probe(w, seq);
+        const r = await probe(w, id, seq);
         expect(r.result !== undefined, `${name} from ${from}: ${JSON.stringify(r.error)}`).toBe(allowed);
-        expect(await w.state("tk"), `${name} from ${from}`).toBe(STATE_NAME[allowed ? to : from]);
+        expect(await w.state(id), `${name} from ${from}`).toBe(STATE_NAME[allowed ? to : from]);
         if (!allowed) expect([-32015, -32002], `${name} from ${from}`).toContain(errCode(r));
       }
     }
-  });
+  }, 60_000);
 
   it("a target that went offline closes the task instead of leaving it to expire", async () => {
     const w = world();
