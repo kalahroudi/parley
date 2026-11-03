@@ -409,8 +409,9 @@ func (p *Pool) Issue(req Request) (*Signed, error) {
 // attempt the AEAD open. Junk frames that fail to open leave the key intact:
 // if fn returns an error the key stays valid. If fn panics the key is zeroed
 // and its id burned before the panic continues. fn runs under the pool lock; it
-// must not retain the pointer or call back into the pool. Call Consume once
-// the open succeeds.
+// must not retain the pointer or call back into the pool. On Linux it also runs
+// with asynchronous signals blocked (see quiesce), so it must be short and must
+// not block. Call Consume once the open succeeds.
 func (p *Pool) With(id [idSize]byte, fn func(scalar *[scalarSize]byte) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -81,3 +81,50 @@ func TestQuiesceSurvivesAFailingSigprocmask(t *testing.T) {
 		t.Fatalf("SIGURG blocked although sigprocmask failed: %x", blocked)
 	}
 }
+
+func urgBlocked(m uint64) bool { return m&(1<<(syscall.SIGURG-1)) != 0 }
+
+// Issue is where the scalar is generated and the public key derived: both steps
+// must run with the signal blocked, and the mask must be back afterwards.
+func TestIssueRunsWithPreemptionSignalBlocked(t *testing.T) {
+	f := newFixture(t, nil)
+	var inRand, inDerive uint64
+	origRand, origDerive := randRead, derivePublic
+	t.Cleanup(func() { randRead, derivePublic = origRand, origDerive })
+	randRead = func(b []byte) (int, error) {
+		if inRand == 0 {
+			inRand = sigBlocked(t) | 1<<63 // marker: observed
+		}
+		return origRand(b)
+	}
+	derivePublic = func(b []byte) ([]byte, error) { inDerive = sigBlocked(t) | 1<<63; return origDerive(b) }
+	if _, err := f.pool.Issue(req("c")); err != nil {
+		t.Fatal(err)
+	}
+	if !urgBlocked(inRand) || !urgBlocked(inDerive) {
+		t.Fatalf("SIGURG not blocked in Issue: rand=%x derive=%x", inRand, inDerive)
+	}
+	if urgBlocked(sigBlocked(t)) {
+		t.Fatal("SIGURG still blocked after Issue returned")
+	}
+}
+
+// Whatever way With ends, the thread gets its signal mask back.
+func TestWithRestoresSignalMaskOnErrorAndPanic(t *testing.T) {
+	f := newFixture(t, nil)
+	sp, err := f.pool.Issue(req("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.pool.With(sp.ID, func(*[scalarSize]byte) error { return errDerivation })
+	if urgBlocked(sigBlocked(t)) {
+		t.Fatal("SIGURG still blocked after With returned an error")
+	}
+	func() {
+		defer func() { _ = recover() }()
+		_ = f.pool.With(sp.ID, func(*[scalarSize]byte) error { panic("boom") })
+	}()
+	if urgBlocked(sigBlocked(t)) {
+		t.Fatal("SIGURG still blocked after With panicked")
+	}
+}
