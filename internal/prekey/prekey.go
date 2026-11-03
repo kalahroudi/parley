@@ -24,9 +24,11 @@
 // registers are cleared after each use of the scalar (Issue, With, release),
 // because a 32-byte copy leaves it in X0/X1 and any signal delivered later (the
 // runtime sends SIGURG around every garbage collection) writes those registers
-// onto a signal stack in the Go heap. A signal that lands during the operation
-// itself can still save the key there, and the general-purpose registers and
-// stack spills are not cleared: Go offers no way to prevent either. Errors and logs
+// onto a signal stack in the Go heap. On Linux the operation also runs on a
+// locked thread with asynchronous signals blocked (quiesce), so no signal can
+// snapshot the registers while the key is in them; elsewhere that window stays
+// open. General-purpose registers and stack spills are not cleared: Go offers no
+// way to do so. Errors and logs
 // never carry key material: every error is a fixed sentinel.
 package prekey
 
@@ -348,7 +350,11 @@ func (p *Pool) Issue(req Request) (*Signed, error) {
 	sc := p.scalar(i)
 	// The random bytes and the public-key derivation pass the scalar through
 	// the vector registers.
-	defer scrubVectorRegisters()
+	restore := quiesce()
+	defer func() {
+		scrubVectorRegisters()
+		restore()
+	}()
 	// Whatever way this returns or panics before the key is committed, the
 	// slot is wiped.
 	committed := false
@@ -401,10 +407,13 @@ func (p *Pool) With(id [idSize]byte, fn func(scalar *[scalarSize]byte) error) er
 		return err
 	}
 	returned := false
+	restore := quiesce()
 	defer func() {
 		// Whatever fn did with the scalar (hash it, copy it, open with it), the
-		// copy may still sit in the vector registers; see scrubVectorRegisters.
+		// copy may still sit in the vector registers; clear them before any
+		// signal held back by quiesce is delivered.
 		scrubVectorRegisters()
+		restore()
 		if !returned {
 			p.release(id, s, now)
 		}

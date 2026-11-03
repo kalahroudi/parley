@@ -1,7 +1,7 @@
 # Copyright 2026 The Parley Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Temporary: memscan investigation on amd64 Linux. Deleted before merge.
+# One-off proof for the memscan fix on amd64 Linux. Deleted before merge.
 name: memscan-proof
 on:
   push:
@@ -10,27 +10,23 @@ jobs:
   loop:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        scrub: ["on", "off"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - run: uname -m
+      - name: prekey tests
+        run: go test -race -count=1 ./internal/prekey
       - name: loop
-        env:
-          PARLEY_SCAN_DEBUG: "1"
         run: |
-          [ "${{ matrix.scrub }}" = off ] && export PARLEY_NOSCRUB=1
           go test -race -c -o /tmp/acc ./internal/acceptance
           cd internal/acceptance
           fail=0
-          for i in $(seq 1 60); do
+          for i in $(seq 1 100); do
             if ! /tmp/acc -test.count=1 -test.run '^TestAddressSpaceHoldsNoErasedKey$' -test.v > /tmp/o.$i 2>&1; then
-              fail=$((fail+1)); echo "=== RUN $i FAILED"
-              if [ $fail -le 2 ]; then cat /tmp/o.$i; else grep -E "hits map|copies" /tmp/o.$i | tail -6; fi
+              fail=$((fail+1)); echo "=== RUN $i FAILED"; grep -E "hits map|copies|--- FAIL" /tmp/o.$i | tail -6
             fi
           done
-          echo "scrub=${{ matrix.scrub }} $(uname -m): $fail failures of 60"
+          echo "address-space scan on $(uname -m): $fail failures of 100"
+          [ $fail -eq 0 ]
