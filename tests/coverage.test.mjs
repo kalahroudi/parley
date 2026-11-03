@@ -59,3 +59,30 @@ test("CI and make run the gates", () => {
     assert.ok(mk.includes(step), `Makefile lacks ${step}`);
   }
 });
+
+// Tier 1 for TypeScript: the task state machine, deadlines and retention logic.
+// Each listed file needs a 100% gate in vitest (no exclusions) and a Stryker run
+// that must kill every mutant; this test fails if either is dropped or if the
+// file stops being listed.
+test("gateway tier 1 files are gated at 100% and mutation tested, with no exclusions", () => {
+  const files = JSON.parse(read("tests/coverage/gateway-tier1.json")).files;
+  assert.ok(files.includes("gateway/src/task.ts"), "the task state machine is tier 1");
+  const cfg = read("gateway/vitest.config.ts");
+  const stryker = JSON.parse(read("gateway/stryker.config.json"));
+  assert.equal(stryker.thresholds.break, 100);
+  for (const f of files) {
+    const src = f.replace(/^gateway\//, "");
+    assert.ok(existsSync(join(root, f)), `${f} does not exist`);
+    assert.ok(
+      cfg.includes(`"${src}": { lines: 100, statements: 100, branches: 100, functions: 100 }`),
+      `vitest.config.ts has no 100% gate for ${src}`,
+    );
+    assert.ok(stryker.mutate.includes(src), `stryker.config.json does not mutate ${src}`);
+    assert.ok(!cfg.split("exclude:")[1]?.split("\n")[0].includes(src), `${src} is excluded from coverage`);
+    assert.ok(!/istanbul ignore|c8 ignore|Stryker disable/.test(read(f)), `${f} carries a coverage or mutation exclusion`);
+    assert.ok(!/console\.|\blogx?\b/.test(read(f)), `${f} logs; the Task DO stores and emits metadata only`);
+  }
+  assert.match(read("gateway/package.json"), /"test:mutation": "stryker run"/);
+  assert.ok(read("scripts/mutation.sh").includes("test:mutation"), "mutation.sh does not run the gateway mutation tests");
+  assert.ok(!stryker.mutate.some((m) => m.startsWith("!")), "no mutation exclusions");
+});

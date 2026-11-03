@@ -8,3 +8,5 @@ dist/
 /coverage/
 /gateway/coverage/
 .DS_Store
+/gateway/reports/
+/gateway/.stryker-tmp/

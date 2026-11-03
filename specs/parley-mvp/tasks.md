@@ -55,7 +55,7 @@ Deliverable: `parley-cli test` sends an end-to-end encrypted echo between two ma
 
 Deliverable: `send_task` and `get_task` between two machines with an API-backed tool-less bot. Spikes 5 and 6.
 
-- [ ] T301 Task DO state machine, deadlines, cancel, expiry
+- [x] T301 Task DO state machine, deadlines, cancel, expiry
 - [ ] T302 A2A v1.0 transport with encrypted parts, status and INPUT_REQUIRED
 - [ ] T303 Directory, groups and ACLs
 - [ ] T304 Retention modes (Strict and Queued), TTL deletion
