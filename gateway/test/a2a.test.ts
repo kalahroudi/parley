@@ -249,7 +249,7 @@ describe("lifecycle over the transport", () => {
     await connect(w.T, "alice");
     await connect(w.T, "bob");
     await w.task("tk");
-    for (const [dev, role] of [["bob", "ROLE_AGENT"], ["alice", "ROLE_USER"]]) {
+    for (const [dev, role] of [["bob", "ROLE_AGENT"], ["alice", "ROLE_USER"]] as const) {
       for (const k of ["constructor", "toString", "__proto__"]) {
         expect(errCode(await w.rpc(dev, "SendMessage", w.msg("tk", role, k, { seq: 1 }))), k).toBe(-32602);
       }
