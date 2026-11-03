@@ -1,6 +1,6 @@
 # Reality check 1 (T109)
 
-**Status.** Cloudflare half: measured on 2026-11-02 and 2026-11-03. Limits, hibernation timing and costs are measured, and the 10k soak with the fixed harness ran once on a fresh Worker and **lost and duplicated nothing** (details under "Second soak: result"). The first soak run was not valid. One earlier claim about deploys re-instantiating the object was wrong and is corrected below. Real logins: **Google PASSED on 2026-11-03 with a personal gmail.com account**, which did not exercise the Workspace hosted-domain (`hd`) path; **Entra is pending a client id**.
+**Status.** Cloudflare half: measured on 2026-11-02 and 2026-11-03. Limits, hibernation timing and costs are measured, and the 10k soak with the fixed harness ran once on a fresh Worker and **lost and duplicated nothing** (details under "Second soak: result"). The first soak run was not valid. One earlier claim about deploys re-instantiating the object was wrong and is corrected below. Real logins: **Google PASSED on 2026-11-03 with a personal gmail.com account, and a Google Workspace account (hostjab.com) also signed in end to end; hosted-domain (`hd`) enforcement has NOT yet been exercised** (no required domain was configured in either run). **Entra is pending a client id**.
 
 Versions: wrangler 4.156.1, `cf` 0.15.0, Go 1.27.3, Node 26.11.1, Worker compatibility date 2026-10-01. Raw data: [reality-check-1-data.json](reality-check-1-data.json) (timings and counters only). Worker `parley-test-r1-6d0c01`, deleted at the end; `cf workers scripts search --name parley-test-` on the pinned account returned `[]` afterwards, and again after the later local-only work.
 
@@ -182,7 +182,7 @@ A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage 
 
 ## Real logins (pending the user)
 
-**Google: PASSED on 2026-11-03 (personal gmail.com account); the Workspace hosted-domain (`hd`) path is not covered.** **Entra: pending user: needs client id.** The Google run is recorded under "Result of the user's run" below.
+**Google: PASSED on 2026-11-03 with a personal gmail.com account and with a Workspace account on hostjab.com; hosted-domain (`hd`) enforcement is NOT yet exercised on real Google.** **Entra: pending user: needs client id.** Both runs are recorded under "Result of the user's run" below.
 
 ### Google (the OAuth client created for this check)
 
@@ -223,8 +223,9 @@ Expected results:
 | Case | Run | Expected |
 |---|---|---|
 | Personal Gmail (a test user) | no `GOOGLE_HOSTED_DOMAIN` | `PASS`, `personalAccount: true`, `hostedDomainChecked: false` |
-| Workspace member | `--domain their.domain --mode positive` | `PASS (positive)`, `hostedDomainChecked: true` |
-| Personal Gmail | `--domain example.com --mode negative` (any domain the account is not in) | `REFUSED as expected (negative): tenant_mismatch`, no identity issued |
+| Workspace member (hostjab.com) | `--domain hostjab.com --mode positive` | `PASS (positive)`, `hostedDomainChecked: true` |
+| Personal Gmail | `--domain hostjab.com --mode negative` (or `example.com`) | `REFUSED as expected (negative): tenant_mismatch`, no identity issued |
+| Workspace member (hostjab.com), a different domain required | `--domain example.com --mode negative` | `REFUSED as expected (negative): tenant_mismatch`, no identity issued |
 | Consent denied (click Cancel) | any | `REFUSED ... idp_denied` |
 | Account not a test user (Testing mode) | any | Google's own "Access blocked" page; no result arrives and the script times out and cleans up |
 
@@ -236,9 +237,13 @@ Expected results:
 
 What this establishes: against real Google and a real Worker on Cloudflare, the gateway's OIDC code completed the authorization-code flow with PKCE for the registered client and callback, and its id-token checks (signature, issuer, audience, nonce, expiry, state) all passed on a real token, with the client secret set through wrangler's prompt and never seen by any script or chat. The identity came back with the Google issuer and an email on `gmail.com`; nothing beyond the domain is recorded here.
 
+**Second run: Google Workspace account (2026-11-03, same Worker name and client, deleted afterwards).** The user ran the same script again, signing in with a Google Workspace account on the domain `hostjab.com` (domain only; no other identifier is recorded). As reported by the user's run, not re-run by me: `PASS {"ok":true,"status":200,"provider":"google","issuer":"https://accounts.google.com","emailDomain":"hostjab.com","personalAccount":false,"hasSub":true,"hostedDomainChecked":false}`, then `remaining parley-test-* workers: []`.
+
+**Workspace sign-in works end to end; hd enforcement NOT yet exercised (no required domain configured in that run).** `hostedDomainChecked: false` means `GOOGLE_HOSTED_DOMAIN` was not set, so the gateway accepted the account without comparing its `hd` claim to anything. What this run does show is that a Workspace account (`personalAccount: false`, `emailDomain: hostjab.com`) completes the real flow with the registered client and callback, including any consent and admin settings that applied to that account. It does not show that the domain restriction works.
+
 **What it did not cover:**
 
-- **Workspace hosted-domain (`hd`) enforcement.** The run used a personal account with `GOOGLE_HOSTED_DOMAIN` unset (`hostedDomainChecked: false`), so the code path that requires the `hd` claim to equal the configured domain, and the refusal of a personal account when a domain is configured, were **not exercised against real Google**. They remain covered only by the mock-IdP tests. Still to do, now supported by the script (see "Hosted-domain (Workspace) runs"): a negative run with the personal account and a non-matching domain (no Workspace account needed), and a positive run with a real Workspace account.
+- **Workspace hosted-domain (`hd`) enforcement.** Both runs (personal gmail.com and Workspace hostjab.com) had `GOOGLE_HOSTED_DOMAIN` unset (`hostedDomainChecked: false`), so the code path that requires the `hd` claim to equal the configured domain, and the refusal of an account that does not match, were **not exercised against real Google**. They remain covered only by the mock-IdP tests. Still to do, now supported by the script (see "Hosted-domain (Workspace) runs"): a positive run with the hostjab.com account and `--domain hostjab.com`, and negative runs with a non-matching domain.
 - The other Google cases in the table: consent denied (`idp_denied`), and an account that is not a test user while the app is in Testing (Google's own "Access blocked").
 - **Microsoft Entra:** nothing was run; it is pending a client id.
 - Only one sign-in was run, so token expiry and `email_verified: false` behavior were not seen on a real token.
@@ -247,16 +252,19 @@ What this establishes: against real Google and a real Worker on Cloudflare, the 
 
 Two runs prove the domain restriction: a positive one with a Workspace account, and a negative one that needs **no Workspace account at all**. Both use the same three steps as above (the redirect URI is already registered; the secret command is re-run each time).
 
-**(a) How the domain gets to the Worker.** Give the script the domain with `--domain corp.example`, or set `GOOGLE_HOSTED_DOMAIN=corp.example` in your shell instead (the flag wins). The script lowercases it, refuses anything that is not a plain domain name, and writes it into the generated, throwaway wrangler config as the Worker's `GOOGLE_HOSTED_DOMAIN` variable when it deploys. There is no wrangler edit for you to make. Before anyone is asked to click, the script's first check confirms the variable arrived: the Worker's login redirect to Google must carry `hd=<your domain>`, and the run stops with "GOOGLE_HOSTED_DOMAIN did not reach the Worker" if it does not. A domain always needs a mode, so a run can never be unclear about what it expects.
+**(a) How the domain gets to the Worker.** Give the script the domain with `--domain hostjab.com`, or set `GOOGLE_HOSTED_DOMAIN=hostjab.com` in your shell instead (the flag wins). The script lowercases it, refuses anything that is not a plain domain name, and writes it into the generated, throwaway wrangler config as the Worker's `GOOGLE_HOSTED_DOMAIN` variable when it deploys. There is no wrangler edit for you to make. Before anyone is asked to click, the script's first check confirms the variable arrived: the Worker's login redirect to Google must carry `hd=<your domain>`, and the run stops with "GOOGLE_HOSTED_DOMAIN did not reach the Worker" if it does not. A domain always needs a mode, so a run can never be unclear about what it expects.
 
 **(b) Two modes.**
 
 | Mode | Command | Sign in with | Expected output | Exit code |
 |---|---|---|---|---|
-| Positive | `node tests/reality/logins/google.mjs --domain corp.example --mode positive` | a Workspace account of `corp.example` | `PASS (positive): an account of corp.example was accepted and the hd claim was checked`, with `hostedDomainChecked: true` | 0 |
-| Negative | `node tests/reality/logins/google.mjs --domain example.com --mode negative` | an account that is **not** of that domain, for example the personal gmail.com account you already used | `REFUSED as expected (negative): tenant_mismatch, hd did not match example.com; no identity was issued` | 0 |
+| Positive | `node tests/reality/logins/google.mjs --domain hostjab.com --mode positive` | the Workspace account on `hostjab.com` | `PASS (positive): an account of hostjab.com was accepted and the hd claim was checked`, with `hostedDomainChecked: true` | 0 |
+| Negative, same Workspace account | `node tests/reality/logins/google.mjs --domain example.com --mode negative` | the same `hostjab.com` account, which is **not** of `example.com` | `REFUSED as expected (negative): tenant_mismatch, hd did not match example.com; no identity was issued` | 0 |
+| Negative, personal account | `node tests/reality/logins/google.mjs --domain hostjab.com --mode negative` | a personal gmail.com account, which is not of `hostjab.com` | the same `REFUSED as expected (negative): tenant_mismatch ...` | 0 |
 
-The negative run is the one that proves enforcement without a Workspace account: a personal account has no `hd` claim, so a gateway that enforces the domain must refuse it even though the sign-in itself succeeds at Google. Any other outcome exits 1 with a plain reason:
+So the user can prove enforcement with the Workspace account alone (positive, then negative with another domain required), and also with the personal gmail account if they wish.
+
+The negative runs are what prove enforcement: the sign-in itself succeeds at Google, yet a gateway that enforces the domain must refuse it, either because a personal account has no `hd` claim or because a Workspace account's `hd` (`hostjab.com`) is not the required domain (`example.com`). Together with the positive run, the same account is accepted when its own domain is required and refused when another is. Any other outcome exits 1 with a plain reason:
 
 - `ENFORCEMENT FAILED`: the account was accepted although a domain was set. That is a gateway bug; stop and report it.
 - `NOT PROVEN (negative)`: it was refused for another reason (you cancelled consent, Google blocked the account, the Worker timed out), so the domain check was not what stopped it. Run it again and click Allow.
@@ -303,8 +311,10 @@ When done, record in the table below which cases passed, without emails or subje
 | Case | Date | Result |
 |---|---|---|
 | Google, personal (gmail.com) | 2026-11-03 | **PASS** (`personalAccount: true`, `hostedDomainChecked: false`); personal account, no domain configured |
-| Google, POSITIVE: Workspace account, `--domain <their domain> --mode positive` | | pending user (needs a real Workspace account) |
-| Google, NEGATIVE: personal account, `--domain example.com --mode negative` | | pending user (needs no Workspace account; expect `REFUSED as expected ... tenant_mismatch`) |
+| Google, Workspace account (hostjab.com), no domain required | 2026-11-03 | **PASS** (`personalAccount: false`, `emailDomain: hostjab.com`, `hostedDomainChecked: false`); hd enforcement not exercised |
+| Google, POSITIVE: Workspace account, `--domain hostjab.com --mode positive` | | pending user |
+| Google, NEGATIVE: hostjab.com account, `--domain example.com --mode negative` | | pending user (expect `REFUSED as expected ... tenant_mismatch`) |
+| Google, NEGATIVE: personal account, `--domain hostjab.com --mode negative` | | pending user (optional second proof) |
 | Entra, member | | pending user: needs client id |
 | Entra, guest | | pending user: needs client id |
 | Entra, other tenant | | pending user: needs client id |
