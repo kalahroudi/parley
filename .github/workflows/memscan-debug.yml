@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [default, asyncpreemptoff]
+        mode: [default]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -30,6 +30,6 @@ jobs:
           cd internal/acceptance
           fail=0
           for i in $(seq 1 100); do
-            if ! /tmp/acc -test.count=1 -test.run '^TestAddressSpaceHoldsNoErasedKey$' -test.v > /tmp/o.$i 2>&1; then fail=$((fail+1)); echo "=== RUN $i FAILED"; grep -E "CLASS|hits map|copies" /tmp/o.$i | tail -12; fi
+            if ! /tmp/acc -test.count=1 -test.run '^TestAddressSpaceHoldsNoErasedKey$' -test.v > /tmp/o.$i 2>&1; then fail=$((fail+1)); echo "=== RUN $i FAILED"; if [ $fail -le 3 ]; then cat /tmp/o.$i; else grep -E "CLASS|hits map|copies" /tmp/o.$i | tail -12; fi; fi
           done
           echo "mode ${{ matrix.mode }} failures: $fail of 100"
