@@ -1,6 +1,6 @@
 # Reality check 1 (T109)
 
-**Status.** Cloudflare half: run once on 2026-11-02 (23:04 to 23:19 UTC); limits, hibernation timing, costs and deploy behavior are measured. The 10k-message soak ran once, passed its data checks, but is **not** a valid soak (a harness flaw, below), and the harness is fixed but not re-run against Cloudflare because the agreed cap was one soak. Real Google and Entra logins: **pending the user**, runbook at the end.
+**Status.** Cloudflare half: measured on 2026-11-02 and 2026-11-03. Limits, hibernation timing and costs are measured, and the 10k soak with the fixed harness ran once on a fresh Worker and **lost and duplicated nothing** (details under "Second soak: result"). The first soak run was not valid. One earlier claim about deploys re-instantiating the object was wrong and is corrected below. Real Google and Entra logins: **pending the user**, runbook at the end.
 
 Versions: wrangler 4.156.1, `cf` 0.15.0, Go 1.27.3, Node 26.11.1, Worker compatibility date 2026-10-01. Raw data: [reality-check-1-data.json](reality-check-1-data.json) (timings and counters only). Worker `parley-test-r1-6d0c01`, deleted at the end; `cf workers scripts search --name parley-test-` on the pinned account returned `[]` afterwards, and again after the later local-only work.
 
@@ -28,7 +28,7 @@ Stored data stays under 100 KB (counters only), all deleted with the Worker. Rea
 
 ## Results
 
-### Actual usage against the plan
+### Actual usage against the plan (first full run; the second soak has its own table below)
 
 Platform analytics were not available: `cf billing usage` returned 403 for this login, and I did not widen the authentication. The actuals below are the client-side counts and the object's own counters, so they are exact for requests and messages we sent and derived for rows and duration.
 
@@ -77,11 +77,11 @@ One socket, probe after each idle period; "evicted" means the object was constru
 ### Deploy-driven disconnects
 
 - **A real `wrangler deploy` did not close any socket.** In the deploy experiment (deploy took 14.2 s) one hibernated socket and one busy socket (5 frames per second) both stayed open through the deploy and for 5 s after; neither received a close. In the soak, none of the three real deploys (13 to 14 s each) caused a reconnect in the Go client during the deploy or the 60 s the harness then waited.
-- The Durable Object **was re-instantiated by the deploy with the sockets still attached:** the busy object's age at the next probe was 17.5 s, which puts its construction about 2 s after the deploy started (estimated), and the soak object's boot counter was 4 after three deploys (the initial construction plus one per deploy).
-- This agrees with the published behavior ("Hibernation API connections persist ... after hibernating"; a forced code update disconnects). It does not show that a deploy can never disconnect: the published page says a forced update does, and I did not test the immediate or deferred update strategies.
+- **Correction.** The first run said the deploy re-instantiated the Durable Object with the sockets still attached, from a busy object's age of 17.5 s and a boot counter of 4 after three deploys. The second run refutes that reading: three deploys under continuous traffic (about 50 frames per second) changed no boot id when it was read 3 s after each deploy finished, and the counter was still 1 at the end. The 17.5 s age and the 4 boots in the first run are better explained by hibernation wakes: the deploy experiment's "busy" socket was idle for 20 s before its traffic started, and the first soak's traffic had finished long before its deploys. Whether a deploy replaces a live object, and when, is **not established**. What is established: a connected, busy device sees no interruption from a real deploy, over 7 real deploys with live sockets in the two runs.
+- This agrees with the published behavior ("Hibernation API connections persist ... after hibernating"; a forced code update disconnects). It does not show that a deploy can never disconnect or replace the object (the published page describes deferred updates that adopt new code after hibernation): the published page says a forced update does, and I did not test the immediate or deferred update strategies.
 - The first workers.dev request after the first deploy returned 404 and `/healthz` answered after 3.3 s on this run (207 ms on an earlier smoke run).
 
-### Soak (T108 shape, real client, real Worker)
+### Soak, first run (T108 shape, real client, real Worker): not valid
 
 Run once: 10,000 frames up, 10,000 events down, the Go tunnel client, 17 server-side closes (code 1012) and 3 real deploys.
 
@@ -123,6 +123,39 @@ Expected usage for this run (one Worker, one deploy to create it, 3 deploys duri
 
 Stop conditions are unchanged: 15 failing control calls in a row or 60 in total, a 25-minute timeout, and any loss or duplicate is reported as a product bug and not tuned away.
 
+### Second soak: result (2026-11-03, 10:45 to 10:49 UTC, Worker `parley-test-r1-608aeb`, deleted)
+
+The one approved re-run: 10,000 frames up and 10,000 events down with the real Go client at about 50 frames per second, 17 closes of the live link and 3 real deploys under traffic (at 2,380, 4,761 and 7,151 acknowledged frames; each deploy took 14 to 15 s). Raw data: [reality-check-1-soak2-data.json](reality-check-1-soak2-data.json).
+
+| Check | Result |
+|---|---|
+| Gateway `rx_seq` at the end | **10,000** (every frame accepted once, in order) |
+| Frames sent, unacknowledged at the end | 10,000, 0 |
+| Events missing, out of order or duplicated by sequence | **0, 0, 0** |
+| Duplicate event bodies, after sender retries and not | 0, 0 |
+| Events lost in flight and retried | **190** (17 bursts of 10 pushed into a half-open link, plus 20 more lost on other drops, not attributed), every one delivered exactly once after the retry |
+| Frames unacknowledged at each of the 18 connections (`unackedAtResume`) | 30 (initial send), 13, 15, 14, 10, 20, 43, 13, 13, 15, 15, 12, 15, 13, 14, 17, 13, 17; 302 in all, so about 270 frames were retransmitted after reconnects |
+| Closes that reconnected | 17 of 17 (18 connections) |
+| Control calls that failed | 0 |
+| Real deploys that dropped the connection | **0 of 3** |
+| Real deploys that changed the object's boot id (checked 3 s after each) | **0 of 3** |
+| Go test verdict | FAIL, on one guard only: "every deploy must disconnect or re-instantiate" |
+
+**Reading the verdict.** No loss and no duplicate occurred, and the run exercised recovery (frames unacknowledged at disconnect, 190 events lost and retried), so the T108 property holds against the real Worker with the real client. The one failed check was a harness guard I wrote to prove the deploys had an effect; the finding is that they had none that the test could see, which is consistent with the first run and the deploy experiment. That is a measurement, not a product defect. After seeing the result I changed the guard from a failure into a recorded observation (`deploys_with_an_observed_effect` in the result, plus a log line), and have **not** re-run it on Cloudflare; the tunnel and gateway code are unchanged by this.
+
+Usage against the plan written before the run:
+
+| | Plan | Actual |
+|---|---|---|
+| Worker requests | about 180 | about 176: 18 upgrades, 132 push calls, 17 drops, 7 counters reads, 2 healthz |
+| Incoming WebSocket messages | about 20,100 | about 20,300: 10,000 frames, about 270 retransmitted frames, 10,000 event acks, 18 hellos; about 1,015 billed at 20:1; pings not billed |
+| Rows written | at most about 30,300 | not measured by the platform (analytics are not available to this login); derived about 30,200: 10,000 frames, 10,190 events sent, about 10,000 acks, 18 hellos |
+| DO awake time | at most about 33 GB-s | not measured; at most 26 GB-s (207 s of traffic at 128 MB) |
+| Real deploys | 3 plus the initial one | 4 |
+| Stored data | counters only | deleted with the Worker |
+
+Cost of this run at the overage rates, if no allowance applied: about 1,190 billed DO requests ($0.0002), 176 Worker requests ($0.0001), about 30,200 rows written ($0.030) and 26 GB-s ($0.0003), so **about $0.03**; inside the Free or Paid allowances, $0. Together with the first full run and the two smoke runs, everything spent on the account in this task is under $0.10 even at overage rates. After the run, `cf workers scripts search --name parley-test-` on the pinned account returned `[]`.
+
 ### Costs (Workers Paid)
 
 Prices copied on 2026-11-02 into `tests/reality/pricing.json` from the Durable Objects pricing page (last updated 2026-10-18) and the Workers pricing page (last updated 2026-10-02): $5 per month minimum; DO requests 1 million included then $0.15 per million, with incoming WebSocket messages at 20:1 and pings and outgoing messages free; duration 400,000 GB-s included then $12.50 per million GB-s, billed at 128 MB, hibernated and auto-response time not billed; SQLite rows written 50 million included then $1.00 per million; rows read 25 billion included; storage 5 GB-month then $0.20; Worker requests 10 million included then $0.30 per million (WebSocket messages through a Worker are not requests, the upgrade is one).
@@ -141,7 +174,7 @@ A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage 
 
 ### Proposals this implies (not applied)
 
-1. **Cut rows written per message.** `Device.webSocketMessage` rewrites the whole session record for every accepted frame, every event sent and every event acknowledged. Counters that only matter after a reconnect could be kept in the socket attachment (which survives hibernation and deploys, as shown) or written at most every N messages, with the durable value used only when the attachment is gone. Needs a correctness review against resume after eviction before anyone changes it.
+1. **Cut rows written per message.** `Device.webSocketMessage` rewrites the whole session record for every accepted frame, every event sent and every event acknowledged. Counters that only matter after a reconnect could be kept in the socket attachment (which survives hibernation; not shown here to survive a replaced object) or written at most every N messages, with the durable value used only when the attachment is gone. Needs a correctness review against resume after eviction before anyone changes it.
 2. **Keep the resume logic and the daemon's reconnect loop.** Deploys did not disconnect sockets here, but the published behavior allows forced disconnects and idle limits can change; nothing observed argues for removing them.
 3. **Inline ciphertext tops out at a 512 KiB padding bucket.** Frames are JSON with a base64 body, and the 1 MiB frame cap (accepted up to 1,048,512 B body) leaves room for about 768 KB of raw ciphertext, so the largest power-of-two bucket that fits inline is 512 KiB. Larger payloads go through R2 files. Relevant to T205 and Phase 3.
 4. **Do not hold the Device or Task DOs awake.** No timers or intervals in the Device DO, and use alarms for task deadlines only while a deadline is pending, since the published page says timers prevent hibernation.
