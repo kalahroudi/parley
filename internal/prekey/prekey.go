@@ -20,15 +20,28 @@
 // it derives the public key (once per prekey, in Issue), and a caller that
 // feeds the scalar to crypto/ecdh or an HPKE implementation gets further
 // heap copies there. Those copies are not zeroed and can reach swap or a core
-// dump if Harden was not called or the OS swaps the heap. The CPU's vector
-// registers are cleared after each use of the scalar (Issue, With, release),
-// because a 32-byte copy leaves it in X0/X1 and any signal delivered later (the
-// runtime sends SIGURG around every garbage collection) writes those registers
-// onto a signal stack in the Go heap. On Linux the operation also runs on a
-// locked thread with asynchronous signals blocked (quiesce), so no signal can
-// snapshot the registers while the key is in them; elsewhere that window stays
-// open. General-purpose registers and stack spills are not cleared: Go offers no
-// way to do so. Errors and logs
+// dump if Harden was not called or the OS swaps the heap. So erased means the
+// locked slot is zeroed; copies in the Go heap are best effort and bounded, not
+// gone.
+//
+// Registers and signal stacks. A 32-byte copy of the scalar leaves it in the
+// CPU's vector registers, and a signal that interrupts the thread then makes
+// the kernel write those registers onto a signal stack, which Go keeps in its
+// heap. The runtime sends such a signal (SIGURG, to preempt) at the start of a
+// garbage collection. What the package does about it, per platform:
+//
+//   - Linux: Issue and With run on a locked thread with asynchronous signals
+//     blocked, clear the vector registers, and only then unblock, so no signal
+//     can snapshot them while the key is in them. Measured on amd64 CI: the
+//     address-space scan went from 91 failures in 200 runs to none in 100.
+//   - macOS and Windows: signals are not blocked, so the window stays open: a
+//     signal landing inside the operation can leave a copy of the scalar in a
+//     signal stack.
+//   - Vector registers are cleared after each use on amd64 and arm64 (all
+//     platforms); on other architectures nothing is cleared.
+//
+// General-purpose registers and stack spills are not cleared on any platform;
+// Go offers no way to do so. Errors and logs
 // never carry key material: every error is a fixed sentinel.
 package prekey
 

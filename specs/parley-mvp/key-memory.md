@@ -48,6 +48,25 @@ backs. The plan calls erasure best effort, and it is.
   heap page could therefore still hold a used key. That is why the hardening
   guide requires full-disk encryption and disabled or encrypted hibernation and swap.
 
+## Registers and signal stacks (found on amd64 CI, T209 follow-up)
+
+A copy of the scalar passes through the CPU's vector registers (a 32-byte memmove
+uses X0 and X1). If a signal interrupts the thread then, the kernel writes the
+registers onto the thread's signal stack, and Go allocates signal stacks in its
+heap, so a copy of the key ends up in memory nothing zeroes. The runtime's
+preemption signal (SIGURG) is sent at the start of every garbage collection.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Signals blocked while the scalar is in use (locked thread) | yes (`quiesce`) | no | no |
+| Vector registers cleared after use | amd64, arm64 | amd64, arm64 | amd64, arm64 |
+| Window for a signal-frame copy | closed for asynchronous signals | open | open (Windows has no signal frames, but exception and crash paths are as above) |
+
+Not covered anywhere: general-purpose registers and stack spills; code outside
+`Pool.With` and `Pool.Issue` (reply keys, signing seed); synchronous faults. The
+scan's allowance of two heap copies per erased key is unchanged. Details and the
+evidence are in `memscan-notes.md`.
+
 ## What the tests prove, per OS
 
 | Test | Linux | macOS | Windows |

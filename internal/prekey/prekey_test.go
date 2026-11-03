@@ -25,7 +25,7 @@ type fixture struct {
 func (f *fixture) clock() time.Time { f.mu.Lock(); defer f.mu.Unlock(); return f.now }
 func (f *fixture) set(t time.Time)  { f.mu.Lock(); f.now = t; f.mu.Unlock() }
 
-func newFixture(t *testing.T, mod func(*Config)) *fixture {
+func newFixture(t testing.TB, mod func(*Config)) *fixture {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
