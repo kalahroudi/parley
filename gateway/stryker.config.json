@@ -5,7 +5,8 @@
     "configFile": "vitest.mutation.config.ts"
   },
   "mutate": [
-    "src/task.ts"
+    "src/task.ts",
+    "src/device.ts"
   ],
   "coverageAnalysis": "off",
   "reporters": [
@@ -19,6 +20,6 @@
   },
   "timeoutMS": 30000,
   "concurrency": 2,
-  "disableTypeChecks": "src/task.ts",
+  "disableTypeChecks": "src/{task,device}.ts",
   "tsconfigFile": "tsconfig.stryker-none.json"
 }

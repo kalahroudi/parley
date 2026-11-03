@@ -51,9 +51,9 @@ export class Device extends DurableObject<Env> {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
-    // A new connection supersedes the old one (the daemon reconnected).
+    // A new connection supersedes the old one (the daemon reconnected). Closing makes
+    // the old socket not open at once, so nothing is sent on it from here on.
     for (const old of this.ctx.getWebSockets()) {
-      old.serializeAttachment({ ready: false } satisfies Attachment);
       old.close(CLOSE_REPLACED, "replaced");
     }
     const pair = new WebSocketPair();
@@ -69,25 +69,26 @@ export class Device extends DurableObject<Env> {
     if (byteLength(JSON.stringify({ t: "event", seq: Number.MAX_SAFE_INTEGER, body })) > MAX_FRAME_BYTES) {
       return { status: "too_large" };
     }
-    const ws = this.ctx.getWebSockets().find((s) => (s.deserializeAttachment() as Attachment | null)?.ready);
+    const ws = this.ctx.getWebSockets().find((s) => isOpen(s) && isReady(s));
     const session = await this.ctx.storage.get<Session>("session");
-    if (!ws || !session) return { status: "offline" };
+    // The daemon may drop at any await, so the socket is checked again each time.
+    if (!ws || !session || !isOpen(ws)) return { status: "offline" };
     session.tx_seq += 1;
     await this.ctx.storage.put("session", session);
-    send(ws, { t: "event", seq: session.tx_seq, body });
+    // Closed during the write: the event was not sent (and its seq is skipped,
+    // which the resume logic tolerates because events are never replayed).
+    if (!send(ws, { t: "event", seq: session.tx_seq, body })) return { status: "offline" };
     return { status: "delivered", seq: session.tx_seq };
   }
 
   async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
     if (typeof data !== "string") return ws.close(CLOSE_PROTOCOL, "text frames only");
-    // UTF-16 length never exceeds the byte length, so only measure bytes when needed.
-    if (data.length > MAX_FRAME_BYTES || byteLength(data) > MAX_FRAME_BYTES) return ws.close(CLOSE_TOO_LARGE, "frame too large");
+    if (byteLength(data) > MAX_FRAME_BYTES) return ws.close(CLOSE_TOO_LARGE, "frame too large");
     const msg = parseClientMessage(data);
     if (!msg) return reject(ws, "bad_message");
-    const att = (ws.deserializeAttachment() as Attachment | null) ?? { ready: false };
 
     if (msg.t === "hello") {
-      if (att.ready) return reject(ws, "duplicate_hello");
+      if (isReady(ws)) return reject(ws, "duplicate_hello");
       const stored = await this.ctx.storage.get<Session>("session");
       const resumed = !!stored && !!msg.session && stored.id === msg.session;
       const session: Session = resumed
@@ -96,8 +97,11 @@ export class Device extends DurableObject<Env> {
       // Events the daemon says it received count as acknowledged.
       session.acked_tx = Math.max(session.acked_tx, Math.min(msg.last_rx, session.tx_seq));
       await this.ctx.storage.put("session", session);
+      // Superseded or dropped during the write: the socket must not become ready, or it
+      // would count as connected (and receive events) after its replacement is live.
+      if (!isOpen(ws)) return;
       ws.serializeAttachment({ ready: true } satisfies Attachment);
-      return send(ws, {
+      send(ws, {
         t: "welcome",
         v: PROTOCOL_VERSION,
         session: session.id,
@@ -105,9 +109,10 @@ export class Device extends DurableObject<Env> {
         rx_seq: session.rx_seq,
         heartbeat_ms: HEARTBEAT_MS,
       });
+      return;
     }
 
-    if (!att.ready) return reject(ws, "hello_required");
+    if (!isReady(ws)) return reject(ws, "hello_required");
     const session = await this.ctx.storage.get<Session>("session");
     if (!session) return reject(ws, "no_session");
 
@@ -142,13 +147,27 @@ export class Device extends DurableObject<Env> {
   async status(): Promise<{ connected: boolean; session?: Session }> {
     const connected = this.ctx
       .getWebSockets()
-      .some((s) => (s.deserializeAttachment() as Attachment | null)?.ready);
+      .some((s) => isOpen(s) && isReady(s));
     return { connected, session: await this.ctx.storage.get<Session>("session") };
   }
 }
 
-function send(ws: WebSocket, m: ServerMessage): void {
+// A socket with no attachment (never accepted through fetch) is not ready.
+function isReady(ws: WebSocket): boolean {
+  return (ws.deserializeAttachment() as Attachment | null)?.ready === true;
+}
+
+function isOpen(ws: WebSocket): boolean {
+  return ws.readyState === WebSocket.READY_STATE_OPEN;
+}
+
+// Sends unless the socket has closed, which a daemon can do while a handler
+// awaits storage; workerd throws on send() after close(), and that exception
+// would be uncaught. Returns whether the message was sent.
+function send(ws: WebSocket, m: ServerMessage): boolean {
+  if (!isOpen(ws)) return false;
   ws.send(JSON.stringify(m));
+  return true;
 }
 
 function reject(ws: WebSocket, code: string): void {
