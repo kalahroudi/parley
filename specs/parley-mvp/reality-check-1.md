@@ -100,6 +100,29 @@ Run once: 10,000 frames up, 10,000 events down, the Go tunnel client, 17 server-
 
 The invariants held, so nothing contradicts the T108 result, but the run did not demonstrate recovery under load. **Fixed, validated locally only:** the harness now paces frames at about 100 per second, counts progress in acknowledged frames, batches event pushes at 100, no longer requires a deploy to disconnect, and fails if no frame was ever unacknowledged at a reconnect (as the T108 test does). Against a local `wrangler dev` it passes with 17 of 17 closes reconnecting, 5 to 10 frames to recover at each reconnect, 101 push calls and 10,000 of 10,000 delivered exactly once. **It has not been re-run against Cloudflare:** the agreed cap was one 10,000-message soak. Re-running costs about the same as the first run (under $0.05 at overage rates): `node tests/reality/cf/run.mjs --only soak`, about 5 minutes, same safety rails. This needs your go-ahead.
 
+### Second soak: pre-run confirmation and plan (written before the run)
+
+Approved by the user as exactly one more run of the fixed 10k soak, against a fresh `parley-test-*` Worker, with the same safety rules. Before spending it, the harness was run against a local `wrangler dev` (no Cloudflare account) and failed twice, which is what it is for:
+
+- It refused a run where `events_retried` was 0. The first fix (pushing events right after a server close) did nothing: after a clean close the gateway answers `offline` at once and sends nothing into the dead socket, which is correct behavior and not a loss. Events are only lost into a half-open link, so the client got the same test seam T108 uses (`mute`, here `deaf`, with a unit test, `TestDeafLinkDiscardsGatewayMessages`): before each of the 17 closes the client is made deaf, the peer pushes 10 events into it, and then the link is closed.
+- With that, locally: `events_retried` 170 (17 bursts of 10), all recovered, 0 missing, 0 duplicated, `rx_seq` 10,000, 3 to 5 frames unacknowledged at each of 18 connections, 132 push calls.
+- Deploys: the harness reads the Durable Object's boot id before each deploy and 3 s after it, and the run fails unless every deploy either dropped the connection or changed the boot id. A local dev reload showed that observation working (a changed boot id was seen once); a plain file touch does not reload it, so a local run cannot show all three, only the real run can.
+- Pacing is now about 50 frames per second (about 200 s of traffic), so the 20 control points land during the transfer, and control points are driven by acknowledged frames.
+
+Expected usage for this run (one Worker, one deploy to create it, 3 deploys during the run):
+
+| | Expected |
+|---|---|
+| Worker requests | about 180: 18 WebSocket upgrades, about 135 pushes (100 events each, plus 17 bursts), 17 drops, 7 counters reads, 2 healthz |
+| DO requests excluding WebSocket messages | about 175 (the RPCs behind those calls plus the upgrades) |
+| Incoming WebSocket messages | about 20,100: 10,000 frames, about 10,000 event acks, about 70 retransmitted frames, 18 hellos; about 1,005 billed at 20:1; pings not billed |
+| Rows written | at most about 30,300: 10,000 accepted frames, about 10,170 events sent, about 10,000 acknowledgements, 18 hellos, boot counters |
+| DO awake time | at most about 33 GB-s (about 260 s of continuous traffic at 128 MB) |
+| Stored data | counters only, deleted with the Worker |
+| Cost at overage rates, no allowance | about $0.03 (rows written dominate); $0 inside the Free or Paid allowances |
+
+Stop conditions are unchanged: 15 failing control calls in a row or 60 in total, a 25-minute timeout, and any loss or duplicate is reported as a product bug and not tuned away.
+
 ### Costs (Workers Paid)
 
 Prices copied on 2026-11-02 into `tests/reality/pricing.json` from the Durable Objects pricing page (last updated 2026-10-18) and the Workers pricing page (last updated 2026-10-02): $5 per month minimum; DO requests 1 million included then $0.15 per million, with incoming WebSocket messages at 20:1 and pings and outgoing messages free; duration 400,000 GB-s included then $12.50 per million GB-s, billed at 128 MB, hibernated and auto-response time not billed; SQLite rows written 50 million included then $1.00 per million; rows read 25 billion included; storage 5 GB-month then $0.20; Worker requests 10 million included then $0.30 per million (WebSocket messages through a Worker are not requests, the upgrade is one).
