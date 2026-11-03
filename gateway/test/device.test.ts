@@ -264,7 +264,10 @@ describe("hibernation and resume", () => {
       await c.closed();
     }
     expect((await stubFor().status()).session?.rx_seq).toBe(total);
-  });
+    // 20 connects, each with ~10 durable writes, and a close that is awaited. Windows CI
+    // measured 1.9 s here (run 41685709490; Linux and macOS ~0.3 s), against vitest's 5 s
+    // default: 30 s is the headroom for a cold or contended runner, and a hang still fails.
+  }, 30_000);
 });
 
 describe("socket teardown", () => {
@@ -332,6 +335,260 @@ describe("socket teardown", () => {
     });
   }
 
+  // Runs `during` the next storage `op` of the object (after it completes), the way a
+  // daemon drop or a new connection lands while a handler is awaiting storage.
+  async function atStorage(state: DurableObjectState, op: "get" | "put", during: () => void, run: () => Promise<unknown>) {
+    const orig = state.storage[op].bind(state.storage) as (...a: unknown[]) => Promise<unknown>;
+    (state.storage as any)[op] = async (...a: unknown[]) => {
+      const r = await orig(...a);
+      during();
+      return r;
+    };
+    try {
+      return await run();
+    } finally {
+      (state.storage as any)[op] = orig;
+    }
+  }
+
+  it("a hello that is superseded during its storage write does not become ready or send", async () => {
+    const old = await connect();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      const ws = serverSocket(state);
+      await atStorage(state, "put", () => ws.close(1000, "replaced"), () => instance.webSocketMessage(ws, JSON.stringify(hello())));
+      expect((ws.deserializeAttachment() as any)?.ready).toBe(false);
+    });
+    expect((await stubFor().status()).connected).toBe(false);
+    expect((await stubFor().deliver("x")).status).toBe("offline");
+    expect((await old.closed())?.code).toBe(1000);
+  });
+
+  it("a supersede during deliver's storage write sends nothing on the old socket", async () => {
+    const old = await connect();
+    old.send(hello());
+    await old.next();
+    const fresh = await connect(); // supersedes: the old socket is closed 4xxx
+    expect((await old.closed())?.reason).toBe("replaced");
+    // The old socket is gone; the new one is not ready until its hello, so no event
+    // can land anywhere.
+    expect(await stubFor().deliver("x")).toEqual({ status: "offline" });
+    fresh.send(hello());
+    await fresh.next();
+    expect(await stubFor().deliver("y")).toMatchObject({ status: "delivered" });
+    expect((await fresh.next()).body).toBe("y");
+  });
+
+  it("a supersede during deliver's storage write reports offline and sends nothing", async () => {
+    const old = await connect();
+    old.send(hello());
+    await old.next();
+    const result = await runInDurableObject(stubFor(), async (instance, state) => {
+      const ws = serverSocket(state);
+      return atStorage(state, "put", () => {
+        ws.serializeAttachment({ ready: false });
+        ws.close(4000, "replaced");
+      }, () => instance.deliver("x"));
+    });
+    expect(result).toEqual({ status: "offline" });
+    old.ws.close(1000, "done");
+  });
+
+  it("status() does not count a closed socket as connected", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      serverSocket(state).close(1000, "gone");
+      expect((await instance.status()).connected).toBe(false);
+    });
+  });
+
+  it("a new connection can replace a socket that already closed", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    await runInDurableObject(stubFor(), async (_i, state) => serverSocket(state).close(1000, "gone"));
+    const c2 = await connect();
+    c2.send(hello());
+    expect((await c2.next()).t).toBe("welcome");
+  });
+
+  it("close and error callbacks on an already-closed socket do not throw", async () => {
+    const c = await connect();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      const ws = serverSocket(state);
+      ws.close(1000, "gone");
+      await instance.webSocketClose(ws, 1000);
+      await instance.webSocketClose(ws, 1005);
+      await instance.webSocketClose(ws, 1006);
+      await instance.webSocketError(ws);
+    });
+    expect((await c.closed())?.code).toBe(1000);
+  });
+
+  it("echoes a normal close code, and maps 1005 and 1006 to 1000", async () => {
+    for (const [sent, got] of [[4001, 4001], [1005, 1000]] as const) {
+      const c = await connect();
+      await runInDurableObject(stubFor(), async (instance, state) => instance.webSocketClose(serverSocket(state), sent));
+      const closed = await c.closed();
+      expect([closed?.code, closed?.reason]).toEqual([got, "closing"]);
+    }
+  });
+
+  it("a frame after the session vanished is rejected, and an old ack is ignored", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    await stubFor().deliver("x");
+    await c.next();
+    c.send({ t: "ack", seq: 1 });
+    c.send({ t: "ack", seq: 1 }); // not above acked_tx: no write
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await stubFor().status()).session?.acked_tx).toBe(1);
+    await runInDurableObject(stubFor(), async (_i, state) => state.storage.delete("session"));
+    c.send({ t: "frame", seq: 1, body: "a" });
+    expect(await c.next()).toEqual({ t: "error", code: "no_session" });
+  });
+
+  it("treats a socket with no attachment as not ready", async () => {
+    const c = await connect();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      const ws = serverSocket(state);
+      ws.serializeAttachment(null);
+      await instance.webSocketMessage(ws, JSON.stringify({ t: "ack", seq: 1 }));
+    });
+    expect(await c.next()).toEqual({ t: "error", code: "hello_required" });
+  });
+
+  // ---- exact behaviour of the close codes, reasons, limits and counters ----
+
+  const MAX = 1 << 20;
+  const ready = async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    return c;
+  };
+
+  it("closes a superseded socket with 4409 'replaced'", async () => {
+    const old = await ready();
+    await runInDurableObject(stubFor(), async (_i, state) => {
+      expect((serverSocket(state).deserializeAttachment() as any).ready).toBe(true);
+    });
+    const fresh = await connect();
+    const closed = await old.closed();
+    expect([closed?.code, closed?.reason]).toEqual([4409, "replaced"]);
+    fresh.ws.close(1000, "done");
+  });
+
+  it("answers a non-websocket request with 426 and the explanation", async () => {
+    const res = await stubFor().fetch("https://gw/v1/connect");
+    expect([res.status, await res.text()]).toEqual([426, "expected websocket"]);
+  });
+
+  it("closes on a binary frame with 4400 'text frames only'", async () => {
+    const c = await ready();
+    c.ws.send(new Uint8Array([1, 2, 3]));
+    const closed = await c.closed();
+    expect([closed?.code, closed?.reason]).toEqual([4400, "text frames only"]);
+  });
+
+  it("closes an oversize frame with 1009, but accepts one of exactly the limit", async () => {
+    const pad = (n: number, ch: string) => ch.repeat(n);
+    const frame = (body: string) => JSON.stringify({ t: "frame", seq: 1, body });
+    const overhead = frame("").length;
+    const ok = await ready();
+    ok.send(frame(pad(MAX - overhead, "a"))); // exactly MAX bytes, ASCII
+    expect(await ok.next()).toEqual({ t: "ack", seq: 1 });
+    // exactly MAX bytes with multi-byte characters: fewer than MAX UTF-16 units
+    const ok2 = await connect("t1", `${dev}-mb`);
+    ok2.send(hello());
+    await ok2.next();
+    ok2.send(frame("é".repeat(1000) + "a".repeat(MAX - overhead - 2000)));
+    expect(await ok2.next()).toEqual({ t: "ack", seq: 1 });
+    const big = await connect("t1", `${dev}-big`);
+    big.send(frame(pad(MAX - overhead + 1, "a")));
+    const closed = await big.closed();
+    expect([closed?.code, closed?.reason]).toEqual([1009, "frame too large"]);
+    const bigMb = await connect("t1", `${dev}-bigmb`);
+    bigMb.send(frame("é".repeat(MAX / 2)));
+    expect((await bigMb.closed())?.code).toBe(1009);
+  });
+
+  it("rejects an unparseable message with the bad_message error and a 4400 close", async () => {
+    const c = await ready();
+    c.send("not json");
+    expect(await c.next()).toEqual({ t: "error", code: "bad_message" });
+    expect((await c.closed())?.code).toBe(4400);
+  });
+
+  it("delivers an event of exactly the frame limit and refuses one byte more", async () => {
+    const c = await ready();
+    const base = new TextEncoder().encode(JSON.stringify({ t: "event", seq: Number.MAX_SAFE_INTEGER, body: "" })).length;
+    expect(await stubFor().deliver("a".repeat(MAX - base))).toMatchObject({ status: "delivered" });
+    expect((await c.next()).t).toBe("event");
+    expect(await stubFor().deliver("a".repeat(MAX - base + 1))).toEqual({ status: "too_large" });
+  });
+
+  it("deliver and status treat a socket with no attachment as not ready, without throwing", async () => {
+    await connect();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      serverSocket(state).serializeAttachment(null);
+      expect(await instance.deliver("x")).toEqual({ status: "offline" });
+      expect((await instance.status()).connected).toBe(false);
+    });
+  });
+
+  it("status() reports connected once the hello completes", async () => {
+    const c = await connect();
+    expect((await stubFor().status()).connected).toBe(false);
+    c.send(hello());
+    await c.next();
+    expect((await stubFor().status()).connected).toBe(true);
+  });
+
+  it("resumes only when the offered session id is the stored one", async () => {
+    const a = await ready();
+    a.ws.close(1000, "x");
+    await a.closed();
+    const stored = (await stubFor().status()).session!.id;
+    const b = await connect();
+    b.send(hello("some-other-session"));
+    const w = await b.next();
+    expect([w.resumed, w.session === stored]).toEqual([false, false]);
+  });
+
+  it("never counts more received events as acknowledged than were sent", async () => {
+    const c = await connect();
+    c.send(hello(undefined, 99));
+    await c.next();
+    expect((await stubFor().status()).session?.acked_tx).toBe(0);
+  });
+
+  it("an ack or frame at or below the stored counter writes nothing and cannot move it back", async () => {
+    const c = await ready();
+    await stubFor().deliver("1");
+    await stubFor().deliver("2");
+    await c.next();
+    await c.next();
+    c.send({ t: "ack", seq: 2 });
+    for (const seq of [1, 2, 3]) c.send({ t: "frame", seq, body: "a" });
+    for (let i = 0; i < 3; i++) await c.next();
+    const puts = await runInDurableObject(stubFor(), async (instance, state) => {
+      let n = 0;
+      const orig = state.storage.put.bind(state.storage) as (...a: unknown[]) => Promise<unknown>;
+      (state.storage as any).put = (...a: unknown[]) => (n++, orig(...a));
+      for (const m of [{ t: "ack", seq: 2 }, { t: "ack", seq: 1 }, { t: "frame", seq: 3, body: "a" }, { t: "frame", seq: 2, body: "a" }]) {
+        await instance.webSocketMessage(serverSocket(state), JSON.stringify(m));
+      }
+      (state.storage as any).put = orig;
+      return n;
+    });
+    expect(puts).toBe(0);
+    const s = (await stubFor().status()).session!;
+    expect([s.acked_tx, s.rx_seq]).toEqual([2, 3]);
+  });
+
   it("closes with 1011 on a socket error", async () => {
     const c = await connect();
     c.send(hello());
@@ -339,6 +596,7 @@ describe("socket teardown", () => {
     await runInDurableObject(stubFor(), async (instance, state) => {
       await instance.webSocketError(state.getWebSockets()[0]!);
     });
-    expect((await c.closed())?.code).toBe(1011);
+    const closed = await c.closed();
+    expect([closed?.code, closed?.reason]).toEqual([1011, "error"]);
   });
 });
