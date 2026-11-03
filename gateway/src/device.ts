@@ -69,12 +69,15 @@ export class Device extends DurableObject<Env> {
     if (byteLength(JSON.stringify({ t: "event", seq: Number.MAX_SAFE_INTEGER, body })) > MAX_FRAME_BYTES) {
       return { status: "too_large" };
     }
-    const ws = this.ctx.getWebSockets().find((s) => (s.deserializeAttachment() as Attachment | null)?.ready);
+    const ws = this.ctx.getWebSockets().find((s) => isOpen(s) && (s.deserializeAttachment() as Attachment | null)?.ready);
     const session = await this.ctx.storage.get<Session>("session");
-    if (!ws || !session) return { status: "offline" };
+    // The daemon may drop at any await, so the socket is checked again each time.
+    if (!ws || !session || !isOpen(ws)) return { status: "offline" };
     session.tx_seq += 1;
     await this.ctx.storage.put("session", session);
-    send(ws, { t: "event", seq: session.tx_seq, body });
+    // Closed during the write: the event was not sent (and its seq is skipped,
+    // which the resume logic tolerates because events are never replayed).
+    if (!send(ws, { t: "event", seq: session.tx_seq, body })) return { status: "offline" };
     return { status: "delivered", seq: session.tx_seq };
   }
 
@@ -97,7 +100,7 @@ export class Device extends DurableObject<Env> {
       session.acked_tx = Math.max(session.acked_tx, Math.min(msg.last_rx, session.tx_seq));
       await this.ctx.storage.put("session", session);
       ws.serializeAttachment({ ready: true } satisfies Attachment);
-      return send(ws, {
+      send(ws, {
         t: "welcome",
         v: PROTOCOL_VERSION,
         session: session.id,
@@ -105,6 +108,7 @@ export class Device extends DurableObject<Env> {
         rx_seq: session.rx_seq,
         heartbeat_ms: HEARTBEAT_MS,
       });
+      return;
     }
 
     if (!att.ready) return reject(ws, "hello_required");
@@ -147,8 +151,17 @@ export class Device extends DurableObject<Env> {
   }
 }
 
-function send(ws: WebSocket, m: ServerMessage): void {
+function isOpen(ws: WebSocket): boolean {
+  return ws.readyState === WebSocket.READY_STATE_OPEN;
+}
+
+// Sends unless the socket has closed, which a daemon can do while a handler
+// awaits storage; workerd throws on send() after close(), and that exception
+// would be uncaught. Returns whether the message was sent.
+function send(ws: WebSocket, m: ServerMessage): boolean {
+  if (!isOpen(ws)) return false;
   ws.send(JSON.stringify(m));
+  return true;
 }
 
 function reject(ws: WebSocket, code: string): void {

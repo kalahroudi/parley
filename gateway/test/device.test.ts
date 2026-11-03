@@ -268,6 +268,70 @@ describe("hibernation and resume", () => {
 });
 
 describe("socket teardown", () => {
+  // A daemon can drop while the object awaits storage, so every reply may find its
+  // socket closed. That must not throw: an uncaught exception in a handler is
+  // logged as a crash, and (on slow storage) poisons the tests that follow.
+  const serverSocket = (state: DurableObjectState) => state.getWebSockets()[0]!;
+
+  it("does not throw when the daemon closed before the welcome", async () => {
+    const c = await connect();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      const ws = serverSocket(state);
+      ws.close(1000, "gone");
+      await instance.webSocketMessage(ws, JSON.stringify(hello()));
+    });
+    expect((await c.closed())?.code).toBe(1000);
+  });
+
+  it("does not throw when the daemon closed before a frame's ack", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    await runInDurableObject(stubFor(), async (instance, state) => {
+      const ws = serverSocket(state);
+      ws.close(1000, "gone");
+      await instance.webSocketMessage(ws, JSON.stringify({ t: "frame", seq: 1, body: "a" }));
+      await instance.webSocketMessage(ws, "not json"); // reject() on a closed socket
+    });
+    expect((await stubFor().status()).session?.rx_seq).toBe(1); // still stored, so a retransmit is a duplicate
+  });
+
+  it("reports offline, and burns no seq, when the socket closed before the event", async () => {
+    const c = await connect();
+    c.send(hello());
+    await c.next();
+    const result = await runInDurableObject(stubFor(), async (instance, state) => {
+      serverSocket(state).close(1000, "gone");
+      return instance.deliver("x");
+    });
+    expect(result).toEqual({ status: "offline" });
+    expect((await stubFor().status()).session?.tx_seq).toBe(0);
+  });
+
+  // The socket drops while deliver awaits storage (the real race, made deterministic).
+  for (const op of ["get", "put"] as const) {
+    it(`reports offline when the socket closes during the storage ${op}`, async () => {
+      const c = await connect();
+      c.send(hello());
+      await c.next();
+      const result = await runInDurableObject(stubFor(), async (instance, state) => {
+        const ws = serverSocket(state);
+        const orig = state.storage[op].bind(state.storage) as (...a: unknown[]) => Promise<unknown>;
+        (state.storage as any)[op] = async (...a: unknown[]) => {
+          const r = await orig(...a);
+          ws.close(1000, "gone");
+          return r;
+        };
+        try {
+          return await instance.deliver("x");
+        } finally {
+          (state.storage as any)[op] = orig;
+        }
+      });
+      expect(result).toEqual({ status: "offline" });
+    });
+  }
+
   it("closes with 1011 on a socket error", async () => {
     const c = await connect();
     c.send(hello());

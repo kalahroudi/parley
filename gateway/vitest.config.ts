@@ -12,6 +12,13 @@ export default defineConfig({
     }),
   ],
   test: {
+    // Every durable storage write costs ~25 ms on Windows CI runners (~0.5 ms on
+    // Linux and macOS), so tests that do many writes (20 reconnects, the pending
+    // queue, the task state machine) can take 6-12 s there against vitest's 5 s
+    // default, and a timed-out test leaves its sockets and objects busy for the
+    // tests after it. 30 s is about 3x the slowest observed run; a real hang still
+    // fails in 30 s. One value on every OS, so the suite behaves the same everywhere.
+    testTimeout: 30_000,
     coverage: {
       // Workers code runs in workerd, where only the istanbul provider works.
       provider: "istanbul",
