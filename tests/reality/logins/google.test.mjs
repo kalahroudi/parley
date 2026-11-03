@@ -163,7 +163,7 @@ test("NEGATIVE: a mismatching account is refused as tenant_mismatch with no iden
   const r = await run({ hostedDomain: "example.com", mode: "negative", deps: w.deps });
   assert.equal(r.passed, true);
   assert.match(r.verdict, /REFUSED as expected \(negative\): tenant_mismatch.*no identity was issued/);
-  assert.match(w.logs.join("\n"), /NOT of example\.com \(for example a personal gmail\.com account\)/);
+  assert.match(w.logs.join("\n"), /NOT of example\.com \(a personal gmail\.com account, or an account of another domain\)/);
   assert.equal(w.vars.GOOGLE_HOSTED_DOMAIN, "example.com");
   assert.deepEqual(w.calls.slice(-3), [`destroy ${NAME}`, "removeConfig", "remaining"]);
 });

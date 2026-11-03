@@ -14,16 +14,18 @@
 // script, a file or the output. Then:
 //
 //   node tests/reality/logins/google.mjs [--no-open] [--wait-minutes 10]
-//   node tests/reality/logins/google.mjs --domain corp.example --mode positive
-//   node tests/reality/logins/google.mjs --domain example.com --mode negative
+//   node tests/reality/logins/google.mjs --domain hostjab.com --mode positive   (a hostjab.com account)
+//   node tests/reality/logins/google.mjs --domain example.com --mode negative   (any account not of example.com)
 //   node tests/reality/logins/google.mjs cleanup     (delete the Worker if a run was abandoned)
 //
 // Hosted-domain (Workspace) runs: the domain is given with --domain or GOOGLE_HOSTED_DOMAIN and
 // the script sets it as the Worker's GOOGLE_HOSTED_DOMAIN variable in the generated config
 // (no manual wrangler edit). The mode says what the sign-in must do:
 //   positive  sign in with an account of that Workspace domain: PASS with hostedDomainChecked true
-//   negative  sign in with an account NOT of that domain (a personal gmail.com account with
-//             --domain example.com): must be REFUSED as tenant_mismatch, with no identity issued
+//   negative  sign in with an account NOT of that domain: must be REFUSED as tenant_mismatch, with no
+//             identity issued. Either a personal gmail.com account (it has no hd claim) or a Workspace
+//             account of another domain (its hd is not the required one), for example the hostjab.com
+//             account with --domain example.com
 // The `hd` parameter in the authorization request is only a hint to Google's account chooser.
 // The gateway enforces the domain on the `hd` claim of the verified id token.
 //
@@ -165,7 +167,7 @@ export async function run({ open = true, waitMs = 10 * 60_000, hostedDomain, mod
     d.log(`login redirect checked: Google, client ${CLIENT_ID}, callback ${EXPECTED_REDIRECT}, PKCE S256, state and nonce${hostedDomain ? `, hd hint ${hostedDomain}` : ""}`);
 
     const url = `${origin}/auth/google/login`;
-    const who = mode === "positive" ? `an account of ${hostedDomain}` : mode === "negative" ? `an account that is NOT of ${hostedDomain} (for example a personal gmail.com account)` : "your account";
+    const who = mode === "positive" ? `an account of ${hostedDomain}` : mode === "negative" ? `an account that is NOT of ${hostedDomain} (a personal gmail.com account, or an account of another domain)` : "your account";
     d.log(`\nsign in with ${who}; open this URL and click through Google's consent once:\n  ${url}`);
     if (open) d.open(url);
 
