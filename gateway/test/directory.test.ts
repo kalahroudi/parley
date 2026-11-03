@@ -182,6 +182,25 @@ describe("visibility and groups", () => {
   });
 });
 
+describe("purged enrollments", () => {
+  it("a card whose device enrollment is gone is no longer listed or resolvable, and the alarm purges it", async () => {
+    const x = tenant();
+    const a = await x.enroll("a@example.test");
+    const b = await x.enroll("b@example.test");
+    const { id } = await publish(a, card());
+    expect(await find(b)).toEqual(["Reviewer"]);
+    await runInDurableObject(x.stub, async (_i, s) => {
+      await s.storage.delete(`enr:${a.id}`);
+    });
+    expect(await find(b)).toEqual([]);
+    expect(await runInDurableObject(x.stub, (i) => (i as any).resolve(b.id, id))).toBeNull();
+    await runInDurableObject(x.stub, async (i, s) => {
+      await (i as any).alarm();
+      expect([...(await s.storage.list({ prefix: "card:" })).keys()]).toEqual([]);
+    });
+  });
+});
+
 describe("find", () => {
   it("filters by name, description and tag, sorted by name", async () => {
     const x = tenant();
@@ -225,7 +244,7 @@ describe("groups admin", () => {
     });
     await post("/v1/admin/groups/put", { name: "ops" }, x.admin);
     expect((await json(await post("/v1/admin/groups", {}, x.admin))).groups.map((g: any) => g.name)).toEqual(["eng", "ops"]);
-    expect((await post("/v1/admin/groups/delete", { name: "ENG" }, x.admin)).status).toBe(200);
+    expect((await post("/v1/admin/groups/delete", { name: " ENG " }, x.admin)).status).toBe(200);
     expect((await post("/v1/admin/groups/delete", { name: "eng" }, x.admin)).status).toBe(404);
     expect((await post("/v1/admin/groups/delete", {}, x.admin)).status).toBe(404);
     expect((await post("/v1/admin/groups/nope", {}, x.admin)).status).toBe(404);

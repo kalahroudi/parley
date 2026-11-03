@@ -214,6 +214,16 @@ export class Tenant extends DurableObject<Env> {
     return rec && rec.status === "approved" && rec.binding ? rec.owner.toLowerCase() : null;
   }
 
+  // Every enrolled device and its owner. A card is only as live as its device's
+  // enrollment: once that is purged, the card stops being listed or resolvable.
+  private async enrolledOwners(): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    for (const [k, r] of await this.ctx.storage.list<StoredEnrollment>({ prefix: "enr:" })) {
+      if (r.status === "approved" && r.binding) out.set(k.slice(4), r.owner.toLowerCase());
+    }
+    return out;
+  }
+
   // Publishes (or replaces, by name) a card for the calling device. The secrets
   // lint runs here: the gateway cannot read task content, only these plaintext cards.
   async publishCard(device: string, raw: unknown): Promise<{ id: string } | { error: DirectoryError; field?: string }> {
@@ -247,8 +257,10 @@ export class Tenant extends DurableObject<Env> {
     if (!q) return { error: "bad_query" };
     const groups = await this.viewerGroups(viewer);
     const all = await this.ctx.storage.list<DirectoryEntry>({ prefix: "card:" });
+    const live = await this.enrolledOwners();
     const agents = [...all.values()]
-      .filter((c) => canSee(c, c.owner, viewer, groups) && matches(c, q))
+      .map((c) => ({ ...c, owner: live.get(c.device_id) ?? "" }))
+      .filter((c) => c.owner && canSee(c, c.owner, viewer, groups) && matches(c, q))
       .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
       .slice(0, MAX_RESULTS);
     return { agents };
@@ -260,7 +272,8 @@ export class Tenant extends DurableObject<Env> {
     const viewer = await this.ownerOf(device);
     if (!viewer) return null;
     const c = await this.ctx.storage.get<DirectoryEntry>(`card:${id}`);
-    return c && canSee(c, c.owner, viewer, await this.viewerGroups(viewer)) ? c : null;
+    const owner = c && (await this.ownerOf(c.device_id));
+    return c && owner && canSee(c, owner, viewer, await this.viewerGroups(viewer)) ? { ...c, owner } : null;
   }
 
   // Groups are managed by the admin; membership is by identity (email or named
@@ -274,7 +287,8 @@ export class Tenant extends DurableObject<Env> {
   }
 
   async deleteGroup(name: string): Promise<boolean> {
-    return this.ctx.storage.delete(`grp:${name.toLowerCase()}`);
+    const n = validateGroup(name, []);
+    return "error" in n ? false : this.ctx.storage.delete(`grp:${n.name}`);
   }
 
   async groups(): Promise<{ name: string; members: string[] }[]> {
@@ -301,6 +315,10 @@ export class Tenant extends DurableObject<Env> {
       await due(k, r.status === "pending" ? r.created + REQUEST_TTL_MS : (r.decided ?? r.created) + DECIDED_RETENTION_MS);
     }
     for (const [k, t] of await this.ctx.storage.list<StoredToken>({ prefix: "tok:" })) await due(k, t.exp);
+    const live = await this.enrolledOwners();
+    for (const k of (await this.ctx.storage.list<DirectoryEntry>({ prefix: "card:" })).keys()) {
+      if (!live.has(k.slice(5).split(":")[0]!)) await this.ctx.storage.delete(k);
+    }
     if (next !== undefined) await this.ctx.storage.setAlarm(next);
   }
 
