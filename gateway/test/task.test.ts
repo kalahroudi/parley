@@ -175,6 +175,15 @@ describe("deadlines and expiry", () => {
     expect(await s.get()).toBeNull();
   });
 
+  it("an alarm that fires before the deadline keeps the expiry alarm armed", async () => {
+    const s = await fresh(1000);
+    const exp = ((await s.get()) as TaskRecord).expires_at;
+    await runInDurableObject(s, async (o, ctx) => {
+      await o.alarm();
+      expect(await ctx.storage.getAlarm()).toBe(exp);
+    });
+  });
+
   it("an alarm for a missing task does nothing", async () => {
     const s = stub();
     await runInDurableObject(s, (o) => o.alarm());

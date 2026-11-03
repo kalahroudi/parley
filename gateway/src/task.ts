@@ -115,6 +115,8 @@ export class Task extends DurableObject<Env> {
     await this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.load(); // expires a due task
       if (!rec) return;
+      // Fired early (still live): keep the expiry deadline armed, not the purge.
+      if (!TERMINAL.has(rec.state)) return this.ctx.storage.setAlarm(rec.expires_at);
       const purge = rec.updated + TASK_METADATA_RETENTION_MS;
       if (purge <= Date.now()) await this.ctx.storage.deleteAll();
       else await this.ctx.storage.setAlarm(purge);
