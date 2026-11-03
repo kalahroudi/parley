@@ -60,6 +60,7 @@ const (
 	TypeResult
 	TypeError
 	TypeCancel
+	TypeReply // the caller's answer on an INPUT_REQUIRED task
 )
 
 // Header is everything in the signed transcript except the ciphertext hash.
@@ -84,7 +85,7 @@ type Header struct {
 func (h Header) validate() error {
 	if h.Tenant == "" || h.SenderDevice == "" || h.SenderKeyID == "" || h.BindingVersion == 0 ||
 		h.TargetDevice == "" || h.PrekeyID == "" || h.ContextID == "" ||
-		h.Type < TypeTask || h.Type > TypeCancel ||
+		h.Type < TypeTask || h.Type > TypeReply ||
 		h.IssuedAt.IsZero() || h.Expiry.Unix() <= h.IssuedAt.Unix() ||
 		(len(h.RPK) != 0 && len(h.RPK) != KeySize) {
 		return ErrInvalid

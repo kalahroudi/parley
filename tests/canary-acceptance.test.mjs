@@ -40,6 +40,7 @@ function recorder() {
       this.add("request headers", JSON.stringify(init.headers ?? {}));
       const res = await fetch(url, init);
       const body = await res.text();
+      res.bodyText = body; // the body is read here, so callers use this and not res.json()
       this.add(`response ${res.status} headers`, JSON.stringify([...res.headers]));
       this.add(`response ${res.status} body`, body);
       return res;
@@ -118,9 +119,12 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
       encoding: "utf8",
     });
     assert.equal(emit.status, 0, `${emit.stdout}\n${emit.stderr}`);
-    const { frames, blobs } = JSON.parse(readFileSync(outFile, "utf8"));
+    const { frames, blobs, chains } = JSON.parse(readFileSync(outFile, "utf8"));
     assert.deepEqual(frames.map((f) => f.type), ["TASK", "STATUS", "INPUT_REQUIRED", "RESULT", "ERROR"]);
     assert.equal(blobs.length, 1);
+    assert.deepEqual(chains.map((c) => c.map((f) => f.type)), [
+      ["TASK", "STATUS", "INPUT_REQUIRED", "REPLY", "RESULT"], ["TASK", "ERROR"], ["TASK", "REJECTED"], ["TASK", "CANCEL"],
+    ]);
 
     // 2. A real gateway with its state on disk. Ports, state and log directories are
     // allocated per start (tests/harness/wrangler.mjs), so a parallel wrangler on the
@@ -147,6 +151,85 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     c.send("not json");
     assert.equal((await c.next())?.t, "error");
     c.close();
+    // The A2A transport (POST /a2a), T302: the same content over JSON-RPC. Four tasks run
+    // through the real lifecycle (answer to a question, error, refusal, cancel); every
+    // request that carries readable content in any unsealed place is refused. Responses and
+    // the tunnel events are recorded like all other traffic. The JSON-RPC id is left out of
+    // the hostile positions: it is echoed back to its own sender by design.
+    const sealedType = "application/vnd.parley.sealed";
+    const a2a = async (device, method, params, id = 1) => {
+      const res = await rec.fetch(`${base}/a2a`, {
+        method: "POST",
+        headers: { Authorization: `Bearer dev:acme:${device}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      });
+      return JSON.parse(res.bodyText);
+    };
+    const tunnel = async (device) => {
+      const t = connect(`ws://127.0.0.1:${port}/v1/connect`, { Authorization: `Bearer dev:acme:${device}` }, rec);
+      await t.opened;
+      t.send({ t: "hello", v: 1, last_rx: 0 });
+      assert.equal((await t.next()).t, "welcome");
+      return t;
+    };
+    const caller = await tunnel("caller");
+    const target = await tunnel("target");
+    const callerKinds = new Set(["TASK", "REPLY", "CANCEL"]);
+    const states = [];
+    for (const [i, chain] of chains.entries()) {
+      for (const f of chain) {
+        const fromCaller = callerKinds.has(f.type);
+        const dev = fromCaller ? "caller" : "target";
+        const message = { messageId: `m${i}-${states.length}`, role: fromCaller ? "ROLE_USER" : "ROLE_AGENT", parts: [{ raw: f.body, mediaType: sealedType }] };
+        if (f.type === "REJECTED") message.metadata = { parley: { kind: "REJECTED" } };
+        const r = f.type === "CANCEL"
+          ? await a2a(dev, "CancelTask", { id: chain[0].task, metadata: { parley: { messageId: message.messageId, parts: message.parts } } })
+          : await a2a(dev, "SendMessage", { message });
+        assert.ok(r.result, `${f.type} was refused: ${JSON.stringify(r.error)}`);
+        states.push((r.result.task ?? r.result).status.state);
+        const ev = await (fromCaller ? target : caller).next();
+        assert.equal(ev.t, "event", `${f.type} was not relayed`);
+      }
+    }
+    assert.deepEqual(states, [
+      "TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_WORKING", "TASK_STATE_COMPLETED",
+      "TASK_STATE_SUBMITTED", "TASK_STATE_FAILED",
+      "TASK_STATE_SUBMITTED", "TASK_STATE_REJECTED",
+      "TASK_STATE_SUBMITTED", "TASK_STATE_CANCELED",
+    ]);
+    // Readable content in any unsealed place is refused and goes nowhere.
+    const refused = [];
+    for (const [field, canary] of Object.entries(canaries)) {
+      const sealedPart = { raw: chains[0][0].body, mediaType: sealedType };
+      const base = { messageId: `h-${field}`, role: "ROLE_USER", parts: [sealedPart] };
+      const hostile = [
+        { message: { ...base, parts: [{ text: canary }] } },
+        { message: { ...base, parts: [{ data: { v: canary } }] } },
+        { message: { ...base, parts: [{ url: `https://example.test/${canary}`, mediaType: sealedType }] } },
+        { message: { ...base, parts: [{ ...sealedPart, filename: canary }] } },
+        { message: { ...base, parts: [{ ...sealedPart, metadata: { v: canary } }] } },
+        { message: { ...base, parts: [{ ...sealedPart, mediaType: canary }] } },
+        { message: { ...base, metadata: { v: canary } } },
+        { message: { ...base, metadata: { parley: { kind: canary } } } },
+        { message: { ...base, text: canary } },
+        { message: { ...base, taskId: canary } },
+        { message: { ...base, contextId: canary } },
+        { message: { ...base, extensions: [canary] } },
+        { message: base, metadata: { v: canary } },
+        { message: base, configuration: { acceptedOutputModes: [canary] } },
+        { message: base, tenant: canary },
+        { message: base, [canary]: 1 },
+      ];
+      for (const params of hostile) refused.push(await a2a("caller", "SendMessage", params));
+      refused.push(await a2a("caller", "CancelTask", { id: canary }));
+      refused.push(await a2a("caller", "GetTask", { id: canary }));
+      refused.push(await a2a("caller", "GetTask", { id: "x", [canary]: 1 }));
+      refused.push(await a2a("caller", canary, {}));
+    }
+    assert.ok(refused.length > 100);
+    for (const r of refused) assert.ok(r.error && !r.result, `a hostile request was accepted: ${JSON.stringify(r)}`);
+    caller.close();
+    target.close();
     // Planted-leak control: a control canary goes into a field the gateway DOES
     // persist (a device name in the Tenant Durable Object). The storage scan below
     // must FIND it, or a zero-hit result on the real canaries would prove nothing.

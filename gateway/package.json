@@ -15,6 +15,7 @@
     "dev": "wrangler dev --port ${PORT:-8787}"
   },
   "devDependencies": {
+    "@a2a-js/sdk": "1.3.0",
     "@cloudflare/vitest-plugin": "^1.4.12",
     "@cloudflare/workers-types": "^5.20261102.1",
     "@stryker-mutator/core": "^10.1.1",

@@ -23,7 +23,7 @@ export default defineConfig({
       // Tier 2 of the plan's coverage policy, enforced on every file.
       // Tier 1 for the task state machine, deadlines and retention logic: 100% of
       // lines, statements, branches and functions, with no exclusions (mutation
-      // testing is scripts/mutation-ts.mjs). The glob keeps task.ts out of the tier 2 numbers.
+      // testing is scripts/mutation-ts.mjs). The globs keep task.ts and parts.ts out of the tier 2 numbers.
       thresholds: {
         perFile: true,
         lines: 95,
@@ -31,6 +31,8 @@ export default defineConfig({
         branches: 90,
         functions: 95,
         "src/task.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        // Tier 1 for what the gateway checks about a sealed part before it relays it.
+        "src/parts.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },
     },
   },

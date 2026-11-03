@@ -82,7 +82,7 @@ plan.md), attack, outcome, test, subtest (exact `t.Run` name, or `-`).
 | A60 | redelivered frame | redelivered frame is dropped | rejected | TestRedeliveredFrameIsDropped | - |
 | A61 | prekey flood, device | one caller cannot hold more than its share of prekeys | rejected | TestPrekeyRequestFloodIsLimited | - |
 | A62 | prekey flood, gateway | flood refused by the Tenant DO before it reaches the target | pending T305 | TestPending_GatewayRateLimitsPrekeyRequests | - |
-| A63 | follow-up chain | five-message chain erases each key | pending T405 | TestPending_FollowUpChainErasesEachKey | - |
+| A63 | follow-up chain | five-message chain erases each key | rejected | TestFollowUpChainErasesEachKey | after a restart |
 | A64 | late reply after CANCEL | reply key erased on CANCEL or FAILED; late reply refused by the device and by the shipped Task DO, also after a restart | rejected | TestLateReplyAfterCancelIsRejected | after a restart |
 | A65 | disk clone | disk clone or restored backup holds no usable keys | rejected | TestDiskCloneAndBackupHoldNoKeys | - |
 | A66 | restart invariant | replay safety across a restart relies on memory-only prekeys | rejected | TestRestartInvariant | - |

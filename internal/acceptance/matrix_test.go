@@ -201,7 +201,7 @@ func TestAttackMatrixCheckerCatchesGaps(t *testing.T) {
 	if tests["TestReplay"].subtests["no such subtest"] || !tests["TestReplay"].subtests["a task delivered twice runs once"] {
 		t.Fatal("subtests not read from source")
 	}
-	if tests["TestPending_FollowUpChainErasesEachKey"].pending != "T405" {
+	if tests["TestPending_GatewayRateLimitsPrekeyRequests"].pending != "T305" {
 		t.Fatal("pending task not read from source")
 	}
 }
