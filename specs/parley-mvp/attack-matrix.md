@@ -83,7 +83,7 @@ plan.md), attack, outcome, test, subtest (exact `t.Run` name, or `-`).
 | A61 | prekey flood, device | one caller cannot hold more than its share of prekeys | rejected | TestPrekeyRequestFloodIsLimited | - |
 | A62 | prekey flood, gateway | flood refused by the Tenant DO before it reaches the target | pending T305 | TestPending_GatewayRateLimitsPrekeyRequests | - |
 | A63 | follow-up chain | five-message chain erases each key | pending T302 | TestPending_FollowUpChainErasesEachKey | - |
-| A64 | late reply after CANCEL | reply key erased on CANCEL; late reply refused (shipped state machine) | pending T301 | TestPending_LateReplyAfterCancelIsRejected | - |
+| A64 | late reply after CANCEL | reply key erased on CANCEL or FAILED; late reply refused by the device and by the shipped Task DO, also after a restart | rejected | TestLateReplyAfterCancelIsRejected | after a restart |
 | A65 | disk clone | disk clone or restored backup holds no usable keys | rejected | TestDiskCloneAndBackupHoldNoKeys | - |
 | A66 | restart invariant | replay safety across a restart relies on memory-only prekeys | rejected | TestRestartInvariant | - |
 | A67 | core dump and swap | core-dump and swap scans find no key bytes: a scan of the daemon's address space finds no erased key in the locked region (also TestHardenedCrashLeavesNoCore, TestKeyMemoryIsLockedAgainstSwap; scan runs on Linux) | rejected | TestAddressSpaceHoldsNoErasedKey | - |

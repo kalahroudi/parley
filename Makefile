@@ -19,7 +19,8 @@ coverage:
 	go run ./scripts/covergate -profile cover.out
 	cd gateway && npm ci && npm run test:coverage && npm run test:oidc-coverage
 
-# Mutation testing of the tier 1 Go packages (slow: minutes).
+# Mutation testing of the tier 1 Go packages and gateway files (slow: minutes; run
+# `cd gateway && npm ci` once first).
 mutation:
 	scripts/mutation.sh
 

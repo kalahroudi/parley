@@ -726,11 +726,129 @@ func TestPending_FollowUpChainErasesEachKey(t *testing.T) {
 	pending(t, "T302", "needs the shipped follow-up send/receive path (next-key in inner, INPUT_REQUIRED); assert five messages, each key erased on receipt, each earlier frame unopenable, across a restart")
 }
 
-// (g) A late reply after CANCEL is rejected. The harness models this with test
-// code (TestDrop, TestHonestGateway); the shipped task state machine and its
-// reply-key erasure on CANCEL are T301.
-func TestPending_LateReplyAfterCancelIsRejected(t *testing.T) {
-	pending(t, "T301", "needs the shipped Task state machine; assert the reply key is erased on CANCEL or FAILED before any late reply is accepted, also after a restart")
+// (g) A late reply after CANCEL is rejected, on both sides of the wire. The
+// gateway's shipped Task DO (T301, gateway/src/task.ts) refuses every event after
+// CANCEL or FAILED, also after the object restarts; its tests are named below and
+// this test fails if they go missing. The device side composes the shipped
+// packages (the harness has no shipped reply receiver yet): the reply key is
+// erased on CANCEL (confirmed, or unconfirmed at the deadline), on ERROR and at
+// expiry, a reply sealed before the cancel is refused when it arrives late, and a
+// restart leaves no key at all.
+func TestLateReplyAfterCancelIsRejected(t *testing.T) {
+	// A task in flight; bob has said he is working, which hands alice his follow-up key.
+	// late seals a further reply and holds it back, as a slow gateway would.
+	held := func(t *testing.T) (w *world, alice, bob *device, id [16]byte) {
+		w = newWorld(t, "alice", "bob")
+		alice, bob = w.dev("alice"), w.dev("bob")
+		id = start(t, w)
+		wantOK(t, bob.reply(id, envelope.TypeStatus, []byte("working")))
+		return
+	}
+	late := func(bob *device, id [16]byte) []byte { return bob.replyWire(id, envelope.TypeResult, []byte("done")) }
+	keyGone := func(t *testing.T, alice *device, id [16]byte) {
+		t.Helper()
+		if o := alice.out[id]; o != nil && o.rsk != nil {
+			t.Fatal("the reply key is still held")
+		}
+	}
+
+	t.Run("after a confirmed CANCEL", func(t *testing.T) {
+		w, alice, bob, id := held(t)
+		errs, err := alice.cancel(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantOK(t, errs)
+		wantOK(t, bob.reply(id, envelope.TypeCancel, nil)) // bob confirms: the key goes
+		keyGone(t, alice, id)
+		wantErr(t, one(t, w.gw.push("alice", late(bob, id))), errNoKey)
+		for _, r := range alice.out[id].results {
+			if string(r) == "done" {
+				t.Fatal("alice took the late reply")
+			}
+		}
+	})
+
+	t.Run("after an unconfirmed CANCEL, once the deadline passes", func(t *testing.T) {
+		w, alice, bob, id := held(t)
+		lateWire := late(bob, id)
+		w.gw.onMsg = func(string, []byte) [][]byte { return nil } // the cancel never arrives
+		if _, err := alice.cancel(id); err != nil {
+			t.Fatal(err)
+		}
+		w.gw.onMsg = nil
+		if bob.in[id].canceled {
+			t.Fatal("bob saw a cancel the gateway dropped")
+		}
+		// Until the deadline the key is kept, but nothing but a confirmation is taken.
+		wantErr(t, one(t, w.gw.push("alice", lateWire)), errAfterCancel)
+		w.now = w.now.Add(cancelWait)
+		wantErr(t, alice.finishCancel(id), errCancelUnacked)
+		keyGone(t, alice, id)
+		wantErr(t, one(t, w.gw.push("alice", lateWire)), errNoKey)
+	})
+
+	t.Run("after FAILED", func(t *testing.T) {
+		w, alice, bob, id := held(t)
+		wantOK(t, bob.reply(id, envelope.TypeError, []byte("boom")))
+		keyGone(t, alice, id)
+		if alice.out[id].state != envelope.TypeError {
+			t.Fatalf("state %v", alice.out[id].state)
+		}
+		wantErr(t, one(t, w.gw.push("alice", late(bob, id))), errNoKey)
+		wantErr(t, one(t, bob.reply(id, envelope.TypeResult, []byte("again"))), errNoKey)
+	})
+
+	t.Run("after the deadline", func(t *testing.T) {
+		w, alice, bob, id := held(t)
+		lateWire := late(bob, id)
+		w.now = w.now.Add(taskTTL)
+		alice.reap(id)
+		keyGone(t, alice, id)
+		if !alice.out[id].failed {
+			t.Fatal("an expired task did not fail")
+		}
+		// The frame is also past its own signed expiry; either way it is refused and the key stays gone.
+		if err := one(t, w.gw.push("alice", lateWire)); err == nil {
+			t.Fatal("a reply after the deadline was accepted")
+		}
+		keyGone(t, alice, id)
+	})
+
+	t.Run("after a restart", func(t *testing.T) {
+		w, alice, bob, id := held(t)
+		lateWire := late(bob, id)
+		errs, err := alice.cancel(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantOK(t, errs)
+		alice.restart() // reply keys live in memory only: nothing survives
+		if len(alice.out) != 0 {
+			t.Fatal("task state survived the restart")
+		}
+		wantErr(t, one(t, w.gw.push("alice", lateWire)), errUnknownTask)
+		wantErr(t, one(t, bob.reply(id, envelope.TypeResult, []byte("again"))), errUnknownTask)
+		snap := alice.snap()
+		wantErr(t, one(t, w.gw.push("alice", lateWire)), errUnknownTask)
+		snap.unchanged(t)
+	})
+
+	t.Run("the gateway's Task DO refuses it too, also after a restart", func(t *testing.T) {
+		src, err := os.ReadFile(filepath.Join("..", "..", "gateway", "test", "task.test.ts"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{
+			"makes a late reply impossible, also after the object restarts",
+			"terminal states are absorbing: nothing moves them",
+			"the table is the documented one",
+		} {
+			if !strings.Contains(string(src), name) {
+				t.Errorf("gateway/test/task.test.ts lost the test %q", name)
+			}
+		}
+	})
 }
 
 // (e, gateway side) The plan's per-caller rate limit on prekey requests is

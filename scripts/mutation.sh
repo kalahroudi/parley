@@ -20,4 +20,10 @@ for p in $pkgs; do
 	go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
 		--threshold-efficacy 95 --workers 2 --timeout-coefficient 20 "./$p" || status=1
 done
+
+# Tier 1 TypeScript (tests/coverage/gateway-tier1.json): the same bar, with Stryker.
+# Every mutant must be killed (stryker.config.json breaks below 100). Needs
+# `npm ci` in gateway first.
+echo "== mutation: gateway tier 1 files"
+(cd gateway && npm run test:mutation) || status=1
 exit $status
