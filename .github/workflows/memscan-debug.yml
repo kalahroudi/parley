@@ -1,0 +1,30 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Temporary: loops the address-space scan on amd64 Linux and dumps every extra copy.
+name: memscan-debug
+on:
+  push:
+    branches: [fix/memscan-amd64]
+  workflow_dispatch:
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: uname -m
+      - name: loop
+        env:
+          PARLEY_SCAN_DEBUG: "1"
+        run: |
+          go test -race -c -o /tmp/acc ./internal/acceptance
+          cd internal/acceptance
+          fail=0
+          for i in $(seq 1 30); do
+            if ! /tmp/acc -test.count=1 -test.run '^TestAddressSpaceHoldsNoErasedKey$' -test.v > /tmp/o.$i 2>&1; then fail=$((fail+1)); echo "=== RUN $i FAILED"; cat /tmp/o.$i; fi
+          done
+          echo "failures: $fail of 30"

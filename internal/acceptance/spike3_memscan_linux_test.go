@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -156,6 +157,45 @@ func vmFlagsOf(addr uint64) string {
 	return ""
 }
 
+// debugHit writes where a copy of a scalar lives to stderr: the mapping, and the
+// words around it (return addresses and pointers around a stale stack copy look
+// different from a heap object's neighbours). Enabled by PARLEY_SCAN_DEBUG.
+func debugHit(label, name string, addr uint64) {
+	maps, _ := os.ReadFile("/proc/self/maps")
+	region := "?"
+	for _, l := range strings.Split(string(maps), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 1 {
+			continue
+		}
+		rng := strings.SplitN(f[0], "-", 2)
+		lo, _ := strconv.ParseUint(rng[0], 16, 64)
+		hi, _ := strconv.ParseUint(rng[1], 16, 64)
+		if addr >= lo && addr < hi {
+			region = l
+		}
+	}
+	mem, err := os.Open("/proc/self/mem")
+	if err != nil {
+		return
+	}
+	defer mem.Close()
+	const before, after = 160, 96
+	b := make([]byte, before+32+after)
+	n, _ := mem.ReadAt(b, int64(addr-before))
+	words := []string{}
+	for i := 0; i+8 <= n; i += 8 {
+		w := uint64(b[i]) | uint64(b[i+1])<<8 | uint64(b[i+2])<<16 | uint64(b[i+3])<<24 | uint64(b[i+4])<<32 | uint64(b[i+5])<<40 | uint64(b[i+6])<<48 | uint64(b[i+7])<<56
+		mark := ""
+		if i == before {
+			mark = "<-key"
+		}
+		words = append(words, fmt.Sprintf("%+4d %016x%s", i-before, w, mark))
+	}
+	fmt.Fprintf(os.Stderr, "DEBUGHIT %s %s addr=%#x\n  region: %s\n  %s\n", label, name, addr, region, strings.Join(words, "\n  "))
+	clear(b)
+}
+
 func scanChild(r *childReport) {
 	if err := prekey.Harden(); err != nil {
 		die(err)
@@ -211,6 +251,11 @@ func scanChild(r *childReport) {
 		total, inRegion = map[string]int{}, map[string]int{}
 		for name, as := range countInMemory(fps) {
 			total[name] = len(as)
+			if os.Getenv("PARLEY_SCAN_DEBUG") != "" && len(as) > 1 && strings.HasPrefix(name, "erased") {
+				for _, a := range as {
+					debugHit("scan", name, a)
+				}
+			}
 			for _, a := range as {
 				if a >= lo && a < hi {
 					inRegion[name]++
@@ -256,7 +301,11 @@ func TestAddressSpaceHoldsNoErasedKey(t *testing.T) {
 	hits, afterClose := map[string]int{}, map[string]int{}
 	var r childReport
 	for run := 0; run < runs; run++ {
-		r, _, _ = runChild(t, "scan", t.TempDir())
+		var stderr string
+		r, stderr, _ = runChild(t, "scan", t.TempDir())
+		if strings.Contains(stderr, "DEBUGHIT") {
+			t.Logf("debug:\n%s", stderr)
+		}
 		t.Logf("hits %v, in key region %v, after Close %v", r.Hits, r.InRegion, r.AfterClose)
 		for k, v := range r.Hits {
 			hits[k] = max(hits[k], v)
