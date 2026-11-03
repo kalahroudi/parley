@@ -13,13 +13,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FIELDS, Scan, mintCanaries } from "./canary/canary.mjs";
+import { sleep, startGateway } from "./harness/wrangler.mjs";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..");
 const isWindows = process.platform === "win32";
@@ -28,36 +28,6 @@ const wrangler = join(root, "gateway", "node_modules", ".bin", isWindows ? "wran
 const haveGo = spawnSync("go", ["version"], { stdio: "ignore" }).status === 0;
 const missing = !haveGo ? "go not installed" : !existsSync(wrangler) ? "gateway dependencies not installed (cd gateway && npm ci)" : "";
 const opts = missing ? { skip: process.env.CI ? false : missing } : {};
-
-const freePort = () =>
-  new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address();
-      s.close(() => resolve(port));
-    });
-  });
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function stopTree(child) {
-  return new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) return resolve();
-    const timer = setTimeout(() => kill("SIGKILL"), 8000);
-    child.once("exit", () => {
-      clearTimeout(timer);
-      resolve();
-    });
-    function kill(sig) {
-      try {
-        if (isWindows) spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-        else process.kill(-child.pid, sig);
-      } catch {}
-    }
-    kill("SIGTERM");
-  });
-}
 
 // Everything observable on the wire is collected here and scanned afterwards.
 function recorder() {
@@ -152,45 +122,12 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     assert.deepEqual(frames.map((f) => f.type), ["TASK", "STATUS", "INPUT_REQUIRED", "RESULT", "ERROR"]);
     assert.equal(blobs.length, 1);
 
-    // 2. A real gateway with its state on disk.
-    const state = join(dir, "state");
-    const logs = join(dir, "wrangler-logs");
-    mkdirSync(logs);
-    // Another wrangler or workerd on the machine (or a parallel test) can take the
-    // ports between picking them and binding them: retry with fresh ones.
-    let port, out;
-    for (let attempt = 1; ; attempt++) {
-      port = await freePort();
-      const inspector = await freePort();
-      out = [];
-      gw = spawn(
-        `"${wrangler}" dev --port ${port} --inspector-port ${inspector} --ip 127.0.0.1 --var DEV_AUTH:1 --persist-to "${state}"`,
-        {
-          cwd: join(root, "gateway"),
-          shell: true,
-          detached: !isWindows,
-          env: { ...process.env, WRANGLER_LOG_PATH: logs, WRANGLER_SEND_METRICS: "false", CI: "1" },
-        },
-      );
-      gw.stdout.on("data", (d) => out.push(d));
-      gw.stderr.on("data", (d) => out.push(d));
-      let up = false;
-      for (let i = 0; i < 300 && gw.exitCode === null; i++) {
-        try {
-          if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) {
-            up = true;
-            break;
-          }
-        } catch {}
-        if (/Address already in use/.test(Buffer.concat(out).toString())) break;
-        await sleep(200);
-      }
-      if (up) break;
-      const log = Buffer.concat(out).toString();
-      await stopTree(gw);
-      assert.ok(attempt < 4 && /Address already in use/.test(log), `gateway did not start:\n${log}`);
-    }
-    const base = `http://127.0.0.1:${port}`;
+    // 2. A real gateway with its state on disk. Ports, state and log directories are
+    // allocated per start (tests/harness/wrangler.mjs), so a parallel wrangler on the
+    // machine cannot collide with it.
+    gw = await startGateway(join(root, "gateway"), { scratch: join(dir, "gw") });
+    const { state, logs, port } = gw;
+    const base = gw.url;
 
     // 3. Everything goes through: frames both directions, plus the error paths.
     const rec = recorder();
@@ -210,13 +147,24 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     c.send("not json");
     assert.equal((await c.next())?.t, "error");
     c.close();
+    // Planted-leak control: a control canary goes into a field the gateway DOES
+    // persist (a device name in the Tenant Durable Object). The storage scan below
+    // must FIND it, or a zero-hit result on the real canaries would prove nothing.
+    const control = mintCanaries(["control"]);
+    const enrolled = await rec.fetch(`${base}/v1/enroll/request`, {
+      method: "POST",
+      headers: { Authorization: "Bearer dev-user:acme:alice@acme.test", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: control.control, signing_key: Buffer.alloc(32, 7).toString("base64") }),
+    });
+    assert.equal(enrolled.status, 202);
     await sleep(500);
 
     // 4. Stop the gateway so its storage is flushed, then scan everything.
-    await stopTree(gw);
+    await gw.stop();
+    const out = [gw.output()];
     const scan = new Scan(canaries);
     for (const [what, data] of rec.seen) scan.text(what, data);
-    scan.text("gateway output", Buffer.concat(out));
+    scan.text("gateway output", out[0]);
     for (const f of frames) scan.bytes(`wire frame ${f.type}`, Buffer.from(f.body, "base64"));
     for (const b of blobs) scan.bytes("file blob (R2 object body)", Buffer.from(b.data, "base64"));
     scan.text("file blob (R2 object key)", blobs[0].key);
@@ -231,11 +179,24 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     })(state);
     assert.ok(files.some((f) => f.endsWith(".sqlite") && statSync(f).size > 0), `no Durable Object database under ${state}: ${files}`);
     scan.path(state);
+    // The control must be found in storage (and nowhere that would make that
+    // meaningless), and the real canaries must not.
+    const ctl = new Scan(control);
+    ctl.path(state);
+    assert.ok(ctl.hits.some((h) => h.sink.startsWith(state) && /\.sqlite(-wal)?$/.test(h.sink)),
+      `the planted control canary is not visible in the persisted Durable Object files: scan cannot see storage\n${ctl.report()}`);
+    // R2 and D1 are in the plan; the gateway declares neither yet. When it does,
+    // their directories must exist under the state directory, and are scanned by
+    // scan.path(state) above, so this cannot go green by scanning nothing.
+    const cfg = readFileSync(join(root, "gateway", "wrangler.jsonc"), "utf8");
+    const present = new Set(readdirSync(state));
+    if (/"r2_buckets"/.test(cfg)) assert.ok(present.has("r2"), `R2 is declared but ${state} has no r2 directory: ${[...present]}`);
+    if (/"d1_databases"/.test(cfg)) assert.ok(present.has("d1"), `D1 is declared but ${state} has no d1 directory: ${[...present]}`);
     t.diagnostic(`scanned ${scan.sinks.length} sinks, ${files.length} persisted files, ${rec.seen.length} observed messages; skipped: ${scan.skipped.length}`);
     assert.deepEqual(scan.skipped, [], "the scan skipped something it could not read");
     scan.assertClean();
   } finally {
-    if (gw) await stopTree(gw);
+    if (gw) await gw.stop();
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

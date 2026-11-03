@@ -44,6 +44,10 @@ import (
 
 const childEnv = "PARLEY_SCAN_CHILD"
 
+// plantedHeap is the unhardened control's own 32 bytes in the Go heap, which a
+// core dump of that process must contain.
+var plantedHeap []byte
+
 // fingerprint identifies a scalar without holding it.
 type fingerprint struct {
 	Prefix string   `json:"prefix"` // hex of the first 8 bytes
@@ -132,6 +136,9 @@ func TestMemScanChild(t *testing.T) {
 		r.Locked = p.Locked()
 		if mode == "crash-unhardened" {
 			r.Raw = map[string]string{}
+			plantedHeap = make([]byte, 32)
+			rand.Read(plantedHeap)
+			r.Raw["planted"] = hex.EncodeToString(plantedHeap)
 			for i, sp := range sps {
 				p.With(sp.ID, func(sk *[32]byte) error { r.Raw[fps[i].Prefix] = hex.EncodeToString(sk[:]); return nil })
 			}
@@ -253,11 +260,16 @@ func TestHardenedLimitsCannotBeRaised(t *testing.T) {
 	}
 }
 
-// Control: the same crash without Harden. Whether a core file lands depends on
-// the host (core_pattern, /cores permissions, code signing), so the control
-// asserts what it can: the shell's raised limit reached the child (so the
-// hardened result above is down to Harden, not to a restrictive test setup), and
-// if a core did appear, the scan finds the planted keys in it.
+// Control: the same crash without Harden. It exists so that the hardened result
+// above cannot be a side effect of a restrictive test setup. A core file is the
+// OS's choice, not ours: it needs a hard limit above zero (checked), a
+// core_pattern that writes a file rather than piping to a handler (apport,
+// systemd-coredump on most CI images), and on macOS a writable /cores and an
+// unsigned binary. Where the host will write one, this test REQUIRES it, and the
+// control must then find a 32-byte value planted in the child's heap: a scan that
+// cannot see a planted value fails. Where the host will not, the test says so
+// and the process-level checks (limit and its irreversibility, locked memory,
+// the address-space scan) are what stand; it does not pretend a dump was read.
 func TestUnhardenedControlCanDump(t *testing.T) {
 	dir := t.TempDir()
 	r, _, st := runChild(t, "crash-unhardened", dir)
@@ -266,35 +278,47 @@ func TestUnhardenedControlCanDump(t *testing.T) {
 	}
 	cores := coresFor(dir, st.Pid())
 	if len(cores) == 0 {
-		t.Logf("limit was %d but this host wrote no core (core_pattern or code signing); the limit control stands", r.CoreCur)
-		return
+		if runtime.GOOS == "linux" && coreFileExpected() {
+			t.Fatalf("core_pattern writes files and the limit was %d, but the unhardened crash left none: the control is broken", r.CoreCur)
+		}
+		t.Skipf("limit was %d but this host wrote no core (piped core_pattern, code signing or unwritable /cores): no dump was scanned on %s", r.CoreCur, runtime.GOOS)
 	}
 	defer func() {
 		for _, c := range cores {
+			if strings.HasPrefix(c, dir) {
+				continue // inside t.TempDir
+			}
 			os.Remove(c)
 		}
 	}()
-	var raws [][]byte
-	for _, h := range r.Raw {
-		b, _ := hex.DecodeString(h)
-		raws = append(raws, b)
+	planted, _ := hex.DecodeString(r.Raw["planted"])
+	if len(planted) != 32 {
+		t.Fatal("the child did not report its planted value")
 	}
-	// Scan the core file itself: /cores holds other processes' dumps.
-	found := 0
+	var found bool
 	for _, c := range cores {
 		b, err := os.ReadFile(c)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, raw := range raws {
-			if bytes.Contains(b, raw) {
-				found++
-			}
+		if bytes.Contains(b, planted) {
+			found = true
 		}
 	}
-	if found == 0 {
-		t.Log("a core was written but holds no scalar: the key region is excluded from dumps (MADV_DONTDUMP)")
+	if !found {
+		t.Fatal("a core file was written but the scan did not find the planted value in it: the scan cannot see a dump")
 	}
+}
+
+// coreFileExpected reports whether the kernel is set to write a plain core file
+// (not pipe to a handler) so that a missing one is a failure.
+func coreFileExpected() bool {
+	b, err := os.ReadFile("/proc/sys/kernel/core_pattern")
+	if err != nil {
+		return false
+	}
+	p := strings.TrimSpace(string(b))
+	return strings.HasPrefix(p, "core") && !strings.Contains(p, "/") // relative: lands in the child's working directory
 }
 
 // Swap. Key memory is mlock/VirtualLock-ed, so the OS cannot page it out. Where

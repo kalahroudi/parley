@@ -66,6 +66,14 @@ func countInMemory(fps map[string]fingerprint) map[string][]uint64 {
 	}
 	const chunk = 1 << 20
 	buf := make([]byte, chunk+32)
+	// The scanner's own read buffer is in the address space it reads and holds
+	// a copy of whatever it read last (and, uncleared, of the previous scan's
+	// last chunks). Those are artefacts of measuring, not copies the daemon
+	// holds: they made the counts vary from run to run (worse under -race), so
+	// they are neither counted nor left behind.
+	bufLo := uint64(uintptr(unsafe.Pointer(&buf[0])))
+	bufHi := bufLo + uint64(len(buf))
+	defer clear(buf)
 	sc := bufio.NewScanner(maps)
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
@@ -96,8 +104,9 @@ func countInMemory(fps map[string]fingerprint) map[string][]uint64 {
 					// A match straddling the chunk edge is read again by the next chunk, which
 					// starts 1 MiB later but whose window only reaches 32 bytes past this one:
 					// count it here only.
-					if off+32 <= len(window) && sha256.Sum256(window[off:off+32]) == fps[name].Digest && off < chunk {
-						hits[name] = append(hits[name], at+uint64(off))
+					if a := at + uint64(off); off+32 <= len(window) && sha256.Sum256(window[off:off+32]) == fps[name].Digest && off < chunk &&
+						!(a >= bufLo && a < bufHi) {
+						hits[name] = append(hits[name], a)
 					}
 					off++
 				}
@@ -124,6 +133,27 @@ func regionOf(addr uint64) (lo, hi uint64) {
 	}
 	die(errors.New("address not mapped"))
 	return
+}
+
+// vmFlagsOf returns the kernel's VmFlags for the mapping holding addr, from
+// /proc/self/smaps: "lo" is locked in RAM (never swapped), "dd" is excluded from
+// core dumps (MADV_DONTDUMP).
+func vmFlagsOf(addr uint64) string {
+	b, _ := os.ReadFile("/proc/self/smaps")
+	in := false
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) >= 5 && strings.Contains(f[0], "-") && !strings.HasSuffix(f[0], ":") {
+			rng := strings.SplitN(f[0], "-", 2)
+			lo, _ := strconv.ParseUint(rng[0], 16, 64)
+			hi, _ := strconv.ParseUint(rng[1], 16, 64)
+			in = addr >= lo && addr < hi
+			continue
+		}
+		if in && strings.HasPrefix(l, "VmFlags:") {
+			return strings.TrimSpace(strings.TrimPrefix(l, "VmFlags:"))
+		}
+	}
+	return ""
 }
 
 func scanChild(r *childReport) {
@@ -197,7 +227,7 @@ func scanChild(r *childReport) {
 	for i := 0; i < 3; i++ {
 		zero["slot"+strconv.Itoa(i)] = *addr[i] == [32]byte{}
 	}
-	r.Extra = map[string]interface{}{"slot_zero": zero}
+	r.Extra = map[string]interface{}{"slot_zero": zero, "vmflags": vmFlagsOf(uint64(uintptr(unsafe.Pointer(addr[3]))))}
 	runtime.KeepAlive(planted)
 
 	// After Close nothing is live: the live keys' slots go too.
@@ -218,25 +248,21 @@ func scanChild(r *childReport) {
 const maxHeapResidue = 2
 
 func TestAddressSpaceHoldsNoErasedKey(t *testing.T) {
-	// Stale goroutine stacks can hold an extra copy of a scalar, depending on
-	// when the runtime grew and freed them. The heap-residue ratchet therefore
-	// uses the lowest count over a few runs (a real leak is there in every
-	// run); the locked-region checks must hold in every run.
-	const runs = 5
+	// The counts are exact: the scanner excludes its own read buffer (see
+	// countInMemory), which used to add copies that varied from run to run. A
+	// few runs are still made and every one must hold, so a regression to a
+	// noisy count shows up as a failure and is not averaged away.
+	const runs = 3
 	hits, afterClose := map[string]int{}, map[string]int{}
 	var r childReport
 	for run := 0; run < runs; run++ {
 		r, _, _ = runChild(t, "scan", t.TempDir())
 		t.Logf("hits %v, in key region %v, after Close %v", r.Hits, r.InRegion, r.AfterClose)
 		for k, v := range r.Hits {
-			if run == 0 || v < hits[k] {
-				hits[k] = v
-			}
+			hits[k] = max(hits[k], v)
 		}
 		for k, v := range r.AfterClose {
-			if run == 0 || v < afterClose[k] {
-				afterClose[k] = v
-			}
+			afterClose[k] = max(afterClose[k], v)
 		}
 		// The scan can see: a key we planted in the Go heap, and the live keys in
 		// the locked region.
@@ -256,6 +282,15 @@ func TestAddressSpaceHoldsNoErasedKey(t *testing.T) {
 			if z := r.Extra["slot_zero"].(map[string]interface{})["slot"+strconv.Itoa(i)]; z != true {
 				t.Errorf("the slot of %s is not zero after erase", name)
 			}
+		}
+		// The kernel's own view of the key region: locked (lo) and out of core
+		// dumps (dd). This is what mlock and MADV_DONTDUMP actually did.
+		flags := " " + r.Extra["vmflags"].(string) + " "
+		if r.Locked && !strings.Contains(flags, " lo ") {
+			t.Errorf("the key region is not locked in RAM according to the kernel: VmFlags %q", flags)
+		}
+		if !strings.Contains(flags, " dd ") {
+			t.Errorf("the key region is not excluded from core dumps (MADV_DONTDUMP): VmFlags %q", flags)
 		}
 		// Close must erase the region itself, not just leave the heap residue
 		// below the allowance: a surviving copy in the old region is a leak.
