@@ -216,15 +216,15 @@ It verifies the account, deploys the Worker with the client id as a plain variab
 cd gateway && npx wrangler secret put GOOGLE_CLIENT_SECRET --name parley-test-login --config "<temp config pinned to account b891d462...>"
 ```
 
-The script notices the secret (it lists secret *names* only) and then runs its first check, before anyone is asked to click: the login redirect must go to Google and name **exactly** the client id above and **exactly** the callback above (compared to fixed constants, not to wherever the Worker happened to deploy), with PKCE S256, a state and a nonce. A mismatch, such as another workers.dev host or a different client, fails there with the exact difference, and the Worker is deleted. If it passes, the script opens the login URL. Sign in and click **Allow** once. The gateway's own callback validates the id token's signature, issuer, audience, nonce and expiry plus the state and PKCE, and, if you run with `GOOGLE_HOSTED_DOMAIN=yourdomain.example`, the `hd` claim. The script then prints `PASS` or `REFUSED` with only the provider, issuer, email **domain** and flags (never the email, subject id or tokens; the browser is shown a plain "signed in" page), deletes the Worker in a `finally` block and lists `parley-test-*` Workers to show none remain. Deleting the Worker also deletes the secret, so each run needs the command again. If a run is abandoned, `node tests/reality/logins/google.mjs cleanup` deletes the Worker.
+The script notices the secret (it lists secret *names* only) and then runs its first check, before anyone is asked to click: the login redirect must go to Google and name **exactly** the client id above and **exactly** the callback above (compared to fixed constants, not to wherever the Worker happened to deploy), with PKCE S256, a state and a nonce. A mismatch, such as another workers.dev host or a different client, fails there with the exact difference, and the Worker is deleted. If it passes, the script opens the login URL. Sign in and click **Allow** once. The gateway's own callback validates the id token's signature, issuer, audience, nonce and expiry plus the state and PKCE, and, for a hosted-domain run (`--domain`, below), the `hd` claim. The script then prints `PASS` or `REFUSED` with only the provider, issuer, email **domain** and flags (never the email, subject id or tokens; the browser is shown a plain "signed in" page), deletes the Worker in a `finally` block and lists `parley-test-*` Workers to show none remain. Deleting the Worker also deletes the secret, so each run needs the command again. If a run is abandoned, `node tests/reality/logins/google.mjs cleanup` deletes the Worker.
 
 Expected results:
 
 | Case | Run | Expected |
 |---|---|---|
 | Personal Gmail (a test user) | no `GOOGLE_HOSTED_DOMAIN` | `PASS`, `personalAccount: true`, `hostedDomainChecked: false` |
-| Workspace member | `GOOGLE_HOSTED_DOMAIN=their.domain` | `PASS`, `hostedDomainChecked: true` |
-| Personal Gmail | `GOOGLE_HOSTED_DOMAIN=their.domain` | `REFUSED ... tenant_mismatch` |
+| Workspace member | `--domain their.domain --mode positive` | `PASS (positive)`, `hostedDomainChecked: true` |
+| Personal Gmail | `--domain example.com --mode negative` (any domain the account is not in) | `REFUSED as expected (negative): tenant_mismatch`, no identity issued |
 | Consent denied (click Cancel) | any | `REFUSED ... idp_denied` |
 | Account not a test user (Testing mode) | any | Google's own "Access blocked" page; no result arrives and the script times out and cleans up |
 
@@ -238,10 +238,40 @@ What this establishes: against real Google and a real Worker on Cloudflare, the 
 
 **What it did not cover:**
 
-- **Workspace hosted-domain (`hd`) enforcement.** The run used a personal account with `GOOGLE_HOSTED_DOMAIN` unset (`hostedDomainChecked: false`), so the code path that requires the `hd` claim to equal the configured domain, and the refusal of a personal account when a domain is configured, were **not exercised against real Google**. They remain covered only by the mock-IdP tests. Still to do: a run with a real Workspace account and `GOOGLE_HOSTED_DOMAIN=<their domain>` (expect `PASS`, `hostedDomainChecked: true`), and the same personal account with a domain configured (expect `REFUSED ... tenant_mismatch`).
+- **Workspace hosted-domain (`hd`) enforcement.** The run used a personal account with `GOOGLE_HOSTED_DOMAIN` unset (`hostedDomainChecked: false`), so the code path that requires the `hd` claim to equal the configured domain, and the refusal of a personal account when a domain is configured, were **not exercised against real Google**. They remain covered only by the mock-IdP tests. Still to do, now supported by the script (see "Hosted-domain (Workspace) runs"): a negative run with the personal account and a non-matching domain (no Workspace account needed), and a positive run with a real Workspace account.
 - The other Google cases in the table: consent denied (`idp_denied`), and an account that is not a test user while the app is in Testing (Google's own "Access blocked").
 - **Microsoft Entra:** nothing was run; it is pending a client id.
 - Only one sign-in was run, so token expiry and `email_verified: false` behavior were not seen on a real token.
+
+#### Hosted-domain (Workspace) runs
+
+Two runs prove the domain restriction: a positive one with a Workspace account, and a negative one that needs **no Workspace account at all**. Both use the same three steps as above (the redirect URI is already registered; the secret command is re-run each time).
+
+**(a) How the domain gets to the Worker.** Give the script the domain with `--domain corp.example`, or set `GOOGLE_HOSTED_DOMAIN=corp.example` in your shell instead (the flag wins). The script lowercases it, refuses anything that is not a plain domain name, and writes it into the generated, throwaway wrangler config as the Worker's `GOOGLE_HOSTED_DOMAIN` variable when it deploys. There is no wrangler edit for you to make. Before anyone is asked to click, the script's first check confirms the variable arrived: the Worker's login redirect to Google must carry `hd=<your domain>`, and the run stops with "GOOGLE_HOSTED_DOMAIN did not reach the Worker" if it does not. A domain always needs a mode, so a run can never be unclear about what it expects.
+
+**(b) Two modes.**
+
+| Mode | Command | Sign in with | Expected output | Exit code |
+|---|---|---|---|---|
+| Positive | `node tests/reality/logins/google.mjs --domain corp.example --mode positive` | a Workspace account of `corp.example` | `PASS (positive): an account of corp.example was accepted and the hd claim was checked`, with `hostedDomainChecked: true` | 0 |
+| Negative | `node tests/reality/logins/google.mjs --domain example.com --mode negative` | an account that is **not** of that domain, for example the personal gmail.com account you already used | `REFUSED as expected (negative): tenant_mismatch, hd did not match example.com; no identity was issued` | 0 |
+
+The negative run is the one that proves enforcement without a Workspace account: a personal account has no `hd` claim, so a gateway that enforces the domain must refuse it even though the sign-in itself succeeds at Google. Any other outcome exits 1 with a plain reason:
+
+- `ENFORCEMENT FAILED`: the account was accepted although a domain was set. That is a gateway bug; stop and report it.
+- `NOT PROVEN (negative)`: it was refused for another reason (you cancelled consent, Google blocked the account, the Worker timed out), so the domain check was not what stopped it. Run it again and click Allow.
+- `UNEXPECTED`: a negative refusal that still carried identity fields, or a positive run accepted without the hosted-domain check having run.
+
+On a refusal the gateway answers `{"error":"tenant_mismatch"}` with no identity and sets no cookie; the script prints only the code and flags, and the browser sees a plain "refused" page.
+
+**(c) Consent screen for a Workspace account, and the secret.**
+
+- **External, Testing (recommended for both modes).** Add every account you will sign in with, the Workspace one and the personal one, under Test users (Audience). The negative run needs External: with **Internal**, Google itself blocks a personal account before it reaches the gateway, which gives `NOT PROVEN`. Internal admits only accounts of your Workspace organization, so it suits the positive run alone.
+- If the Workspace admin restricts third-party apps (Admin console, Security, API controls), the client must be allowed there, or Google shows an "Access blocked" page for that account and no result arrives.
+- Scopes stay `openid` and `.../auth/userinfo.email`; no verification is needed.
+- **The secret command must be re-run on every run.** Deleting the Worker at the end of a run deletes its secrets, so each run prints the command again and waits for you to type the client secret at wrangler's hidden prompt. It never goes through chat, a file or the script.
+
+**(d) The `hd` request parameter is only a hint, and the gateway validates the claim.** The `hd` value the gateway adds to the authorization request only steers Google's account chooser; a user can edit it out of the URL and a personal account is never stopped by it. The gateway therefore does not rely on it: `completeLogin` in `gateway/src/oidc.ts` refuses with `tenant_mismatch` unless the `hd` claim of the **signature-verified id token** equals the configured domain exactly. This was checked in the code (no fix was needed) and is pinned by tests in `tests/gateway-oidc.test.mjs`: the hint is sent but the IdP ignores it and issues a token with no `hd` (refused, even with an email on the right domain); look-alike, wrong-case, padded, empty, array and null `hd` values are refused; a matching `hd` on a token whose signature fails is not trusted; and through the gateway callback a refusal returns only the code with no cookie. Removing the claim check makes three of those tests fail (verified by deleting the line and restoring it).
 
 **What was already proven (2026-11-03, with a fake secret).** The full pipeline ran on Cloudflare with a junk value as the secret: deploy, the printed secret command run verbatim, the secret detected, the redirect check against Google's real authorize URL (client id, callback, PKCE S256, state, nonce all correct), a bogus callback instead of a browser (refused as `bad_flow`, recorded as a redacted summary), then delete and a final listing of `[]`. It was run again with the new client id and the exact-match check passed against Google's live authorize URL. What remains unproven is only what needs you: Google accepting the redirect URI and the real consent.
 
@@ -273,8 +303,8 @@ When done, record in the table below which cases passed, without emails or subje
 | Case | Date | Result |
 |---|---|---|
 | Google, personal (gmail.com) | 2026-11-03 | **PASS** (`personalAccount: true`, `hostedDomainChecked: false`); personal account, no domain configured |
-| Google, Workspace (with `GOOGLE_HOSTED_DOMAIN`) | | not run: needs a real Workspace account; the `hd` enforcement path is unexercised on real Google |
-| Google, personal with a domain configured | | not run (expect `REFUSED ... tenant_mismatch`) |
+| Google, POSITIVE: Workspace account, `--domain <their domain> --mode positive` | | pending user (needs a real Workspace account) |
+| Google, NEGATIVE: personal account, `--domain example.com --mode negative` | | pending user (needs no Workspace account; expect `REFUSED as expected ... tenant_mismatch`) |
 | Entra, member | | pending user: needs client id |
 | Entra, guest | | pending user: needs client id |
 | Entra, other tenant | | pending user: needs client id |

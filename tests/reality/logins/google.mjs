@@ -14,7 +14,18 @@
 // script, a file or the output. Then:
 //
 //   node tests/reality/logins/google.mjs [--no-open] [--wait-minutes 10]
+//   node tests/reality/logins/google.mjs --domain corp.example --mode positive
+//   node tests/reality/logins/google.mjs --domain example.com --mode negative
 //   node tests/reality/logins/google.mjs cleanup     (delete the Worker if a run was abandoned)
+//
+// Hosted-domain (Workspace) runs: the domain is given with --domain or GOOGLE_HOSTED_DOMAIN and
+// the script sets it as the Worker's GOOGLE_HOSTED_DOMAIN variable in the generated config
+// (no manual wrangler edit). The mode says what the sign-in must do:
+//   positive  sign in with an account of that Workspace domain: PASS with hostedDomainChecked true
+//   negative  sign in with an account NOT of that domain (a personal gmail.com account with
+//             --domain example.com): must be REFUSED as tenant_mismatch, with no identity issued
+// The `hd` parameter in the authorization request is only a hint to Google's account chooser.
+// The gateway enforces the domain on the `hd` claim of the verified id token.
 //
 // The run: verify the account, deploy the gateway plus the measurement wrapper
 // (tests/reality/cf/worker/entry.ts) with the public client id as a plain var, wait for
@@ -33,6 +44,44 @@ import { configPath, deployAsync, destroy, remaining, removeConfig, secretComman
 export const NAME = "parley-test-login";
 export const CLIENT_ID = "221774361645-4isrhvs33j1eft8133hsk239s831d33r.apps.googleusercontent.com"; // public
 export const SECRET = "GOOGLE_CLIENT_SECRET";
+export const DOMAIN = /^(?=.{4,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
+export const IDENTITY_FIELDS = ["provider", "issuer", "emailDomain", "hasSub", "personalAccount"];
+
+// Command line and environment to run options. A domain needs a mode and a mode needs a domain,
+// so a run can never be ambiguous about whether it expects a pass or a refusal.
+export function parseArgs(argv, env = {}) {
+  const flag = (n) => {
+    const i = argv.indexOf(n);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const raw = flag("--domain") ?? env.GOOGLE_HOSTED_DOMAIN;
+  const mode = flag("--mode");
+  const hostedDomain = raw ? raw.trim().toLowerCase() : undefined;
+  if (hostedDomain && !DOMAIN.test(hostedDomain)) throw new Error(`not a domain name: ${JSON.stringify(raw)}`);
+  if (mode !== undefined && mode !== "positive" && mode !== "negative") throw new Error("--mode must be positive or negative");
+  if (hostedDomain && !mode) throw new Error("a domain needs --mode positive (sign in with an account of that domain) or --mode negative (sign in with an account that is not)");
+  if (mode && !hostedDomain) throw new Error(`--mode ${mode} needs a domain (--domain or GOOGLE_HOSTED_DOMAIN)`);
+  const w = flag("--wait-minutes");
+  return { open: !argv.includes("--no-open"), waitMs: (w === undefined ? 10 : Number(w)) * 60_000, mode, hostedDomain };
+}
+
+// What the sign-in has to look like for the run to count. Anything else is reported plainly:
+// a negative run that is accepted means enforcement failed; one that fails for another reason
+// (consent denied, wrong account type) proves nothing about the domain check.
+export function judge(result, mode, hostedDomain) {
+  const identity = IDENTITY_FIELDS.filter((k) => result[k] !== undefined);
+  if (!mode) return result.ok === true ? { met: true, text: "PASS" } : { met: false, text: `REFUSED ${result.error ?? ""}`.trim() };
+  if (mode === "positive") {
+    if (result.ok === true && result.hostedDomainChecked === true) return { met: true, text: `PASS (positive): an account of ${hostedDomain} was accepted and the hd claim was checked` };
+    if (result.ok === true) return { met: false, text: "UNEXPECTED: accepted, but the hosted-domain check did not run" };
+    return { met: false, text: `NOT MET (positive): refused with ${result.error}; sign in with an account of ${hostedDomain}` };
+  }
+  if (result.ok === true) return { met: false, text: `ENFORCEMENT FAILED: an account was accepted although GOOGLE_HOSTED_DOMAIN=${hostedDomain}; if that account is not of that domain, the gateway let it in` };
+  if (result.error !== "tenant_mismatch") return { met: false, text: `NOT PROVEN (negative): refused with ${result.error}, not tenant_mismatch, so the domain check was not what stopped it; sign in with an account that is not of ${hostedDomain} and click Allow` };
+  if (identity.length) return { met: false, text: `UNEXPECTED: refused, but the result carries identity fields (${identity.join(", ")})` };
+  return { met: true, text: `REFUSED as expected (negative): tenant_mismatch, hd did not match ${hostedDomain}; no identity was issued` };
+}
+
 export const redirectUri = (origin) => `${origin}/auth/google/callback`;
 // The URI the owner of the client registers (account workers.dev subdomain `hello-891`).
 // The first check compares the live login redirect to exactly this and exactly CLIENT_ID.
@@ -60,12 +109,14 @@ const realDeps = {
 };
 
 // Returns { passed, result, problems }. The Worker is always deleted, whatever happens.
-export async function run({ open = true, waitMs = 10 * 60_000, hostedDomain, deps = realDeps } = {}) {
+export async function run({ open = true, waitMs = 10 * 60_000, hostedDomain, mode, deps = realDeps } = {}) {
+  if (hostedDomain && !DOMAIN.test(hostedDomain)) throw new Error(`not a domain name: ${JSON.stringify(hostedDomain)}`);
+  if (!!mode !== !!hostedDomain) throw new Error("a hosted domain and a mode go together");
   const d = { ...realDeps, ...deps };
   const probeToken = randomBytes(24).toString("hex");
   const vars = { PROBE_TOKEN: probeToken, FLOW_SECRET: randomBytes(32).toString("hex"), GOOGLE_CLIENT_ID: CLIENT_ID, LOGIN_CHECK: "1" };
   if (hostedDomain) vars.GOOGLE_HOSTED_DOMAIN = hostedDomain;
-  const out = { passed: false, result: null, problems: [] };
+  const out = { passed: false, result: null, problems: [], mode: mode ?? null, verdict: null };
   try {
     d.verifyAccount();
     d.log(`account verified; deploying ${NAME}`);
@@ -104,15 +155,18 @@ export async function run({ open = true, waitMs = 10 * 60_000, hostedDomain, dep
       } catch {}
       if (q?.get("client_id") !== CLIENT_ID) problems.push(`client_id is not exactly ${CLIENT_ID}`);
       if (q?.get("redirect_uri") !== EXPECTED_REDIRECT) problems.push(`redirect_uri is not exactly ${EXPECTED_REDIRECT} (the Worker is at ${origin})`);
+      // The domain reached the Worker as its GOOGLE_HOSTED_DOMAIN variable if the hint carries it.
+      if ((q?.get("hd") ?? undefined) !== hostedDomain) problems.push(`hd hint is ${q?.get("hd") === null ? "missing" : JSON.stringify(q?.get("hd"))}, expected ${hostedDomain === undefined ? "none" : JSON.stringify(hostedDomain)}: GOOGLE_HOSTED_DOMAIN did not reach the Worker`);
     }
     if (problems.length) {
       out.problems.push(`login redirect: ${[...new Set(problems)].join("; ")}`);
       throw new Error("the login redirect is wrong");
     }
-    d.log(`login redirect checked: Google, client ${CLIENT_ID}, callback ${EXPECTED_REDIRECT}, PKCE S256, state and nonce`);
+    d.log(`login redirect checked: Google, client ${CLIENT_ID}, callback ${EXPECTED_REDIRECT}, PKCE S256, state and nonce${hostedDomain ? `, hd hint ${hostedDomain}` : ""}`);
 
     const url = `${origin}/auth/google/login`;
-    d.log(`\nopen this URL and click through Google's consent once:\n  ${url}`);
+    const who = mode === "positive" ? `an account of ${hostedDomain}` : mode === "negative" ? `an account that is NOT of ${hostedDomain} (for example a personal gmail.com account)` : "your account";
+    d.log(`\nsign in with ${who}; open this URL and click through Google's consent once:\n  ${url}`);
     if (open) d.open(url);
 
     for (const end = d.now() + waitMs; ; await d.sleep(2000)) {
@@ -126,8 +180,10 @@ export async function run({ open = true, waitMs = 10 * 60_000, hostedDomain, dep
       }
       if (d.now() > end) throw new Error("no sign-in was completed in time");
     }
-    out.passed = out.result.ok === true;
-    d.log(out.passed ? `PASS ${JSON.stringify(redacted(out.result))}` : `REFUSED ${JSON.stringify(redacted(out.result))}`);
+    const v = judge(out.result, mode, hostedDomain);
+    out.verdict = v.text;
+    out.passed = v.met;
+    d.log(`${v.text}\n  ${JSON.stringify(redacted(out.result))}`);
   } catch (err) {
     out.problems.push(err.message);
     d.log(`FAILED: ${err.message}`);
@@ -167,12 +223,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     removeConfig(NAME);
     console.log(`remaining parley-test-* workers: ${JSON.stringify(remaining())}`);
   } else {
-    const i = argv.indexOf("--wait-minutes");
-    const res = await run({
-      open: !argv.includes("--no-open"),
-      waitMs: (i >= 0 ? Number(argv[i + 1]) : 10) * 60_000,
-      hostedDomain: process.env.GOOGLE_HOSTED_DOMAIN,
-    });
+    let opts;
+    try {
+      opts = parseArgs(argv, process.env);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(2);
+    }
+    const res = await run(opts);
     process.exit(res.passed && res.problems.length === 0 ? 0 : 1);
   }
 }
