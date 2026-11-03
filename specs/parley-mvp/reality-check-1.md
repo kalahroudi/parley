@@ -1,6 +1,6 @@
 # Reality check 1 (T109)
 
-**Status.** Cloudflare half: measured on 2026-11-02 and 2026-11-03. Limits, hibernation timing and costs are measured, and the 10k soak with the fixed harness ran once on a fresh Worker and **lost and duplicated nothing** (details under "Second soak: result"). The first soak run was not valid. One earlier claim about deploys re-instantiating the object was wrong and is corrected below. Real Google and Entra logins: **pending the user**, runbook at the end.
+**Status.** Cloudflare half: measured on 2026-11-02 and 2026-11-03. Limits, hibernation timing and costs are measured, and the 10k soak with the fixed harness ran once on a fresh Worker and **lost and duplicated nothing** (details under "Second soak: result"). The first soak run was not valid. One earlier claim about deploys re-instantiating the object was wrong and is corrected below. Real logins: **Google PASSED on 2026-11-03 with a personal gmail.com account**, which did not exercise the Workspace hosted-domain (`hd`) path; **Entra is pending a client id**.
 
 Versions: wrangler 4.156.1, `cf` 0.15.0, Go 1.27.3, Node 26.11.1, Worker compatibility date 2026-10-01. Raw data: [reality-check-1-data.json](reality-check-1-data.json) (timings and counters only). Worker `parley-test-r1-6d0c01`, deleted at the end; `cf workers scripts search --name parley-test-` on the pinned account returned `[]` afterwards, and again after the later local-only work.
 
@@ -182,7 +182,7 @@ A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage 
 
 ## Real logins (pending the user)
 
-**Google: pending user: add redirect URI + set secret + one consent click.** **Entra: pending user: needs client id.** Everything else is built and was exercised against Cloudflare with a throwaway fake secret (see "What was already proven" below).
+**Google: PASSED on 2026-11-03 (personal gmail.com account); the Workspace hosted-domain (`hd`) path is not covered.** **Entra: pending user: needs client id.** The Google run is recorded under "Result of the user's run" below.
 
 ### Google (the OAuth client created for this check)
 
@@ -228,6 +228,21 @@ Expected results:
 | Consent denied (click Cancel) | any | `REFUSED ... idp_denied` |
 | Account not a test user (Testing mode) | any | Google's own "Access blocked" page; no result arrives and the script times out and cleans up |
 
+**Result of the user's run (2026-11-03, account `b891d462...`, the new client).** The user ran `node tests/reality/logins/google.mjs` with a personal Google account and it passed. As reported by the user's run, not re-run by me:
+
+- First check: the login redirect went to Google and named exactly the client id above and exactly the callback `https://parley-test-login.hello-891.workers.dev/auth/google/callback`, with PKCE S256, a state and a nonce.
+- Sign-in and one consent click, then: `PASS {"ok":true,"status":200,"provider":"google","issuer":"https://accounts.google.com","emailDomain":"gmail.com","personalAccount":true,"hasSub":true,"hostedDomainChecked":false}`.
+- Cleanup: the Worker was deleted and the listing reported `remaining parley-test-* workers: []`. (My own listing at the end of this task agrees, see the final state below.)
+
+What this establishes: against real Google and a real Worker on Cloudflare, the gateway's OIDC code completed the authorization-code flow with PKCE for the registered client and callback, and its id-token checks (signature, issuer, audience, nonce, expiry, state) all passed on a real token, with the client secret set through wrangler's prompt and never seen by any script or chat. The identity came back with the Google issuer and an email on `gmail.com`; nothing beyond the domain is recorded here.
+
+**What it did not cover:**
+
+- **Workspace hosted-domain (`hd`) enforcement.** The run used a personal account with `GOOGLE_HOSTED_DOMAIN` unset (`hostedDomainChecked: false`), so the code path that requires the `hd` claim to equal the configured domain, and the refusal of a personal account when a domain is configured, were **not exercised against real Google**. They remain covered only by the mock-IdP tests. Still to do: a run with a real Workspace account and `GOOGLE_HOSTED_DOMAIN=<their domain>` (expect `PASS`, `hostedDomainChecked: true`), and the same personal account with a domain configured (expect `REFUSED ... tenant_mismatch`).
+- The other Google cases in the table: consent denied (`idp_denied`), and an account that is not a test user while the app is in Testing (Google's own "Access blocked").
+- **Microsoft Entra:** nothing was run; it is pending a client id.
+- Only one sign-in was run, so token expiry and `email_verified: false` behavior were not seen on a real token.
+
 **What was already proven (2026-11-03, with a fake secret).** The full pipeline ran on Cloudflare with a junk value as the secret: deploy, the printed secret command run verbatim, the secret detected, the redirect check against Google's real authorize URL (client id, callback, PKCE S256, state, nonce all correct), a bogus callback instead of a browser (refused as `bad_flow`, recorded as a redacted summary), then delete and a final listing of `[]`. It was run again with the new client id and the exact-match check passed against Google's live authorize URL. What remains unproven is only what needs you: Google accepting the redirect URI and the real consent.
 
 ### Microsoft Entra
@@ -257,8 +272,9 @@ When done, record in the table below which cases passed, without emails or subje
 
 | Case | Date | Result |
 |---|---|---|
-| Google, personal | | pending user: add redirect URI + set secret + one consent click |
-| Google, Workspace (with `GOOGLE_HOSTED_DOMAIN`) | | pending user: same steps, plus a Workspace account |
+| Google, personal (gmail.com) | 2026-11-03 | **PASS** (`personalAccount: true`, `hostedDomainChecked: false`); personal account, no domain configured |
+| Google, Workspace (with `GOOGLE_HOSTED_DOMAIN`) | | not run: needs a real Workspace account; the `hd` enforcement path is unexercised on real Google |
+| Google, personal with a domain configured | | not run (expect `REFUSED ... tenant_mismatch`) |
 | Entra, member | | pending user: needs client id |
 | Entra, guest | | pending user: needs client id |
 | Entra, other tenant | | pending user: needs client id |
