@@ -30,7 +30,7 @@ import (
 //	PARLEY_REALITY_DEPLOY_CMD  JSON array: the command that runs one real `wrangler deploy`;
 //	                           it gets a build id as its last argument and the environment
 //	PARLEY_REALITY_OUT         file the JSON result is written to
-//	PARLEY_REALITY_FRAME_INTERVAL_MS  pause between queued frames (default 10, about 100/s)
+//	PARLEY_REALITY_FRAME_INTERVAL_MS  pause between queued frames (default 20, about 50/s)
 //
 // Control points are spread over the run: PARLEY_REALITY_DEPLOYS real deploys and
 // the rest server-side closes (code 1012), PARLEY_REALITY_FORCED in all. Nothing
@@ -47,7 +47,7 @@ func TestRealSoak(t *testing.T) {
 	if tenant == "" || probe == "" || len(deployCmd) == 0 || deploys > forced {
 		t.Fatal("PARLEY_REALITY_TENANT, _PROBE_TOKEN and _DEPLOY_CMD are required, and deploys cannot exceed forced")
 	}
-	pace := time.Duration(envInt("PARLEY_REALITY_FRAME_INTERVAL_MS", 10)) * time.Millisecond
+	pace := time.Duration(envInt("PARLEY_REALITY_FRAME_INTERVAL_MS", 20)) * time.Millisecond
 	httpBase := strings.NewReplacer("wss://", "https://", "ws://", "http://").Replace(strings.TrimSuffix(wsURL, "/v1/connect"))
 	const device = "soak"
 	t0 := time.Now()
@@ -94,6 +94,7 @@ func TestRealSoak(t *testing.T) {
 		unackedAtResume []int
 	)
 	var c *Client
+	var deaf atomic.Bool // a half-open link: set before a close, cleared by the next welcome
 	c = New(Config{
 		URL: wsURL, Token: "dev:" + tenant + ":" + device, MinBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second,
 		OnState: func(up bool) {
@@ -106,9 +107,11 @@ func TestRealSoak(t *testing.T) {
 				c.mu.Lock()
 				unackedAtResume = append(unackedAtResume, len(c.outbox))
 				c.mu.Unlock()
+				deaf.Store(false)
 			}
 		},
 	})
+	c.deaf = deaf.Load
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 	done := make(chan error, 1)
@@ -133,7 +136,7 @@ func TestRealSoak(t *testing.T) {
 				return
 			}
 			sent.Add(1)
-			// About 100 frames/s: slow enough that the transfer spans every control point.
+			// About 50 frames/s: slow enough that the transfer spans every control point.
 			time.Sleep(pace)
 		}
 	}()
@@ -161,6 +164,10 @@ func TestRealSoak(t *testing.T) {
 		sentOn          = map[int]int64{}
 		retriedBodies   = map[string]bool{}
 		pushDone        = make(chan struct{})
+		// Before a close the client is made deaf and the peer pushes a few events into the
+		// half-open link: the gateway reports them delivered, the client never hears them,
+		// which is how events get lost in flight. The pusher replies when the burst is sent.
+		burstReq = make(chan chan struct{}, 1)
 	)
 	go func() {
 		defer close(pushDone)
@@ -177,15 +184,31 @@ func TestRealSoak(t *testing.T) {
 				}
 			}
 			retried += len(batch)
+			burst := false
+			var burstDone chan struct{}
+			select {
+			case burstDone = <-burstReq:
+				burst = true
+			default:
+			}
+			if burst {
+				for k := 0; k < 10 && next < total; k++ {
+					batch = append(batch, next)
+					next++
+				}
+			}
 			// Events follow the frames, so they are also in flight when a connection drops.
 			// They go in batches of 100: one request per batch keeps the run's cost small.
-			if a := acked(); a-int64(next) >= 100 || a >= int64(total) {
+			if a := acked(); !burst && (a-int64(next) >= 100 || a >= int64(total)) {
 				for len(batch) < 100 && next < total && int64(next) < a {
 					batch = append(batch, next)
 					next++
 				}
 			}
 			if len(batch) == 0 {
+				if burstDone != nil {
+					close(burstDone)
+				}
 				if next < total {
 					time.Sleep(20 * time.Millisecond)
 					continue
@@ -224,6 +247,9 @@ func TestRealSoak(t *testing.T) {
 					next--
 				}
 			}
+			if burstDone != nil {
+				close(burstDone)
+			}
 			if delivered < len(batch) {
 				time.Sleep(300 * time.Millisecond)
 			}
@@ -239,6 +265,18 @@ func TestRealSoak(t *testing.T) {
 		Err     string `json:"err,omitempty"`
 		Closed  any    `json:"closed,omitempty"`
 		Dropped bool   `json:"dropped_a_connection"`
+		// Deploys: the Durable Object's boot id before and after, read while it is busy
+		// (so the read itself does not construct it). A change means the object was
+		// re-instantiated, whether or not the socket dropped.
+		Reinstantiated bool `json:"reinstantiated,omitempty"`
+	}
+	boot := func() string {
+		m, err := post("/__counters", map[string]any{"tenant": tenant, "device": device})
+		if err != nil {
+			return ""
+		}
+		b, _ := m["boot"].(string)
+		return b
 	}
 	var actions []action
 	deployAt := map[int]bool{}
@@ -253,22 +291,34 @@ func TestRealSoak(t *testing.T) {
 		a := action{AtMs: rel(), AtSent: acked()}
 		if deployAt[i] {
 			a.Kind = "deploy"
+			bootBefore := boot()
 			cmd := exec.CommandContext(ctx, deployCmd[0], append(deployCmd[1:], "build-"+strconv.Itoa(i))...)
 			if err := cmd.Run(); err != nil {
 				a.Err = err.Error()
 				t.Errorf("deploy %d failed: %v", i, err)
 			}
 			a.EndMs = rel()
+			time.Sleep(3 * time.Second)
+			bootAfter := boot()
+			a.Reinstantiated = bootBefore != "" && bootAfter != "" && bootBefore != bootAfter
 		} else {
 			a.Kind = "close-1012"
+			deaf.Store(true)
+			bd := make(chan struct{})
+			burstReq <- bd
+			select {
+			case <-bd:
+			case <-time.After(20 * time.Second):
+			}
+			time.Sleep(200 * time.Millisecond) // the events are in the void before the link goes
 			m, _ := post("/__drop", map[string]any{"tenant": tenant, "device": device, "code": 1012})
 			a.Closed = m["closed"]
 		}
 		// A close must produce its own reconnect before the next control point. A deploy
-		// may not (that is a finding, not a failure), so it is given 20 s instead of 60 s.
+		// may not (that is a finding, not a failure), so it is given 8 s instead of 60 s.
 		wait := 600
 		if a.Kind == "deploy" {
-			wait = 200
+			wait = 80
 		}
 		for k := 0; k < wait; k++ {
 			if ep, _ := getEpoch(); ep > before {
@@ -355,8 +405,11 @@ settled:
 	// Real deploys are not forced disconnects unless the connection actually dropped
 	// (the measured result is that they do not, see reality-check-1.md), so only
 	// the server-side closes are required to have produced reconnects.
-	closes, closeReconnects, deployReconnects := 0, 0, 0
+	closes, closeReconnects, deployReconnects, deploysObserved := 0, 0, 0, 0
 	for _, a := range actions {
+		if a.Kind == "deploy" && (a.Dropped || a.Reinstantiated) {
+			deploysObserved++
+		}
 		switch {
 		case a.Kind == "deploy" && a.Dropped:
 			deployReconnects++
@@ -368,6 +421,7 @@ settled:
 		}
 	}
 	res["close_actions"], res["close_actions_that_reconnected"], res["deploys_that_dropped_the_connection"] = closes, closeReconnects, deployReconnects
+	res["deploys_with_an_observed_effect"] = deploysObserved
 	if closeReconnects != closes || connects < closes+1 {
 		t.Fatalf("%d server closes, %d reconnected, %d connections", closes, closeReconnects, connects)
 	}
@@ -378,6 +432,12 @@ settled:
 	}
 	if resumed == 0 {
 		t.Fatal("no frame was unacknowledged at any reconnect: the soak did not exercise recovery")
+	}
+	if retried == 0 {
+		t.Fatal("no event was lost and retried: the sender's retry path was not exercised")
+	}
+	if deploysObserved != deploys {
+		t.Fatalf("%d of %d deploys had no observable effect (no disconnect, no re-instantiation)", deploys-deploysObserved, deploys)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -506,5 +507,49 @@ func TestWelcomeWithoutHeartbeatUsesDefault(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event")
+	}
+}
+
+// A half-open link: the gateway keeps sending, the client hears nothing (the seam used by
+// the real-Worker soak). Events sent into it are lost and acknowledgements never arrive;
+// once the link is heard again, later events are delivered.
+func TestDeafLinkDiscardsGatewayMessages(t *testing.T) {
+	g := newFakeGateway(t)
+	var deaf atomic.Bool
+	c := New(Config{URL: g.url(), Token: "tok", MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond, HeartbeatTimeout: time.Second})
+	c.deaf = deaf.Load
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitFor(t, "connection", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.conns) > 0 })
+
+	deaf.Store(true)
+	g.push(1, "lost")
+	if err := c.Send("unheard-ack"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "frame reached the gateway", func() bool { return len(g.received()) == 1 })
+	select {
+	case e := <-c.Events():
+		t.Fatalf("a deaf client delivered %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+	c.mu.Lock()
+	unacked := len(c.outbox)
+	c.mu.Unlock()
+	if unacked != 1 {
+		t.Fatalf("outbox = %d, want 1: the ack was heard", unacked)
+	}
+
+	deaf.Store(false)
+	g.push(2, "heard")
+	select {
+	case e := <-c.Events():
+		if e.Body != "heard" {
+			t.Fatalf("got %+v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("event not delivered after the link was heard again")
 	}
 }

@@ -67,7 +67,8 @@ type outFrame struct {
 type Client struct {
 	cfg           Config
 	events        chan Event
-	beforeDeliver func() // test seam: called before an event is handed to Events
+	beforeDeliver func()      // test seam: called before an event is handed to Events
+	deaf          func() bool // test seam: while it returns true, gateway messages are discarded unread (a half-open link)
 	wake          chan struct{}
 
 	mu      sync.Mutex
@@ -320,6 +321,9 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idle time.D
 			return err
 		}
 		if typ != websocket.MessageText || string(data) == "pong" {
+			continue
+		}
+		if c.deaf != nil && c.deaf() {
 			continue
 		}
 		var m serverMsg
