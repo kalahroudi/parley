@@ -229,6 +229,33 @@ describe("lifecycle over the transport", () => {
     expect(t.result.task.metadata.parley.reason).toBe("disconnected");
   });
 
+  it("a reply the target never received fails the task instead of leaving it waiting", async () => {
+    const w = world();
+    await connect(w.T, "alice");
+    const bob = await connect(w.T, "bob");
+    await w.task("tk");
+    await w.rpc("bob", "SendMessage", w.msg("tk", "ROLE_AGENT", "INPUT_REQUIRED", { seq: 1 }));
+    bob.ws.close(1000, "bye");
+    for (let i = 0; i < 100; i++) {
+      if (!(await (env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:bob`)) as any).status()).connected) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(errCode(await w.rpc("alice", "SendMessage", w.msg("tk", "ROLE_USER", "REPLY", { seq: 1 })))).toBe(-32010);
+    expect(await w.state("tk")).toBe("TASK_STATE_FAILED");
+  });
+
+  it("treats prototype property names as unknown kinds", async () => {
+    const w = world();
+    await connect(w.T, "alice");
+    await connect(w.T, "bob");
+    await w.task("tk");
+    for (const [dev, role] of [["bob", "ROLE_AGENT"], ["alice", "ROLE_USER"]]) {
+      for (const k of ["constructor", "toString", "__proto__"]) {
+        expect(errCode(await w.rpc(dev, "SendMessage", w.msg("tk", role, k, { seq: 1 }))), k).toBe(-32602);
+      }
+    }
+  });
+
   it("refuses out-of-order, replayed, wrong-side and late messages", async () => {
     const w = world();
     await connect(w.T, "alice");

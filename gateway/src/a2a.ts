@@ -229,7 +229,8 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
   const found = await stub.get(who.tenant);
   if (!found || (found.caller !== who.device && found.target !== who.device)) return fail(rid, ERR.notFound);
   const fromCaller = found.caller === who.device;
-  const event = (fromCaller ? CALLER_KINDS : TARGET_KINDS)[kind];
+  const kinds = fromCaller ? CALLER_KINDS : TARGET_KINDS;
+  const event = Object.hasOwn(kinds, kind) ? kinds[kind] : undefined; // not the prototype's "constructor" and the like
   if (!event || event === "TASK" || m.role !== (fromCaller ? "ROLE_USER" : "ROLE_AGENT") || meta.to !== undefined || !isSeq(meta.seq)) return fail(rid, ERR.params);
 
   const rec = await stub.apply(who.tenant, who.device, event, meta.seq);
@@ -239,7 +240,8 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
   if (d.status === "delivered") return ok(rid, { task: view(rec) });
   // Results and status are relayed only while the caller is connected (Strict).
   // The retention modes (T304) add the Queued behavior.
-  if (!fromCaller) await stub.callerDisconnected(who.tenant, rec.caller);
+  // A reply the target never saw leaves the task waiting on an answer nobody can act on: close it.
+  await stub.callerDisconnected(who.tenant, fromCaller ? who.device : rec.caller);
   return fail(rid, d.status === "offline" ? ERR.offline : ERR.tooLarge);
 }
 
