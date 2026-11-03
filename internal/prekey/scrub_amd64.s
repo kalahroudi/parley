@@ -26,6 +26,36 @@ no:
 	MOVB $0, ret+0(FP)
 	RET
 
+// func hasAVX512() bool
+// AVX-512F (CPUID.7.0:EBX bit 16), and the OS saves the opmask, ZMM_Hi256 and
+// Hi16_ZMM state (XCR0 bits 5-7) as well as XMM and YMM (bits 1-2). Leaf 7 must
+// exist, and XGETBV is only legal once OSXSAVE is set.
+TEXT ·hasAVX512(SB), NOSPLIT, $0-1
+	XORL AX, AX
+	CPUID
+	CMPL AX, $7
+	JB   no512
+	MOVL $1, AX
+	XORL CX, CX
+	CPUID
+	BTL  $27, CX
+	JCC  no512
+	XORL CX, CX
+	XGETBV
+	ANDL $0xE6, AX
+	CMPL AX, $0xE6
+	JNE  no512
+	MOVL $7, AX
+	XORL CX, CX
+	CPUID
+	BTL  $16, BX
+	JCC  no512
+	MOVB $1, ret+0(FP)
+	RET
+no512:
+	MOVB $0, ret+0(FP)
+	RET
+
 // func scrubSSE()
 // Zeroes the low 128 bits of X0-X15. A 32-byte copy of a scalar (memmove,
 // SHA-256, ChaCha) leaves it in these registers, and a signal delivered later
@@ -51,8 +81,63 @@ TEXT ·scrubSSE(SB), NOSPLIT, $0-0
 
 // func scrubAVX()
 // Zeroes all of Y0-Y15 (VZEROALL), including the upper halves SSE code leaves alone.
+// It does nothing without AVX, so the Go caller needs no branch of its own (a
+// branch on the CPU would make statement coverage depend on the runner).
 TEXT ·scrubAVX(SB), NOSPLIT, $0-0
+	CMPB ·haveAVX(SB), $0
+	JEQ  noavx
 	VZEROALL
+noavx:
+	RET
+
+// func scrubAVX512()
+// Zeroes Z0-Z31 (Z16-Z31 and the bits above 255 of Z0-Z15 are beyond VZEROALL
+// on some readings of the manual, so they are cleared explicitly) and the mask
+// registers K0-K7. Does nothing without AVX-512F.
+TEXT ·scrubAVX512(SB), NOSPLIT, $0-0
+	CMPB ·haveAVX512(SB), $0
+	JEQ  no512
+	VPXORQ Z0, Z0, Z0
+	VPXORQ Z1, Z1, Z1
+	VPXORQ Z2, Z2, Z2
+	VPXORQ Z3, Z3, Z3
+	VPXORQ Z4, Z4, Z4
+	VPXORQ Z5, Z5, Z5
+	VPXORQ Z6, Z6, Z6
+	VPXORQ Z7, Z7, Z7
+	VPXORQ Z8, Z8, Z8
+	VPXORQ Z9, Z9, Z9
+	VPXORQ Z10, Z10, Z10
+	VPXORQ Z11, Z11, Z11
+	VPXORQ Z12, Z12, Z12
+	VPXORQ Z13, Z13, Z13
+	VPXORQ Z14, Z14, Z14
+	VPXORQ Z15, Z15, Z15
+	VPXORQ Z16, Z16, Z16
+	VPXORQ Z17, Z17, Z17
+	VPXORQ Z18, Z18, Z18
+	VPXORQ Z19, Z19, Z19
+	VPXORQ Z20, Z20, Z20
+	VPXORQ Z21, Z21, Z21
+	VPXORQ Z22, Z22, Z22
+	VPXORQ Z23, Z23, Z23
+	VPXORQ Z24, Z24, Z24
+	VPXORQ Z25, Z25, Z25
+	VPXORQ Z26, Z26, Z26
+	VPXORQ Z27, Z27, Z27
+	VPXORQ Z28, Z28, Z28
+	VPXORQ Z29, Z29, Z29
+	VPXORQ Z30, Z30, Z30
+	VPXORQ Z31, Z31, Z31
+	KXORW K0, K0, K0
+	KXORW K1, K1, K1
+	KXORW K2, K2, K2
+	KXORW K3, K3, K3
+	KXORW K4, K4, K4
+	KXORW K5, K5, K5
+	KXORW K6, K6, K6
+	KXORW K7, K7, K7
+no512:
 	RET
 
 // func scrubProbe(out *[512]byte, avx bool)
@@ -156,4 +241,104 @@ scrubbed:
 	VEXTRACTF128 $1, Y15, X0
 	MOVOU X0, 496(DI)
 done:
+	RET
+
+// func scrubProbe512(out *[2112]byte)
+// Test helper (needs AVX-512F): fills Z0-Z31 and K0-K7 with 0xAA, runs the
+// three scrub routines in the order scrubVectorRegisters does, and stores
+// Z0-Z31 (64 bytes each) then K0-K7 (8 bytes each) to out.
+TEXT ·scrubProbe512(SB), NOSPLIT, $8-8
+	MOVQ out+0(FP), DI
+	MOVL $0xAAAAAAAA, AX
+	VPBROADCASTD AX, Z0
+	VMOVDQA64 Z0, Z1
+	VMOVDQA64 Z0, Z2
+	VMOVDQA64 Z0, Z3
+	VMOVDQA64 Z0, Z4
+	VMOVDQA64 Z0, Z5
+	VMOVDQA64 Z0, Z6
+	VMOVDQA64 Z0, Z7
+	VMOVDQA64 Z0, Z8
+	VMOVDQA64 Z0, Z9
+	VMOVDQA64 Z0, Z10
+	VMOVDQA64 Z0, Z11
+	VMOVDQA64 Z0, Z12
+	VMOVDQA64 Z0, Z13
+	VMOVDQA64 Z0, Z14
+	VMOVDQA64 Z0, Z15
+	VMOVDQA64 Z0, Z16
+	VMOVDQA64 Z0, Z17
+	VMOVDQA64 Z0, Z18
+	VMOVDQA64 Z0, Z19
+	VMOVDQA64 Z0, Z20
+	VMOVDQA64 Z0, Z21
+	VMOVDQA64 Z0, Z22
+	VMOVDQA64 Z0, Z23
+	VMOVDQA64 Z0, Z24
+	VMOVDQA64 Z0, Z25
+	VMOVDQA64 Z0, Z26
+	VMOVDQA64 Z0, Z27
+	VMOVDQA64 Z0, Z28
+	VMOVDQA64 Z0, Z29
+	VMOVDQA64 Z0, Z30
+	VMOVDQA64 Z0, Z31
+	KMOVW AX, K0
+	KMOVW AX, K1
+	KMOVW AX, K2
+	KMOVW AX, K3
+	KMOVW AX, K4
+	KMOVW AX, K5
+	KMOVW AX, K6
+	KMOVW AX, K7
+	CALL ·scrubSSE(SB)
+	CALL ·scrubAVX(SB)
+	CALL ·scrubAVX512(SB)
+	VMOVDQU64 Z0, 0(DI)
+	VMOVDQU64 Z1, 64(DI)
+	VMOVDQU64 Z2, 128(DI)
+	VMOVDQU64 Z3, 192(DI)
+	VMOVDQU64 Z4, 256(DI)
+	VMOVDQU64 Z5, 320(DI)
+	VMOVDQU64 Z6, 384(DI)
+	VMOVDQU64 Z7, 448(DI)
+	VMOVDQU64 Z8, 512(DI)
+	VMOVDQU64 Z9, 576(DI)
+	VMOVDQU64 Z10, 640(DI)
+	VMOVDQU64 Z11, 704(DI)
+	VMOVDQU64 Z12, 768(DI)
+	VMOVDQU64 Z13, 832(DI)
+	VMOVDQU64 Z14, 896(DI)
+	VMOVDQU64 Z15, 960(DI)
+	VMOVDQU64 Z16, 1024(DI)
+	VMOVDQU64 Z17, 1088(DI)
+	VMOVDQU64 Z18, 1152(DI)
+	VMOVDQU64 Z19, 1216(DI)
+	VMOVDQU64 Z20, 1280(DI)
+	VMOVDQU64 Z21, 1344(DI)
+	VMOVDQU64 Z22, 1408(DI)
+	VMOVDQU64 Z23, 1472(DI)
+	VMOVDQU64 Z24, 1536(DI)
+	VMOVDQU64 Z25, 1600(DI)
+	VMOVDQU64 Z26, 1664(DI)
+	VMOVDQU64 Z27, 1728(DI)
+	VMOVDQU64 Z28, 1792(DI)
+	VMOVDQU64 Z29, 1856(DI)
+	VMOVDQU64 Z30, 1920(DI)
+	VMOVDQU64 Z31, 1984(DI)
+	KMOVW K0, AX
+	MOVQ AX, 2048(DI)
+	KMOVW K1, AX
+	MOVQ AX, 2056(DI)
+	KMOVW K2, AX
+	MOVQ AX, 2064(DI)
+	KMOVW K3, AX
+	MOVQ AX, 2072(DI)
+	KMOVW K4, AX
+	MOVQ AX, 2080(DI)
+	KMOVW K5, AX
+	MOVQ AX, 2088(DI)
+	KMOVW K6, AX
+	MOVQ AX, 2096(DI)
+	KMOVW K7, AX
+	MOVQ AX, 2104(DI)
 	RET

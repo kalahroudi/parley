@@ -31,18 +31,24 @@
 // garbage collection. What the package does about it, per platform:
 //
 //   - Linux: Issue and With run on a locked thread with asynchronous signals
-//     blocked, clear the vector registers, and only then unblock, so no signal
-//     can snapshot them while the key is in them. Measured on amd64 CI: the
-//     address-space scan went from 91 failures in 200 runs to none in 100.
+//     blocked (all but SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP and SIGSYS, which
+//     the kernel raises for a fault of the thread itself), clear the vector
+//     registers, and only then unblock, so no asynchronous signal can snapshot
+//     them while the key is in them. Signals stay blocked for one Issue (tens of
+//     microseconds) or one With callback. Measured on amd64 CI with the address-
+//     space scan: 32 and 17 failures in 100 runs without the change, none in 100
+//     with it.
 //   - macOS and Windows: signals are not blocked, so the window stays open: a
 //     signal landing inside the operation can leave a copy of the scalar in a
 //     signal stack.
-//   - Vector registers are cleared after each use on amd64 and arm64 (all
-//     platforms); on other architectures nothing is cleared.
+//   - The vector registers are cleared on amd64 (XMM, YMM, and with AVX-512 ZMM
+//     and the mask registers) and arm64 (V0-V31), on every OS. On other
+//     architectures nothing is cleared, so there (even on Linux) a signal held
+//     back by the block can still find the key in a register when it is delivered.
 //
 // General-purpose registers and stack spills are not cleared on any platform;
-// Go offers no way to do so. Errors and logs
-// never carry key material: every error is a fixed sentinel.
+// Go offers no way to do so. Errors and logs never carry key material: every
+// error is a fixed sentinel.
 package prekey
 
 import (

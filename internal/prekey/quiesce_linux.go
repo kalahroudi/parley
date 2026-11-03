@@ -31,13 +31,22 @@ const (
 // cleared the registers). The runtime copes with a delayed preemption: it
 // waits for the next safe point. The operation must therefore be short.
 //
-// Synchronous faults (SIGSEGV, SIGBUS, SIGFPE, SIGILL) cannot be blocked and
-// are not affected. restore must run on the same goroutine.
+// Synchronous signals (see syncSignals) are left unblocked: the kernel raises
+// them for a fault of this very thread, and a blocked one would kill the process
+// instead of reaching the Go runtime's handler (a nil dereference in the
+// callback must still become a panic). Only this thread's mask changes
+// (rt_sigprocmask is per thread). Signals sent to the process meanwhile are
+// delivered to another thread; only those aimed at this thread wait.
+//
+// The time signals stay blocked is bounded by the operation: one Issue (about
+// 50 microseconds, two X25519 and Ed25519 operations) or one With callback,
+// which must be short and must not block. restore must run on the same
+// goroutine.
 func quiesce() (restore func()) {
 	runtime.LockOSThread()
 	// All signals except the synchronous ones; bit n-1 is signal n.
 	set := ^uint64(0)
-	for _, s := range []syscall.Signal{syscall.SIGSEGV, syscall.SIGBUS, syscall.SIGFPE, syscall.SIGILL} {
+	for _, s := range syncSignals {
 		set &^= 1 << (s - 1)
 	}
 	var old uint64
@@ -50,6 +59,10 @@ func quiesce() (restore func()) {
 		runtime.UnlockOSThread()
 	}
 }
+
+// syncSignals are the signals the kernel raises for a fault or trap of the
+// running thread itself; they are never blocked.
+var syncSignals = []syscall.Signal{syscall.SIGSEGV, syscall.SIGBUS, syscall.SIGFPE, syscall.SIGILL, syscall.SIGTRAP, syscall.SIGSYS}
 
 // sigprocmask is rt_sigprocmask(2) for this thread (0 on success), a seam for tests.
 var sigprocmask = func(how int, set, old *uint64) syscall.Errno {

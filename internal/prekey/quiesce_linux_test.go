@@ -42,7 +42,7 @@ func TestQuiesceBlocksPreemptionSignal(t *testing.T) {
 	if during&urg == 0 {
 		t.Fatalf("SIGURG not blocked inside quiesce: SigBlk=%x", during)
 	}
-	for _, s := range []syscall.Signal{syscall.SIGSEGV, syscall.SIGBUS, syscall.SIGFPE, syscall.SIGILL} {
+	for _, s := range syncSignals {
 		if during&(1<<(s-1)) != 0 {
 			t.Fatalf("synchronous signal %d is blocked", s)
 		}

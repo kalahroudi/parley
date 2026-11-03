@@ -25,3 +25,51 @@ func TestScrubVectorRegistersZeroesThem(t *testing.T) {
 		}
 	}
 }
+
+// With AVX-512, the scrub must also clear Z0-Z31 (whole registers) and K0-K7.
+func TestScrubVectorRegistersZeroesAVX512State(t *testing.T) {
+	if !haveAVX512 {
+		t.Skip("no AVX-512 on this CPU")
+	}
+	var out [2112]byte
+	scrubProbe512(&out)
+	for i, b := range out {
+		if b != 0 {
+			t.Fatalf("byte %d of the AVX-512 state (Z0-Z31, then K0-K7) is %#x after the scrub", i, b)
+		}
+	}
+}
+
+// The scrub routines must not run an instruction the CPU lacks: with the feature
+// flags off they do nothing. Where the CPU does have the feature this is visible,
+// because the poisoned state then survives (a CPU without it cannot be poisoned,
+// and the probe's own AVX instructions are skipped there).
+func TestScrubRoutinesAreGatedOnFeatureFlags(t *testing.T) {
+	origAVX, orig512 := haveAVX, haveAVX512
+	t.Cleanup(func() { haveAVX, haveAVX512 = origAVX, orig512 })
+	if origAVX {
+		haveAVX = false
+		var out [512]byte
+		scrubProbe(&out, true)
+		var upper byte
+		for _, b := range out[256:] {
+			upper |= b
+		}
+		if upper == 0 {
+			t.Fatal("scrubAVX ran although haveAVX is false")
+		}
+	}
+	if orig512 {
+		haveAVX512 = false
+		var out [2112]byte
+		scrubProbe512(&out)
+		var all byte
+		for _, b := range out {
+			all |= b
+		}
+		if all == 0 {
+			t.Fatal("scrubAVX512 ran although haveAVX512 is false")
+		}
+	}
+	scrubVectorRegisters() // with both off it must still be safe to call
+}

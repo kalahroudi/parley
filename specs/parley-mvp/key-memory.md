@@ -59,8 +59,13 @@ preemption signal (SIGURG) is sent at the start of every garbage collection.
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | Signals blocked while the scalar is in use (locked thread) | yes (`quiesce`) | no | no |
-| Vector registers cleared after use | amd64, arm64 | amd64, arm64 | amd64, arm64 |
-| Window for a signal-frame copy | closed for asynchronous signals | open | open (Windows has no signal frames, but exception and crash paths are as above) |
+| Vector registers cleared after use (amd64: XMM, YMM and, where present, ZMM and mask registers; arm64: V0-V31) | amd64, arm64 | amd64, arm64 | amd64, arm64 |
+| Window for a signal-frame copy | closed for asynchronous signals on amd64 and arm64; on other Linux architectures a held-back signal can still find the key in a register | open | open (Windows has no signal frames, but exception and crash paths are as above) |
+
+Signals stay blocked for one `Issue` (tens of microseconds) or one `With` callback;
+synchronous fault signals (SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS) are
+never blocked. A signal held back is delivered when the mask is restored, after
+the vector registers were cleared, but general-purpose registers are not.
 
 Not covered anywhere: general-purpose registers and stack spills; code outside
 `Pool.With` and `Pool.Issue` (reply keys, signing seed); synchronous faults. The
