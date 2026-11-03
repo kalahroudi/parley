@@ -1,0 +1,31 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# One-off proof for the memscan fix: the address-space scan, looped on amd64 Linux.
+# Deleted again before merge.
+name: memscan-proof
+on:
+  push:
+    branches: [fix/memscan-amd64]
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: uname -m
+      - name: scrub test
+        run: go test -race -count=1 -v -run TestScrubVectorRegistersZeroesThem ./internal/prekey
+      - name: loop
+        run: |
+          go test -race -c -o /tmp/acc ./internal/acceptance
+          cd internal/acceptance
+          fail=0
+          for i in $(seq 1 200); do
+            if ! /tmp/acc -test.count=1 -test.run '^TestAddressSpaceHoldsNoErasedKey$' -test.v > /tmp/o.$i 2>&1; then fail=$((fail+1)); echo "=== RUN $i FAILED"; grep -E "hits map|copies|--- FAIL" /tmp/o.$i | tail -8; fi
+          done
+          echo "address-space scan on $(uname -m): $fail failures of 200"
+          [ $fail -eq 0 ]

@@ -1,0 +1,154 @@
+// Copyright 2026 The Parley Authors
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build amd64
+
+#include "textflag.h"
+
+// func hasAVX() bool
+// CPUID.1:ECX has OSXSAVE (27) and AVX (28), and XCR0 enables XMM and YMM state.
+TEXT ·hasAVX(SB), NOSPLIT, $0-1
+	MOVL $1, AX
+	XORL CX, CX
+	CPUID
+	MOVL CX, DX
+	ANDL $0x18000000, DX
+	CMPL DX, $0x18000000
+	JNE  no
+	XORL CX, CX
+	XGETBV
+	ANDL $6, AX
+	CMPL AX, $6
+	JNE  no
+	MOVB $1, ret+0(FP)
+	RET
+no:
+	MOVB $0, ret+0(FP)
+	RET
+
+// func scrubSSE()
+// Zeroes the low 128 bits of X0-X15. A 32-byte copy of a scalar (memmove,
+// SHA-256, ChaCha) leaves it in these registers, and a signal delivered later
+// writes them to the signal stack, which is Go heap memory.
+TEXT ·scrubSSE(SB), NOSPLIT, $0-0
+	PXOR X0, X0
+	PXOR X1, X1
+	PXOR X2, X2
+	PXOR X3, X3
+	PXOR X4, X4
+	PXOR X5, X5
+	PXOR X6, X6
+	PXOR X7, X7
+	PXOR X8, X8
+	PXOR X9, X9
+	PXOR X10, X10
+	PXOR X11, X11
+	PXOR X12, X12
+	PXOR X13, X13
+	PXOR X14, X14
+	PXOR X15, X15
+	RET
+
+// func scrubAVX()
+// Zeroes all of Y0-Y15 (VZEROALL), including the upper halves SSE code leaves alone.
+TEXT ·scrubAVX(SB), NOSPLIT, $0-0
+	VZEROALL
+	RET
+
+// func scrubProbe(out *[512]byte, avx bool)
+// Test helper: fills X0-X15 (and, with AVX, the upper halves of Y0-Y15) with
+// 0xAA, runs scrubVectorRegisters, and stores X0-X15 then the upper halves to out.
+TEXT ·scrubProbe(SB), NOSPLIT, $8-9
+	MOVQ out+0(FP), DI
+	MOVL $0xAAAAAAAA, AX
+	MOVQ AX, X0
+	PSHUFD $0, X0, X0
+	MOVOU X0, X1
+	MOVOU X0, X2
+	MOVOU X0, X3
+	MOVOU X0, X4
+	MOVOU X0, X5
+	MOVOU X0, X6
+	MOVOU X0, X7
+	MOVOU X0, X8
+	MOVOU X0, X9
+	MOVOU X0, X10
+	MOVOU X0, X11
+	MOVOU X0, X12
+	MOVOU X0, X13
+	MOVOU X0, X14
+	MOVOU X0, X15
+	MOVB avx+8(FP), CX
+	TESTB CX, CX
+	JZ   poisoned
+	VINSERTF128 $1, X0, Y0, Y0
+	VINSERTF128 $1, X0, Y1, Y1
+	VINSERTF128 $1, X0, Y2, Y2
+	VINSERTF128 $1, X0, Y3, Y3
+	VINSERTF128 $1, X0, Y4, Y4
+	VINSERTF128 $1, X0, Y5, Y5
+	VINSERTF128 $1, X0, Y6, Y6
+	VINSERTF128 $1, X0, Y7, Y7
+	VINSERTF128 $1, X0, Y8, Y8
+	VINSERTF128 $1, X0, Y9, Y9
+	VINSERTF128 $1, X0, Y10, Y10
+	VINSERTF128 $1, X0, Y11, Y11
+	VINSERTF128 $1, X0, Y12, Y12
+	VINSERTF128 $1, X0, Y13, Y13
+	VINSERTF128 $1, X0, Y14, Y14
+	VINSERTF128 $1, X0, Y15, Y15
+poisoned:
+	CALL ·scrubVectorRegisters(SB)
+	MOVOU X0, 0(DI)
+	MOVOU X1, 16(DI)
+	MOVOU X2, 32(DI)
+	MOVOU X3, 48(DI)
+	MOVOU X4, 64(DI)
+	MOVOU X5, 80(DI)
+	MOVOU X6, 96(DI)
+	MOVOU X7, 112(DI)
+	MOVOU X8, 128(DI)
+	MOVOU X9, 144(DI)
+	MOVOU X10, 160(DI)
+	MOVOU X11, 176(DI)
+	MOVOU X12, 192(DI)
+	MOVOU X13, 208(DI)
+	MOVOU X14, 224(DI)
+	MOVOU X15, 240(DI)
+	MOVB avx+8(FP), CX
+	TESTB CX, CX
+	JZ   done
+	VEXTRACTF128 $1, Y0, X0
+	MOVOU X0, 256(DI)
+	VEXTRACTF128 $1, Y1, X0
+	MOVOU X0, 272(DI)
+	VEXTRACTF128 $1, Y2, X0
+	MOVOU X0, 288(DI)
+	VEXTRACTF128 $1, Y3, X0
+	MOVOU X0, 304(DI)
+	VEXTRACTF128 $1, Y4, X0
+	MOVOU X0, 320(DI)
+	VEXTRACTF128 $1, Y5, X0
+	MOVOU X0, 336(DI)
+	VEXTRACTF128 $1, Y6, X0
+	MOVOU X0, 352(DI)
+	VEXTRACTF128 $1, Y7, X0
+	MOVOU X0, 368(DI)
+	VEXTRACTF128 $1, Y8, X0
+	MOVOU X0, 384(DI)
+	VEXTRACTF128 $1, Y9, X0
+	MOVOU X0, 400(DI)
+	VEXTRACTF128 $1, Y10, X0
+	MOVOU X0, 416(DI)
+	VEXTRACTF128 $1, Y11, X0
+	MOVOU X0, 432(DI)
+	VEXTRACTF128 $1, Y12, X0
+	MOVOU X0, 448(DI)
+	VEXTRACTF128 $1, Y13, X0
+	MOVOU X0, 464(DI)
+	VEXTRACTF128 $1, Y14, X0
+	MOVOU X0, 480(DI)
+	VEXTRACTF128 $1, Y15, X0
+	MOVOU X0, 496(DI)
+done:
+	RET

@@ -20,7 +20,13 @@
 // it derives the public key (once per prekey, in Issue), and a caller that
 // feeds the scalar to crypto/ecdh or an HPKE implementation gets further
 // heap copies there. Those copies are not zeroed and can reach swap or a core
-// dump if Harden was not called or the OS swaps the heap. Errors and logs
+// dump if Harden was not called or the OS swaps the heap. The CPU's vector
+// registers are cleared after each use of the scalar (Issue, With, release),
+// because a 32-byte copy leaves it in X0/X1 and any signal delivered later (the
+// runtime sends SIGURG around every garbage collection) writes those registers
+// onto a signal stack in the Go heap. A signal that lands during the operation
+// itself can still save the key there, and the general-purpose registers and
+// stack spills are not cleared: Go offers no way to prevent either. Errors and logs
 // never carry key material: every error is a fixed sentinel.
 package prekey
 
@@ -285,6 +291,7 @@ func (p *Pool) pruneSpent(now time.Time) {
 // until it would have expired. Caller holds mu.
 func (p *Pool) release(id [idSize]byte, s slot, now time.Time) {
 	clear(p.scalar(s.index)[:])
+	scrubVectorRegisters() // clear itself moves the bytes through them
 	p.free = append(p.free, s.index)
 	delete(p.live, id)
 	if !now.Before(s.expires) {
@@ -339,6 +346,9 @@ func (p *Pool) Issue(req Request) (*Signed, error) {
 	}
 	i := p.free[len(p.free)-1]
 	sc := p.scalar(i)
+	// The random bytes and the public-key derivation pass the scalar through
+	// the vector registers.
+	defer scrubVectorRegisters()
 	// Whatever way this returns or panics before the key is committed, the
 	// slot is wiped.
 	committed := false
@@ -392,6 +402,9 @@ func (p *Pool) With(id [idSize]byte, fn func(scalar *[scalarSize]byte) error) er
 	}
 	returned := false
 	defer func() {
+		// Whatever fn did with the scalar (hash it, copy it, open with it), the
+		// copy may still sit in the vector registers; see scrubVectorRegisters.
+		scrubVectorRegisters()
 		if !returned {
 			p.release(id, s, now)
 		}
