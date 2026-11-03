@@ -4,6 +4,16 @@
 
 Versions: wrangler 4.156.1, `cf` 0.15.0, Go 1.27.3, Node 26.11.1, Worker compatibility date 2026-10-01. Raw data: [reality-check-1-data.json](reality-check-1-data.json) (timings and counters only). Worker `parley-test-r1-6d0c01`, deleted at the end; `cf workers scripts search --name parley-test-` on the pinned account returned `[]` afterwards, and again after the later local-only work.
 
+## Remaining for T109
+
+T109 is **not** fully done. The Cloudflare half is done (limits, costs, hibernation timing, deploy behavior, and the 10k soak with the real client; see Results). What remains is the login work, which the user will revisit later:
+
+1. **Entra real login: needs a client id** (and tenant id) from the user. The runbook and the loopback script are ready; see "Microsoft Entra".
+2. **Hosted-domain (`hd`) enforcement on real Google.** The positive and negative modes are built and unit tested; they have not been run against real Google yet (both real Google runs so far had no required domain, `hostedDomainChecked: false`). The user runs, each time re-running the `GOOGLE_CLIENT_SECRET` command that the script prints:
+   - positive, signing in with the hostjab.com Workspace account: `node tests/reality/logins/google.mjs --domain hostjab.com --mode positive` (expect `PASS (positive)` with `hostedDomainChecked: true`);
+   - negative, signing in with the same account: `node tests/reality/logins/google.mjs --domain example.com --mode negative`, or with a personal gmail account: `node tests/reality/logins/google.mjs --domain hostjab.com --mode negative` (expect `REFUSED as expected (negative): tenant_mismatch`, no identity issued).
+3. **Gateway-side check that `hd` is validated inside the verified id_token: already done.** `completeLogin` in `gateway/src/oidc.ts` refuses unless the `hd` claim of the signature-verified token equals the configured domain; unit tests in `tests/gateway-oidc.test.mjs` pin it, and three of them fail if the check is removed. Nothing remains here.
+
 ## Rules this run follows
 
 - Account `b891d462...` is pinned in a generated wrangler config and in `CLOUDFLARE_ACCOUNT_ID`, and `cf accounts list` must show it before every deploy, delete or listing (`tests/reality/cf/safety.mjs`, tested in `safety.test.mjs`).
