@@ -1,0 +1,32 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Memscan (repeat)
+
+# The address-space scan (TestAddressSpaceHoldsNoErasedKey) failed about one run
+# in three on amd64 Linux before the signal-frame fix (#37), and passes in a
+# single run often enough to hide a regression. Repeat it nightly, or on demand
+# with a different count (the proof for #37 was 100 in a row).
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Iterations of the scan"
+        default: "25"
+
+permissions:
+  contents: read
+
+jobs:
+  memscan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Address-space scan, repeated
+        run: go test -race -count="${{ inputs.count || '25' }}" -run '^TestAddressSpaceHoldsNoErasedKey$' ./internal/acceptance/
