@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { DurableObject } from "cloudflare:workers";
+import { MAX_CARDS_PER_DEVICE, MAX_GROUPS, MAX_RESULTS, canSee, matches, memberships, validateCard, validateGroup, validateQuery, type Card } from "./acl";
 import type { Env } from "./index";
+import { cleanText } from "./text";
 
 export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
 export const TOKEN_TTL_MAX_MS = 7 * 24 * 3600_000;
@@ -49,6 +51,18 @@ interface StoredToken {
   exp: number;
 }
 
+// A published card with the routing facts the gateway derived itself: the
+// device is the authenticated caller and the owner comes from its approved
+// enrollment, never from the request.
+export interface DirectoryEntry extends Card {
+  id: string; // `${device_id}:${hash of the lowercased name}`
+  device_id: string;
+  owner: string;
+  published: number;
+}
+
+export type DirectoryError = "not_enrolled" | "bad_card" | "secret_detected" | "too_many_cards" | "bad_query" | "bad_group" | "bad_members" | "too_many_groups";
+
 export type EnrollError = "bad_token" | "queue_full" | "owner_full" | "bad_request";
 
 const enc = new TextEncoder();
@@ -57,14 +71,7 @@ const hex = (b: ArrayBuffer | Uint8Array) =>
 const sha256 = async (s: string | Uint8Array) => hex(await crypto.subtle.digest("SHA-256", typeof s === "string" ? enc.encode(s) : s));
 const random = (n: number) => hex(crypto.getRandomValues(new Uint8Array(n)));
 
-// Display text shown to an admin: NFC, trimmed, no control, format (bidi
-// overrides, zero-width), separator, private-use or unpaired-surrogate
-// characters, and no whitespace other than a plain space.
-export function cleanText(v: string, max: number): string | null {
-  const s = v.normalize("NFC").trim();
-  if (!s || s.length > max || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}]|[^\S ]/u.test(s)) return null;
-  return s;
-}
+export { cleanText };
 
 export function decodeKey(b64: string): Uint8Array | null {
   try {
@@ -198,6 +205,81 @@ export class Tenant extends DurableObject<Env> {
 
   async revocations(): Promise<SignedList | null> {
     return (await this.ctx.storage.get<SignedList>("revocations")) ?? null;
+  }
+
+  // The owner of an enrolled device: its approved enrollment with a root-signed
+  // binding. Anything else (unknown, pending, rejected, unbound) is not enrolled.
+  private async ownerOf(device: string): Promise<string | null> {
+    const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${device}`);
+    return rec && rec.status === "approved" && rec.binding ? rec.owner.toLowerCase() : null;
+  }
+
+  // Publishes (or replaces, by name) a card for the calling device. The secrets
+  // lint runs here: the gateway cannot read task content, only these plaintext cards.
+  async publishCard(device: string, raw: unknown): Promise<{ id: string } | { error: DirectoryError; field?: string }> {
+    const owner = await this.ownerOf(device);
+    if (!owner) return { error: "not_enrolled" };
+    const v = validateCard(raw);
+    if ("error" in v) return v;
+    const id = `${device}:${(await sha256(v.card.name.toLowerCase())).slice(0, 16)}`;
+    const mine = await this.ctx.storage.list({ prefix: `card:${device}:` });
+    if (!mine.has(`card:${id}`) && mine.size >= MAX_CARDS_PER_DEVICE) return { error: "too_many_cards" };
+    await this.ctx.storage.put(`card:${id}`, { ...v.card, id, device_id: device, owner, published: Date.now() } satisfies DirectoryEntry);
+    return { id };
+  }
+
+  async removeCard(device: string, id: string): Promise<boolean> {
+    if (!id.startsWith(`${device}:`)) return false; // only the publishing device
+    return this.ctx.storage.delete(`card:${id}`);
+  }
+
+  private async viewerGroups(viewer: string) {
+    const all = await this.ctx.storage.list<{ members: string[] }>({ prefix: "grp:" });
+    return memberships([...all].map(([k, g]) => [k.slice(4), g.members]), viewer);
+  }
+
+  // find_agents: the cards the calling device's owner may see, filtered by name,
+  // description and tag. Cards the viewer may not see are not mentioned.
+  async find(device: string, rawQuery?: unknown): Promise<{ agents: DirectoryEntry[] } | { error: DirectoryError }> {
+    const viewer = await this.ownerOf(device);
+    if (!viewer) return { error: "not_enrolled" };
+    const q = validateQuery(rawQuery);
+    if (!q) return { error: "bad_query" };
+    const groups = await this.viewerGroups(viewer);
+    const all = await this.ctx.storage.list<DirectoryEntry>({ prefix: "card:" });
+    const agents = [...all.values()]
+      .filter((c) => canSee(c, c.owner, viewer, groups) && matches(c, q))
+      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+      .slice(0, MAX_RESULTS);
+    return { agents };
+  }
+
+  // The card the calling device may send to, or null. Unknown, hidden and
+  // not-permitted are the same answer. (The daemon still checks its allowlist.)
+  async resolve(device: string, id: string): Promise<DirectoryEntry | null> {
+    const viewer = await this.ownerOf(device);
+    if (!viewer) return null;
+    const c = await this.ctx.storage.get<DirectoryEntry>(`card:${id}`);
+    return c && canSee(c, c.owner, viewer, await this.viewerGroups(viewer)) ? c : null;
+  }
+
+  // Groups are managed by the admin; membership is by identity (email or named
+  // service owner). Names are plaintext metadata.
+  async putGroup(name: unknown, members: unknown): Promise<{ name: string; members: string[] } | { error: DirectoryError }> {
+    const g = validateGroup(name, members);
+    if ("error" in g) return g;
+    if (!(await this.ctx.storage.get(`grp:${g.name}`)) && (await this.ctx.storage.list({ prefix: "grp:" })).size >= MAX_GROUPS) return { error: "too_many_groups" };
+    await this.ctx.storage.put(`grp:${g.name}`, { members: g.members });
+    return g;
+  }
+
+  async deleteGroup(name: string): Promise<boolean> {
+    return this.ctx.storage.delete(`grp:${name.toLowerCase()}`);
+  }
+
+  async groups(): Promise<{ name: string; members: string[] }[]> {
+    const all = await this.ctx.storage.list<{ members: string[] }>({ prefix: "grp:" });
+    return [...all].map(([k, g]) => ({ name: k.slice(4), members: g.members }));
   }
 
   // Keep the earliest wake-up needed to purge records.

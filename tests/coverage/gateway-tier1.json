@@ -1,3 +1,3 @@
 {
-  "files": ["gateway/src/task.ts", "gateway/src/device.ts", "gateway/src/parts.ts"]
+  "files": ["gateway/src/task.ts", "gateway/src/device.ts", "gateway/src/parts.ts", "gateway/src/acl.ts"]
 }

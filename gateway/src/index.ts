@@ -4,6 +4,7 @@
 import { agentCard, handleA2A } from "./a2a";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { Device } from "./device";
+import { handleDirectory } from "./directory";
 import { handleEnroll } from "./enroll";
 import { Task } from "./task";
 import { Tenant } from "./tenant";
@@ -40,6 +41,7 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
     if (pathname.startsWith("/auth/")) return handleAuth(request, env);
+    if (pathname.startsWith("/v1/admin/groups") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {
       return request.method === "GET" ? Response.json(agentCard(new URL(request.url).origin)) : new Response("method not allowed", { status: 405 });

@@ -24,9 +24,9 @@ export default defineConfig({
       exclude: ["src/auth.ts", "src/oidc.ts"],
       reporter: ["text"],
       // Tier 2 of the plan's coverage policy, enforced on every file.
-      // Tier 1 for the task state machine, deadlines and retention logic: 100% of
+      // Tier 1 for the task state machine, deadlines and retention logic, and the ACL evaluation (acl.ts): 100% of
       // lines, statements, branches and functions, with no exclusions (mutation
-      // testing is scripts/mutation-ts.mjs). The globs keep task.ts and parts.ts out of the tier 2 numbers.
+      // testing is scripts/mutation-ts.mjs). The globs keep task.ts, parts.ts and acl.ts out of the tier 2 numbers.
       thresholds: {
         perFile: true,
         lines: 95,
@@ -37,6 +37,7 @@ export default defineConfig({
         "src/device.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         // Tier 1 for what the gateway checks about a sealed part before it relays it.
         "src/parts.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        "src/acl.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },
     },
   },
