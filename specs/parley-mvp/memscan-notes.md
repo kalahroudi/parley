@@ -31,3 +31,12 @@ Go toolchain, so amd64 can only be investigated in CI.
    docs say so. Not covered: general-purpose registers and stack spills.
 4. Handy: amd64 cannot be run locally (qemu crashes the Go toolchain); use CI.
    FXSAVE detector: bytes 0x7f 0x03 at addr-160-16k and 0xff 0xff at +28.
+
+## Result
+After the fix (commit "Block preemption signals while a prekey scalar is in use"),
+the address-space scan, built with -race and run 100 times in a row on amd64 Linux
+CI (x86_64 runner, run 41678709507): 0 failures of 100 (before: 91 of 200, 22 of
+60, 17 and 32 of 100). Build, vet and tests of internal/prekey, internal/receive
+and internal/acceptance also passed on ubuntu, macos and windows (run
+41680859670). The allowance (maxHeapResidue = 2) and the planted-key control are
+unchanged, and there are no retries.
