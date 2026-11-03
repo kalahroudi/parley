@@ -196,6 +196,22 @@ func debugHit(label, name string, addr uint64) {
 	clear(b)
 }
 
+// fpStateAt reports whether addr is at offset 160 (XMM0) of an FXSAVE/XSAVE image,
+// the register state the kernel writes on a signal stack when it delivers a
+// signal: x87 control word 0x37f at offset 0 and an MXCSR mask of 0xffff at 28.
+func fpStateAt(addr uint64) bool {
+	mem, err := os.Open("/proc/self/mem")
+	if err != nil {
+		return false
+	}
+	defer mem.Close()
+	var b [32]byte
+	if n, _ := mem.ReadAt(b[:], int64(addr-160)); n < 32 {
+		return false
+	}
+	return b[0] == 0x7f && b[1] == 0x03 && b[28] == 0xff && b[29] == 0xff
+}
+
 func scanChild(r *childReport) {
 	if err := prekey.Harden(); err != nil {
 		die(err)
@@ -253,6 +269,7 @@ func scanChild(r *childReport) {
 			total[name] = len(as)
 			if os.Getenv("PARLEY_SCAN_DEBUG") != "" && len(as) > 1 && strings.HasPrefix(name, "erased") {
 				for _, a := range as {
+					fmt.Fprintf(os.Stderr, "CLASS %s %#x fpstate=%v\n", name, a, fpStateAt(a))
 					debugHit("scan", name, a)
 				}
 			}
