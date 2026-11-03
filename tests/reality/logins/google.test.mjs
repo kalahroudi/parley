@@ -5,7 +5,7 @@
 // plus the redacted summary the login Worker keeps (summary.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CLIENT_ID, EXPECTED_REDIRECT, NAME, SECRET, redirectUri, run } from "./google.mjs";
+import { CLIENT_ID, EXPECTED_REDIRECT, NAME, SECRET, judge, parseArgs, redirectUri, run } from "./google.mjs";
 import { secretCommand } from "../cf/safety.mjs";
 import { REFUSED_PAGE, SIGNED_IN_PAGE, summarize } from "./summary.ts";
 
@@ -128,12 +128,109 @@ test("a wrong login redirect stops before anyone is asked to click, and cleans u
   assert.ok(w.calls.includes(`destroy ${NAME}`));
 });
 
-test("a refusal by the gateway is reported with its code and is not a pass", async () => {
-  const w = world({ result: { ok: false, status: 401, error: "tenant_mismatch", hostedDomainChecked: true, at: 1 } });
-  const r = await run({ hostedDomain: "example.com", deps: w.deps });
+test("without a domain, a refusal by the gateway is reported with its code and is not a pass", async () => {
+  const w = world({ result: { ok: false, status: 401, error: "idp_denied", hostedDomainChecked: false, at: 1 } });
+  const r = await run({ deps: w.deps });
   assert.equal(r.passed, false);
-  assert.match(w.logs.join("\n"), /REFUSED .*tenant_mismatch/);
+  assert.match(w.logs.join("\n"), /REFUSED idp_denied/);
+});
+
+const DOM = "corp.example";
+const accepted = { ok: true, status: 200, provider: "google", issuer: "https://accounts.google.com", emailDomain: DOM, personalAccount: false, hasSub: true, hostedDomainChecked: true, at: 1 };
+const refused = (error = "tenant_mismatch") => ({ ok: false, status: 401, error, hostedDomainChecked: true, at: 1 });
+const withHd = (hd = DOM) => goodLocation({ hd });
+
+test("POSITIVE: a Workspace account of the domain passes, and the domain reached the Worker as a plain variable", async () => {
+  const w = world({ result: accepted, location: withHd() });
+  const r = await run({ hostedDomain: DOM, mode: "positive", deps: w.deps });
+  assert.equal(r.passed, true);
+  assert.match(r.verdict, /^PASS \(positive\)/);
+  assert.equal(w.vars.GOOGLE_HOSTED_DOMAIN, DOM, "set from the script, no wrangler edit");
+  assert.match(w.logs.join("\n"), /sign in with an account of corp\.example/);
+  assert.match(w.logs.join("\n"), /hd hint corp\.example/);
+});
+
+test("POSITIVE: accepted without the hd check having run, or refused, is not a pass", async () => {
+  for (const [result, re] of [[{ ...accepted, hostedDomainChecked: false }, /hosted-domain check did not run/], [refused(), /NOT MET \(positive\): refused with tenant_mismatch/]]) {
+    const r = await run({ hostedDomain: DOM, mode: "positive", deps: world({ result, location: withHd() }).deps });
+    assert.equal(r.passed, false);
+    assert.match(r.verdict, re);
+  }
+});
+
+test("NEGATIVE: a mismatching account is refused as tenant_mismatch with no identity, and that counts as proven", async () => {
+  const w = world({ result: refused(), location: withHd("example.com") });
+  const r = await run({ hostedDomain: "example.com", mode: "negative", deps: w.deps });
+  assert.equal(r.passed, true);
+  assert.match(r.verdict, /REFUSED as expected \(negative\): tenant_mismatch.*no identity was issued/);
+  assert.match(w.logs.join("\n"), /NOT of example\.com \(for example a personal gmail\.com account\)/);
   assert.equal(w.vars.GOOGLE_HOSTED_DOMAIN, "example.com");
+  assert.deepEqual(w.calls.slice(-3), [`destroy ${NAME}`, "removeConfig", "remaining"]);
+});
+
+test("NEGATIVE: an accepted sign-in is reported as an enforcement failure", async () => {
+  const r = await run({ hostedDomain: "example.com", mode: "negative", deps: world({ result: { ...accepted, emailDomain: "gmail.com", personalAccount: true }, location: withHd("example.com") }).deps });
+  assert.equal(r.passed, false);
+  assert.match(r.verdict, /^ENFORCEMENT FAILED/);
+});
+
+test("NEGATIVE: a refusal for another reason proves nothing about the domain check", async () => {
+  for (const error of ["idp_denied", "state_mismatch", "bad_flow", "unknown"]) {
+    const r = await run({ hostedDomain: "example.com", mode: "negative", deps: world({ result: refused(error), location: withHd("example.com") }).deps });
+    assert.equal(r.passed, false, error);
+    assert.match(r.verdict, new RegExp(`NOT PROVEN \\(negative\\): refused with ${error}`));
+  }
+});
+
+test("NEGATIVE: a refusal that still carries identity fields is not accepted as clean", async () => {
+  const r = await run({ hostedDomain: "example.com", mode: "negative", deps: world({ result: { ...refused(), emailDomain: "gmail.com" }, location: withHd("example.com") }).deps });
+  assert.equal(r.passed, false);
+  assert.match(r.verdict, /carries identity fields \(emailDomain\)/);
+});
+
+test("the hd hint in the login redirect must carry the domain, so a variable that did not arrive is caught before anyone clicks", async () => {
+  for (const [label, location, re] of [
+    ["missing", goodLocation(), /hd hint is missing, expected "corp\.example".*did not reach the Worker/],
+    ["different", withHd("other.example"), /hd hint is "other\.example", expected "corp\.example"/],
+  ]) {
+    const w = world({ result: accepted, location });
+    const r = await run({ hostedDomain: DOM, mode: "positive", deps: w.deps });
+    assert.equal(r.passed, false, label);
+    assert.match(r.problems.join(), re, label);
+    assert.ok(!w.calls.some((c) => c.startsWith("open ")), `${label}: nobody was asked to click`);
+    assert.ok(w.calls.includes(`destroy ${NAME}`), `${label}: cleaned up`);
+  }
+  // And a domain-free run fails if a stray hd hint is present.
+  const w = world({ location: withHd("corp.example") });
+  const r = await run({ deps: w.deps });
+  assert.match(r.problems.join(), /hd hint is "corp\.example", expected none/);
+});
+
+test("run refuses a bad domain or a domain without a mode before touching Cloudflare", async () => {
+  const w = world();
+  await assert.rejects(run({ hostedDomain: "x; rm", mode: "positive", deps: w.deps }), /not a domain name/);
+  await assert.rejects(run({ hostedDomain: DOM, deps: w.deps }), /go together/);
+  await assert.rejects(run({ mode: "negative", deps: w.deps }), /go together/);
+  assert.deepEqual(w.calls, [], "nothing was verified, deployed or deleted");
+});
+
+test("parseArgs: domain from the flag or GOOGLE_HOSTED_DOMAIN, lowercased, always with a mode", () => {
+  assert.deepEqual(parseArgs([], {}), { open: true, waitMs: 600_000, mode: undefined, hostedDomain: undefined });
+  assert.deepEqual(parseArgs(["--domain", "Corp.Example", "--mode", "positive", "--no-open", "--wait-minutes", "3"], {}), { open: false, waitMs: 180_000, mode: "positive", hostedDomain: "corp.example" });
+  assert.equal(parseArgs(["--mode", "negative"], { GOOGLE_HOSTED_DOMAIN: "example.com" }).hostedDomain, "example.com");
+  assert.equal(parseArgs(["--domain", "a.example", "--mode", "negative"], { GOOGLE_HOSTED_DOMAIN: "b.example" }).hostedDomain, "a.example", "the flag wins");
+  assert.throws(() => parseArgs(["--domain", "corp.example"], {}), /needs --mode positive .* or --mode negative/);
+  assert.throws(() => parseArgs(["--mode", "positive"], {}), /needs a domain/);
+  assert.throws(() => parseArgs(["--mode", "sideways", "--domain", "a.example"], {}), /positive or negative/);
+  for (const bad of ["localhost", "a b.example", "x;rm.example", "-a.example", "a..example", "http://a.example", "a.example/"]) {
+    assert.throws(() => parseArgs(["--domain", bad, "--mode", "positive"], {}), /not a domain name/, bad);
+  }
+});
+
+test("judge: no mode keeps the plain PASS or REFUSED verdicts", () => {
+  assert.deepEqual(judge({ ok: true }, undefined), { met: true, text: "PASS" });
+  assert.deepEqual(judge({ ok: false, error: "idp_denied" }, undefined), { met: false, text: "REFUSED idp_denied" });
+  assert.deepEqual(judge({ ok: false }, undefined), { met: false, text: "REFUSED" });
 });
 
 test("waiting for the person polls until a result exists, then stops", async () => {
