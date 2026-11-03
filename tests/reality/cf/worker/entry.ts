@@ -12,11 +12,15 @@
 //     the counters. Bodies are test strings; nothing here is in the product.
 import { Device as BaseDevice, Tenant } from "../../../../gateway/src/index";
 import gateway, { type Env } from "../../../../gateway/src/index";
+import { REFUSED_PAGE, SIGNED_IN_PAGE, summarize } from "../../logins/summary.ts";
 
 export { Tenant };
 
 interface ProbeEnv extends Env {
   PROBE_TOKEN: string;
+  // "1" in the `parley-test-login` Worker only: the Google callback result is kept
+  // as a redacted summary (see ../../logins/summary.ts) and read back through /__login-result.
+  LOGIN_CHECK?: string;
 }
 
 export class Device extends BaseDevice {
@@ -51,6 +55,14 @@ export class Device extends BaseDevice {
     return { statuses };
   }
 
+  async setLoginResult(r: unknown): Promise<void> {
+    await this.ctx.storage.put("login", r);
+  }
+
+  async getLoginResult(): Promise<unknown> {
+    return (await this.ctx.storage.get("login")) ?? null;
+  }
+
   drop(code: number): number {
     const sockets = this.ctx.getWebSockets();
     for (const ws of sockets) ws.close(code, "probe");
@@ -67,8 +79,27 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 export default {
   async fetch(request: Request, env: ProbeEnv): Promise<Response> {
     const { pathname } = new URL(request.url);
+    if (env.LOGIN_CHECK === "1" && pathname === "/auth/google/callback") {
+      const res = await gateway.fetch(request, env);
+      const body: unknown = await res
+        .clone()
+        .json()
+        .catch(() => ({}));
+      const summary = summarize(res.status, body, env.GOOGLE_HOSTED_DOMAIN);
+      const stub = env.DEVICE.get(env.DEVICE.idFromName("login:result")) as unknown as DurableObjectStub<Device>;
+      await stub.setLoginResult({ ...summary, at: Date.now() });
+      // The browser is shown a plain page, not the identity; the gateway's cookie clearing is kept.
+      const headers = new Headers({ "content-type": "text/plain", "cache-control": "no-store" });
+      const cookie = res.headers.get("set-cookie");
+      if (cookie) headers.set("set-cookie", cookie);
+      return new Response(summary.ok ? SIGNED_IN_PAGE : REFUSED_PAGE, { status: res.status, headers });
+    }
     if (!pathname.startsWith("/__")) return gateway.fetch(request, env);
     if (!env.PROBE_TOKEN || request.headers.get("x-probe-token") !== env.PROBE_TOKEN) return new Response("unauthorized", { status: 401 });
+    if (pathname === "/__login-result") {
+      const stub = env.DEVICE.get(env.DEVICE.idFromName("login:result")) as unknown as DurableObjectStub<Device>;
+      return Response.json({ result: await stub.getLoginResult() });
+    }
     const b = (await request.json()) as { tenant: string; device: string; bodies?: string[]; code?: number };
     if (!ID.test(b.tenant) || !ID.test(b.device)) return new Response("bad id", { status: 400 });
     const stub = env.DEVICE.get(env.DEVICE.idFromName(`${b.tenant}:${b.device}`)) as unknown as DurableObjectStub<Device>;

@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { ACCOUNT_ID, assertName, remaining, removeConfig, verifyAccount, wranglerConfig, writeConfig } from "./safety.mjs";
+import { ACCOUNT_ID, assertName, configPath, remaining, removeConfig, secretCommand, secretNames, verifyAccount, wranglerConfig, writeConfig } from "./safety.mjs";
 
 test("only parley-test-* worker names are accepted", () => {
   assert.equal(assertName("parley-test-r1-abc123"), "parley-test-r1-abc123");
@@ -53,4 +53,24 @@ test("remaining lists only parley-test-* names after verifying the account", () 
   const r = remaining((cmd, args) => (seen.push(args.join(" ")), args[0] === "accounts" ? JSON.stringify([{ id: ACCOUNT_ID }]) : '[{"id":"parley-test-r1-aa"},{"id":"parley-test-r1-aa"},{"id":"bulkhead-demo"}]'));
   assert.deepEqual(r, ["parley-test-r1-aa"]);
   assert.ok(seen.length >= 1);
+});
+
+test("secretCommand is the wrangler prompt against the pinned config, and refuses odd names", () => {
+  const cmd = secretCommand("parley-test-login", "GOOGLE_CLIENT_SECRET");
+  assert.equal(cmd, `cd gateway && npx wrangler secret put GOOGLE_CLIENT_SECRET --name parley-test-login --config ${JSON.stringify(configPath("parley-test-login"))}`);
+  assert.doesNotMatch(cmd, /=|echo|<</, "no value can be on the command line");
+  assert.throws(() => secretCommand("other-worker", "X"), /refusing/);
+  assert.throws(() => secretCommand("parley-test-login", "x; rm -rf /"), /bad secret name/);
+});
+
+test("secretNames returns names only, checks the account first, and is [] when the Worker does not exist", () => {
+  const seen = [];
+  const verify = () => seen.push("verify");
+  const run = (args, config) => (seen.push(args.join(" ")), '[{"name":"A","type":"secret_text"},{"name":"B","type":"secret_text"}]');
+  assert.deepEqual(secretNames("parley-test-login", run, verify), ["A", "B"]);
+  assert.deepEqual(seen, ["verify", "secret list --format json"]);
+  assert.deepEqual(secretNames("parley-test-login", () => { throw new Error("no such worker"); }, verify), []);
+  assert.deepEqual(secretNames("parley-test-login", () => "not json", verify), []);
+  assert.throws(() => secretNames("other", run, verify), /refusing/);
+  assert.throws(() => secretNames("parley-test-login", run, () => { throw new Error("wrong account"); }), /wrong account/);
 });

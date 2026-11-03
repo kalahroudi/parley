@@ -71,6 +71,17 @@ export function writeConfig(name, vars) {
   return path;
 }
 
+export const configPath = (name) => join(workDir(name), "wrangler.jsonc");
+
+// The exact command a person runs to set a Worker secret. Wrangler prompts for the value,
+// so it goes from their keyboard to Cloudflare and never through a file, a chat or this
+// repo's code. The config pins the account.
+export function secretCommand(name, secret) {
+  assertName(name);
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(secret)) throw new Error("bad secret name");
+  return `cd gateway && npx wrangler secret put ${secret} --name ${name} --config ${JSON.stringify(configPath(name))}`;
+}
+
 export function removeConfig(name) {
   rmSync(workDir(name), { recursive: true, force: true });
 }
@@ -90,6 +101,17 @@ const deployedUrl = (name, out) => {
   if (!m || !m[0].startsWith(`https://${name}.`)) throw new Error("deploy did not report the expected workers.dev URL");
   return m[0];
 };
+
+// Names (never values) of the secrets set on the Worker; empty if it does not exist yet.
+export function secretNames(name, run = (args, config) => wrangler(args, config), verify = verifyAccount) {
+  verify();
+  assertName(name);
+  try {
+    return JSON.parse(run(["secret", "list", "--format", "json"], configPath(name))).map((x) => x.name);
+  } catch {
+    return [];
+  }
+}
 
 // Returns the workers.dev URL. The account is verified on every call.
 export function deploy(name, vars) {
