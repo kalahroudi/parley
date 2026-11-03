@@ -57,7 +57,7 @@ TEXT ·scrubAVX(SB), NOSPLIT, $0-0
 
 // func scrubProbe(out *[512]byte, avx bool)
 // Test helper: fills X0-X15 (and, with AVX, the upper halves of Y0-Y15) with
-// 0xAA, runs scrubVectorRegisters, and stores X0-X15 then the upper halves to out.
+// 0xAA, runs the two scrub routines (scrubSSE, then scrubAVX if avx), and stores X0-X15 then the upper halves to out.
 TEXT ·scrubProbe(SB), NOSPLIT, $8-9
 	MOVQ out+0(FP), DI
 	MOVL $0xAAAAAAAA, AX
@@ -98,7 +98,12 @@ TEXT ·scrubProbe(SB), NOSPLIT, $8-9
 	VINSERTF128 $1, X0, Y14, Y14
 	VINSERTF128 $1, X0, Y15, Y15
 poisoned:
-	CALL ·scrubVectorRegisters(SB)
+	CALL ·scrubSSE(SB)
+	MOVB avx+8(FP), CX
+	TESTB CX, CX
+	JZ   scrubbed
+	CALL ·scrubAVX(SB)
+scrubbed:
 	MOVOU X0, 0(DI)
 	MOVOU X1, 16(DI)
 	MOVOU X2, 32(DI)
