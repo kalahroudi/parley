@@ -185,3 +185,27 @@ func TestFileStoreSaveFailsAtEveryStep(t *testing.T) {
 		}
 	}
 }
+
+func TestFileStoreLoad(t *testing.T) {
+	s := FileStore{Dir: t.TempDir()}
+	if _, err := s.Load(); !errors.Is(err, ErrNoRoot) {
+		t.Fatalf("empty store: %v", err)
+	}
+	r, _ := New()
+	if err := s.Save(r.Private); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Load()
+	if err != nil || !got.Equal(r.Private) {
+		t.Fatalf("load: %v", err)
+	}
+	os.WriteFile(filepath.Join(s.Dir, "root.key"), []byte("short"), 0o600)
+	if _, err := s.Load(); err == nil {
+		t.Fatal("short key accepted")
+	}
+	os.Remove(filepath.Join(s.Dir, "root.key"))
+	os.Mkdir(filepath.Join(s.Dir, "root.key"), 0o700) // unreadable as a file
+	if _, err := s.Load(); err == nil || errors.Is(err, ErrNoRoot) {
+		t.Fatalf("read error: %v", err)
+	}
+}
