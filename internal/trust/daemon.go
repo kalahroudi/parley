@@ -169,10 +169,7 @@ func NewAdmin(rootKey ed25519.PrivateKey, tenant string, c *Client, own *revocat
 // Approve records the decision and posts a binding signed with the root key.
 // The device id is the request id. Rotating a key is Approve again with a higher version.
 func (a *Admin) Approve(ctx context.Context, p Pending, version uint64, now time.Time) error {
-	b, err := binding.Sign(a.Root, binding.Binding{
-		Tenant: a.Tenant, Owner: p.Owner, DeviceID: p.ID, SigningKey: p.SigningKey,
-		Version: version, NotAfter: now.Add(binding.Lifetime),
-	})
+	b, err := SignApproval(a.Root, a.Tenant, p, version, now)
 	if err != nil {
 		return err
 	}
@@ -180,6 +177,15 @@ func (a *Admin) Approve(ctx context.Context, p Pending, version uint64, now time
 		return err
 	}
 	return a.Client.PostBinding(ctx, p.ID, b)
+}
+
+// SignApproval signs the binding for an approved request. The device id is the
+// request id. It is shared by Admin.Approve and the local signer service.
+func SignApproval(rootKey ed25519.PrivateKey, tenant string, p Pending, version uint64, now time.Time) (*binding.Signed, error) {
+	return binding.Sign(rootKey, binding.Binding{
+		Tenant: tenant, Owner: p.Owner, DeviceID: p.ID, SigningKey: p.SigningKey,
+		Version: version, NotAfter: now.Add(binding.Lifetime),
+	})
 }
 
 // Reject records a rejection; no binding is ever signed for the request.

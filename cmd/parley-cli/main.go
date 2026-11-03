@@ -20,7 +20,7 @@ import (
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | approve [-deny] [<task id>] | find [text] | send | get | cancel | list | test -to <device id> [-timeout 30s]"
+const usage = "usage: parley-cli --version | admin init [-backup <file>] | signer [-listen <loopback addr>] [-info <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | approve [-deny] [<task id>] | find [text] | send | get | cancel | list | test -to <device id> [-timeout 30s]"
 
 //cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {
@@ -35,7 +35,8 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writ
 		fmt.Fprintln(out, "parley-cli", version)
 		return 0
 	}
-	if len(args) >= 2 && args[0] == "admin" && args[1] == "init" {
+	isInit := len(args) >= 2 && args[0] == "admin" && args[1] == "init"
+	if isInit || (len(args) >= 1 && args[0] == "signer") {
 		dir, err := configDir()
 		if err != nil {
 			//logx:allow fatal CLI error for the operator's terminal; no task content exists in this process path
@@ -43,6 +44,9 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writ
 			return 1
 		}
 		dir = filepath.Join(dir, "parley")
+		if !isInit {
+			return runSigner(ctx, args[1:], out, errw, dir)
+		}
 		return adminInit(args[2:], out, errw, root.FileStore{Dir: dir}, filepath.Join(dir, "root-backup.json"))
 	}
 	if len(args) >= 1 && (args[0] == "login" || args[0] == "enroll") {
