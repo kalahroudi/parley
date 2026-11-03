@@ -5,4 +5,4 @@
 import { defineConfig, mergeConfig } from "vitest/config";
 import base from "./vitest.config";
 
-export default mergeConfig(base, defineConfig({ test: { include: ["test/task.test.ts", "test/parts.test.ts"], coverage: { enabled: false } } }));
+export default mergeConfig(base, defineConfig({ test: { include: ["test/task.test.ts", "test/device.test.ts", "test/parts.test.ts"], coverage: { enabled: false } } }));

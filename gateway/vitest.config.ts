@@ -34,6 +34,7 @@ export default defineConfig({
         branches: 90,
         functions: 95,
         "src/task.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        "src/device.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         // Tier 1 for what the gateway checks about a sealed part before it relays it.
         "src/parts.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },
