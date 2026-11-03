@@ -6,8 +6,16 @@ import {
   MAX_CARD_GROUPS,
   MAX_EXAMPLES,
   MAX_MEMBERS,
+  MAX_MEMBER_CHARS,
   MAX_TAGS,
+  PAGE_DEFAULT,
+  PAGE_MAX,
   canSee,
+  cardKey,
+  isCardId,
+  isDeviceId,
+  paginate,
+  validatePage,
   lintSecrets,
   matches,
   memberships,
@@ -151,6 +159,12 @@ describe("validateGroup", () => {
     expect(validateGroup("g", Array.from({ length: MAX_MEMBERS + 1 }, (_, i) => `u${i}`))).toEqual({ error: "bad_members" });
     expect(validateGroup("g", Array.from({ length: MAX_MEMBERS }, (_, i) => `u${i}`))).toHaveProperty("members");
   });
+
+  it("bounds the total size of the member list", () => {
+    expect(MAX_MEMBER_CHARS).toBe(60_000);
+    expect(validateGroup("g", Array.from({ length: 300 }, (_, i) => `${i}`.padStart(200, "u")))).toHaveProperty("members"); // exactly 60,000
+    expect(validateGroup("g", [...Array.from({ length: 300 }, (_, i) => `${i}`.padStart(200, "u")).slice(0, 299), "y".repeat(201)])).toEqual({ error: "bad_members" });
+  });
 });
 
 describe("memberships", () => {
@@ -159,6 +173,10 @@ describe("memberships", () => {
     expect([...memberships(groups, "a")]).toEqual(["eng"]);
     expect([...memberships(groups, "b")].sort()).toEqual(["eng", "ops"]);
     expect(memberships(groups, "z").size).toBe(0);
+  });
+  it("matches identities case-insensitively, and never matches an empty viewer", () => {
+    expect([...memberships([["eng", ["a@x.test"]]], "A@X.test")]).toEqual(["eng"]);
+    expect(memberships([["eng", [""]]], "").size).toBe(0);
   });
 });
 
@@ -176,6 +194,110 @@ describe("canSee", () => {
     expect(canSee({ visibility: "groups", groups: [] }, "o", "v", eng)).toBe(false);
   });
   it("private: only the owner", () => expect(canSee({ visibility: "private", groups: ["eng"] }, "o", "v", eng)).toBe(false));
+});
+
+// Table-driven matrix: caller x group membership x rule (mode + listed groups) x target
+// (owner). Groups as they exist now: eng has bob, ops has carol, empty has nobody;
+// "gone" (deleted or renamed away) and "typo" do not exist at all. There are no
+// deny rules, so there is no allow/deny precedence to test: default deny, owner first.
+describe("canSee matrix (default deny)", () => {
+  const groups: [string, string[]][] = [["eng", ["bob@x.test"]], ["ops", ["carol@x.test"]], ["empty", []]];
+  const owner = "alice@x.test";
+  type Row = [string, "tenant" | "groups" | "private", string[], string, boolean];
+  const rows: Row[] = [
+    // tenant: everyone with an identity
+    ["tenant, stranger", "tenant", [], "zed@x.test", true],
+    ["tenant, owner", "tenant", [], owner, true],
+    ["tenant, no identity", "tenant", [], "", false],
+    // private: owner only
+    ["private, owner", "private", [], owner, true],
+    ["private, owner in other case", "private", [], "ALICE@x.test", true],
+    ["private, member of some group", "private", [], "bob@x.test", false],
+    ["private, stranger", "private", [], "zed@x.test", false],
+    ["private, no identity", "private", [], "", false],
+    // groups: viewer must be in a listed group that exists
+    ["groups, member of listed", "groups", ["eng"], "bob@x.test", true],
+    ["groups, member in other case", "groups", ["eng"], "BOB@x.test", true],
+    ["groups, member of one of several", "groups", ["gone", "eng"], "bob@x.test", true],
+    ["groups, member of a different group", "groups", ["eng"], "carol@x.test", false],
+    ["groups, stranger", "groups", ["eng"], "zed@x.test", false],
+    ["groups, owner not in the group", "groups", ["eng"], owner, true],
+    ["groups, empty group", "groups", ["empty"], "bob@x.test", false],
+    ["groups, deleted or renamed group", "groups", ["gone"], "bob@x.test", false],
+    ["groups, unknown group", "groups", ["typo"], "bob@x.test", false],
+    ["groups, only missing groups", "groups", ["gone", "typo"], "carol@x.test", false],
+    ["groups, no groups listed (malformed)", "groups", [], "bob@x.test", false],
+    ["groups, no identity", "groups", ["empty"], "", false],
+    // a malformed mode is refused, never read as visible
+    ["unknown mode", "public" as never, ["eng"], "bob@x.test", false],
+    ["missing mode", undefined as never, [], "bob@x.test", false],
+  ];
+  for (const [name, visibility, listed, viewer, want] of rows) {
+    it(`${name}: ${want ? "visible" : "hidden"}`, () => {
+      expect(canSee({ visibility, groups: listed }, owner, viewer, memberships(groups, viewer))).toBe(want);
+    });
+  }
+  it("an empty owner and an empty viewer are not the same person", () => {
+    expect(canSee({ visibility: "private", groups: [] }, "", "", new Set())).toBe(false);
+  });
+});
+
+describe("ids", () => {
+  it("accept exactly the shapes the gateway generates", () => {
+    const dev = "0123456789abcdef".repeat(2);
+    expect(isDeviceId(dev)).toBe(true);
+    expect(isCardId(`${dev}:0123456789abcdef`)).toBe(true);
+    for (const v of [undefined, 5, [dev], "", dev.slice(1), dev + "0", dev.toUpperCase(), `${dev}\n`, "../" + dev, `${dev}:`]) expect(isDeviceId(v), String(v)).toBe(false);
+    for (const v of [undefined, [`${dev}:0123456789abcdef`], dev, `${dev}:0123456789abcde`, `${dev}:0123456789abcdef0`, `${dev}:0123456789ABCDEF`, `x${dev}:0123456789abcdef`, `${dev}:0123456789abcdef\n`]) expect(isCardId(v), String(v)).toBe(false);
+  });
+});
+
+describe("pagination", () => {
+  const items = Array.from({ length: 7 }, (_, i) => `k${i}`);
+  const key = (s: string) => s;
+  it("defaults to 25 and caps at 100", () => {
+    expect(validatePage({})).toEqual({ limit: PAGE_DEFAULT, after: null });
+    expect(PAGE_DEFAULT).toBe(25);
+    expect(validatePage({ limit: PAGE_MAX })).toEqual({ limit: 100, after: null });
+    expect(validatePage({ limit: 1 })).toEqual({ limit: 1, after: null });
+    for (const limit of [0, -1, 101, 1.5, "5", null, NaN]) expect(validatePage({ limit }), String(limit)).toBeNull();
+  });
+  it("walks a list page by page with stable cursors and no overlap", () => {
+    const seen: string[] = [];
+    let after: string | null = null;
+    let pages = 0;
+    for (;;) {
+      const r: { items: string[]; next_cursor?: string } = paginate(items, key, { limit: 3, after });
+      seen.push(...r.items);
+      pages++;
+      if (!r.next_cursor) break;
+      after = validatePage({ cursor: r.next_cursor })!.after;
+    }
+    expect(seen).toEqual(items);
+    expect(pages).toBe(3);
+    expect(paginate(items, key, { limit: 7, after: null })).toEqual({ items }); // exactly full: no cursor
+    expect(paginate(items, key, { limit: 6, after: null }).next_cursor).toBeDefined();
+    expect(paginate([], key, { limit: 3, after: null })).toEqual({ items: [] });
+  });
+  it("a cursor survives inserts and deletes around it", () => {
+    const first = paginate(items, key, { limit: 3, after: null });
+    const after = validatePage({ cursor: first.next_cursor })!.after;
+    const changed = ["k0", "k2", "k15", "k3", "k4", "k5", "k6"].sort(); // k1 deleted, k15 inserted before the cursor key
+    expect(paginate(changed, key, { limit: 3, after }).items).toEqual(["k3", "k4", "k5"]);
+  });
+  it("cursors are hex of the sort key and are checked strictly", () => {
+    expect(validatePage({ cursor: "6b31" })).toEqual({ limit: 25, after: "k1" });
+    expect(validatePage({ cursor: "e282ac" })).toEqual({ limit: 25, after: "€" });
+    expect(validatePage({ cursor: "efbbbf6b31" })).toEqual({ limit: 25, after: "k1" }); // a leading BOM is dropped, never part of a key
+    const nl = paginate(["a\nb", "a\nc"], key, { limit: 1, after: null }); // bytes below 0x10 keep their leading zero
+    expect(nl.next_cursor).toBe("610a62");
+    expect(validatePage({ cursor: nl.next_cursor })!.after).toBe("a\nb");
+    for (const cursor of ["", "6B31", "6b3", "zz", 5, null, ["6b31"], { match: 1 }, "ff", "c0af", "6b31".repeat(401)]) expect(validatePage({ cursor }), String(cursor)).toBeNull();
+    expect(validatePage({ cursor: "61".repeat(800) })).not.toBeNull();
+  });
+  it("cardKey orders by lowercase name then id, with a separator no name can hold", () => {
+    expect(cardKey({ name: "Ab", id: "x" })).toBe("ab\nx");
+  });
 });
 
 describe("matches and validateQuery", () => {
