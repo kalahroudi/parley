@@ -4,7 +4,9 @@ Phased delivery with acceptance tests. Requirements are in [spec.md](spec.md); a
 
 Every phase ends with something you can run and demonstrate, a functional acceptance suite that passes, and coverage gates that hold. The spikes in plan.md are folded into the phases.
 
-Estimates are my judgment, not verified. Including the testing discipline, expect roughly 15 to 19 weeks to a pilot-ready release for one experienced developer working with AI coding agents. The first encrypted two-machine demo lands at the end of Phase 2 (about weeks 6 to 8).
+Estimates are my judgment, not verified. Including the testing discipline, expect roughly 15 to 19 weeks to a pilot-ready release for one experienced developer working with AI coding agents. The secure messaging libraries are done at the end of Phase 2 (about weeks 6 to 8); the first encrypted two-machine echo is milestone M1 (after T414), which runs in parallel with Phase 3.
+
+Revised 2026-11-04: daemon assembly is now explicit (T410 to T415), and the first end-to-end echo moves to milestone M1 after T414.
 
 Task ids: `T<phase><nn>`. Tests derive from the journeys A to L in spec.md and are tracked in `tests/journeys.md` (journey, test id, phase).
 
@@ -34,11 +36,13 @@ Deliverable: two daemons enroll under an admin root and show online; revocation 
 - [x] T107 Acceptance: enroll, approve and revoke; binding rollback rejected; recovery code restores the root; stale revocation list behavior
 - [x] T108 Acceptance: 20 forced reconnects and a deploy during a 10k-message soak lose or duplicate nothing
 - [ ] T109 Real-Cloudflare reality check 1: limits, costs, hibernation timing, deploy-driven disconnects, real Google and Entra logins
+  - Entra real-tenant check: not possible while no free Entra tenant is available (the free tier was removed); covered by T111 simulator conformance. Residual risk: real-Entra quirks (consent screens, admin consent, claim overage, tenant-specific issuer details) are unverified until a real tenant is available, e.g. a design-partner tenant during the pilot. Google real login passed (personal and Workspace); hosted-domain enforcement run still open.
 - [x] T110 Gates: tier 1 at 100%, tier 2 gates met
+- [ ] T111 Entra simulator: an Entra-shaped profile for the local mock IdP (tests/harness/oidc.mjs) with fixtures and gateway conformance tests: v2.0 discovery and issuer format with the tenant id, tid and oid claims, preferred_username without or with unverified email, wrong-tenant and multi-tenant (common/organizations) issuers, key rotation (kid miss then refetch), expired and wrong-audience tokens, replayed code, claim overage; fixtures taken from Microsoft's published claims reference and recorded with their source, cross-checked against one independent open-source mock OIDC server in an optional CI job so we do not only test against our own assumptions; used by gateway tests now and by the dashboard identity-provider setup step later
 
 ## Phase 2: Secure messaging core (about 2 to 3 weeks)
 
-Deliverable: `parley-cli test` sends an end-to-end encrypted echo between two machines. Spikes 3 and 4.
+Deliverable: the secure messaging libraries are complete and attack-tested (T201 to T210). The `parley-cli test` end-to-end encrypted echo between two machines is delivered by T414 in Phase 4 (milestone M1). Spikes 3 and 4.
 
 - [x] T201 HPKE plus signed transcripts, with published test vectors
 - [x] T202 On-demand prekeys (in-memory, locked, zeroed on use)
@@ -65,12 +69,20 @@ Deliverable: `send_task` and `get_task` between two machines with an API-backed 
 - [ ] T308 Acceptance: recovery-bookmark test documents what Cloudflare retains; R2 deletion behavior verified
 - [ ] T309 Real-Cloudflare reality check 2
 
-## Phase 4: Caller interface and adapters (about 2 to 3 weeks)
+## Phase 4: Daemon assembly, caller interface and adapters (about 3 to 4 weeks)
 
 Deliverable: a real MCP client (Claude Code) finds and calls a bot across two machines, including offline, cancel, expiry and INPUT_REQUIRED. Spikes 7 and 9.
 
-- [ ] T401 MCP server and CLI over the restricted local socket
-- [ ] T402 API and CLI adapters, adapter contract tests with a fake bot
+Milestone M1 (after T414): `parley-cli test` sends an encrypted echo between two local daemons through a local gateway. It is the first thing to run by hand. T410 to T415 do not depend on T304 or T305, so they run in parallel with the rest of Phase 3.
+
+- [ ] T410 Daemon core: `parleyd` lifecycle and config, device signing key in the OS keychain, OS-user-restricted local socket, graceful shutdown, redacted logging, and a supervisor for the tunnel client, revocation refresh and binding store
+- [ ] T415 Device connect tokens: a device proves possession of its bound key (signed challenge) and receives a short-lived connect token; /v1/connect verifies it, rejects revoked, expired and unbound devices and replayed challenges, and the parked tunnel and canary integration tests (named pending tests left by the DEV_AUTH removal) are restored needs: T410
+- [ ] T411 Enrollment from the daemon: `parley-cli login` and `enroll` (sign-in, request, wait for approval, store the binding), resumable after a restart needs: T410, T415
+- [ ] T412 Message pipeline wired up: inbound tunnel event, verify, open, erase, ack and hand to the bot (internal/receive); outbound prekey request, seal, send and status handling needs: T410, T415
+- [ ] T413 Bot interface and a fake bot: the adapter contract that T402 implements, with contract tests against the fake needs: T412
+- [ ] T414 `parley-cli test`: encrypted echo between two daemons through a local gateway (milestone M1) needs: T411, T412, T413, T415
+- [ ] T401 MCP server and CLI over the restricted local socket needs: T410, T412
+- [ ] T402 API and CLI adapters, adapter contract tests with a fake bot needs: T413
 - [ ] T403 Approval flow (`parley-cli approve`)
 - [ ] T404 Hostile-input tests
 - [ ] T405 Acceptance: the walking-skeleton journey passes on macOS and Linux
