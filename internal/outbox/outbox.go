@@ -251,7 +251,10 @@ func (o *Outbox) prune(now time.Time) {
 	}
 }
 
-// Status is a task's state, or false if unknown (never submitted, or forgotten).
+// Status is a task's state, or false if unknown (never submitted, or forgotten). A finished task
+// (Sent, Failed, Canceled) is remembered for at least KeepDone after it finished, unless more than
+// MaxFinished finished tasks are held, in which case the oldest go first; it is forgotten only when
+// a later Submit looks, so the answer is the same however often the sender asks.
 func (o *Outbox) Status(id string) (Status, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
