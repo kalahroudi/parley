@@ -6,7 +6,7 @@ import { MAX_FRAME_BYTES } from "./protocol";
 import { parseSealedPart, SEALED_MEDIA_TYPE, type Shape } from "./parts";
 import { limitDevice, type Scope } from "./ratelimit";
 import type { Task, TaskEvent, TaskRecord, TaskState } from "./task";
-import type { Tenant } from "./tenant";
+import { tenantStub } from "./tenant";
 
 export { SEALED_MEDIA_TYPE };
 
@@ -142,7 +142,6 @@ export interface Identity {
 }
 
 const taskStub = (env: Env, tenant: string, id: string) => env.TASK.get(env.TASK.idFromName(`${tenant}:${id}`)) as DurableObjectStub<Task>;
-const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 const deviceStub = (env: Env, tenant: string, device: string) => env.DEVICE.get(env.DEVICE.idFromName(`${tenant}:${device}`));
 
 // Task view for responses: metadata only.

@@ -5,7 +5,7 @@ import { isDeviceId } from "./acl";
 import { readBounded, type Identity } from "./a2a";
 import type { Env } from "./index";
 import { limitDevice } from "./ratelimit";
-import type { Tenant } from "./tenant";
+import { tenantStub } from "./tenant";
 
 // Device connect tokens. A device proves it holds the key its ROOT-SIGNED binding names, and gets a short-lived token:
 //
@@ -22,13 +22,13 @@ import type { Tenant } from "./tenant";
 //        a replayed or expired challenge, all get the same 401.
 //
 // The token is `pdt_<tenant>.<device>.<secret>`, 256 bits, kept only as a hash, bound to tenant, device, binding
-// version and scope. Scope "connect" opens the tunnel and is consumed by the upgrade that presents it; scope "api"
+// version and scope. ConnectScope "connect" opens the tunnel and is consumed by the upgrade that presents it; scope "api"
 // serves /a2a until it expires. Each use re-checks that the device is still connectable
 // at that binding version, so a revocation or a new binding ends tokens at once.
 export const CHALLENGE_TTL_MS = 60_000;
 export const CONNECT_LABEL = "parley/connect/v2";
 export const BINDING_LABEL = "parley/binding/v1";
-export type Scope = "connect" | "api";
+export type ConnectScope = "connect" | "api";
 const MAX_BODY_BYTES = 4096;
 const TENANT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 // The whole Authorization header: the scheme, then pdt_<tenant>.<device>.<secret>.
@@ -63,7 +63,7 @@ function encode(parts: (string | Uint8Array | bigint)[]): Uint8Array {
   return out;
 }
 
-export const connectMessage = (tenant: string, device: string, challenge: string, expires: number, version: number, scope: Scope) =>
+export const connectMessage = (tenant: string, device: string, challenge: string, expires: number, version: number, scope: ConnectScope) =>
   encode([CONNECT_LABEL, tenant, device, challenge, BigInt(expires), BigInt(version), scope]);
 
 // The bytes of a base64 string of exactly `length` bytes, else null. Anything that is not a string is null (an array
@@ -108,7 +108,6 @@ export async function verifyBinding(root: Uint8Array, b: unknown, tenant: string
   return (await verifyEd25519(root, sig, msg)) ? { key, version, device: r.device_id } : null;
 }
 
-const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 const limited = (wait: number) => json(429, { error: "rate_limited" }, { "retry-after": String(Math.ceil(wait / 1000)) });
 
 // POST /v1/connect/challenge and /v1/connect/token. Both count against the device's rate-limit budget (and the
@@ -147,7 +146,7 @@ export async function handleConnectAuth(req: Request, env: Env): Promise<Respons
 // The device behind `Authorization: Bearer pdt_...` for this scope, or null. The tenant and device come from the
 // token, and the token's record must exist in that tenant's Durable Object, so a token never reaches another
 // tenant's or another device's resources. A "connect" token is consumed by being presented.
-export async function authenticate(req: Request, env: Env, scope: Scope): Promise<Identity | null> {
+export async function authenticate(req: Request, env: Env, scope: ConnectScope): Promise<Identity | null> {
   // A missing header is null, which the pattern reads as the text "null" and does not match.
   const m = BEARER_TOKEN.exec(req.headers.get("Authorization") as string);
   if (!m) return null;

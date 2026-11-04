@@ -19,7 +19,7 @@ import {
   type Card,
   type Page,
 } from "./acl";
-import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type Scope } from "./connect";
+import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "./connect";
 import type { Env } from "./index";
 import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, type Retention } from "./task";
 import { cleanText } from "./text";
@@ -98,7 +98,7 @@ interface StoredConnect {
   created: number;
   exp: number;
   version?: number;
-  scope?: Scope;
+  scope?: ConnectScope;
 }
 
 // A published card with the routing facts the gateway derived itself: the
@@ -143,17 +143,7 @@ const random = (n: number) => hex(crypto.getRandomValues(new Uint8Array(n)));
 
 export { cleanText };
 
-function decodeBytes(b64: string, length: number): Uint8Array | null {
-  try {
-    const bin = atob(b64);
-    if (bin.length !== length) return null;
-    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
-  } catch {
-    return null;
-  }
-}
-
-export const decodeKey = (b64: string) => decodeBytes(b64, 32);
+export const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 
 // One Tenant DO per customer (named by tenant id). It holds the enrollment
 // tokens (as hashes) and the approval queue. Binding signatures come from the
@@ -216,7 +206,8 @@ export class Tenant extends DurableObject<Env> {
   private async enroll(
     input: { user?: string; token?: string; name: string; signing_key: string },
   ): Promise<{ id: string; poll: string } | { error: EnrollError }> {
-    const key = decodeKey(input.signing_key);
+    // Enrollment tolerates pasted whitespace; the stored key is the canonical spelling.
+    const key = b64bytes(input.signing_key.replace(/\s/g, ""), 32);
     const name = cleanText(input.name, 100);
     if (!key || !name) return { error: "bad_request" };
     let owner = input.user === undefined ? undefined : cleanText(input.user, 254)?.toLowerCase();
@@ -343,7 +334,7 @@ export class Tenant extends DurableObject<Env> {
   // The tenant's root public key, registered by the admin. The first one stays: the same key again is fine, another
   // is refused (a new root is a new tenant). Without it no device may connect.
   async setRoot(b64: string): Promise<"ok" | "conflict" | "bad"> {
-    const key = decodeKey(b64);
+    const key = b64bytes(b64, 32);
     if (!key) return "bad";
     const canonical = btoa(String.fromCharCode(...key));
     const cur = await this.ctx.storage.get<string>("root");
@@ -356,7 +347,7 @@ export class Tenant extends DurableObject<Env> {
   // binding the registered root signed for this tenant and device and that has not expired, and whose key is the one
   // that was enrolled. Anything else is null.
   private async connectable(tenant: string, device: string): Promise<{ key: Uint8Array; version: number } | null> {
-    const root = decodeKey((await this.ctx.storage.get<string>("root")) ?? "");
+    const root = b64bytes((await this.ctx.storage.get<string>("root")) ?? "", 32);
     if (!root || !isDeviceId(device) || (await this.revokedIds()).has(device)) return null;
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${device}`);
     if (!rec || rec.status !== "approved" || !rec.binding) return null;
@@ -387,7 +378,7 @@ export class Tenant extends DurableObject<Env> {
   // every reason alike, unless the challenge is ours, unexpired and issued for this device, the device may connect
   // at exactly `version`, and `signature` is the device's over connectMessage for that challenge, its expiry,
   // the version and the scope.
-  issueConnectToken(tenant: string, device: string, challenge: string, version: number, scope: Scope, signature: string): Promise<{ secret: string; expires_at: number } | null> {
+  issueConnectToken(tenant: string, device: string, challenge: string, version: number, scope: ConnectScope, signature: string): Promise<{ secret: string; expires_at: number } | null> {
     // Serialized: the consumption of a challenge must not interleave with a second redemption of it.
     return this.ctx.blockConcurrencyWhile(async () => {
       const k = `chal:${device}:${await sha256(challenge)}`;
@@ -413,7 +404,7 @@ export class Tenant extends DurableObject<Env> {
   // Whether the token authenticates the device for `scope` now: known, of that scope, unexpired, and the device
   // still connectable at the binding version the token was issued for. A "connect" token is deleted by being
   // presented, before any check but its existence (the read and the delete have no other await between them).
-  async connectAuth(tenant: string, device: string, secret: string, scope: Scope): Promise<boolean> {
+  async connectAuth(tenant: string, device: string, secret: string, scope: ConnectScope): Promise<boolean> {
     const k = `dtk:${device}:${await sha256(secret)}`;
     const rec = await this.ctx.storage.get<StoredConnect>(k);
     if (!rec || rec.scope !== scope) return false;

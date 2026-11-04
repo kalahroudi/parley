@@ -4,7 +4,7 @@
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { SEALED_MEDIA_TYPE } from "../src/a2a";
-import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, verifyBinding, verifyEd25519, type Scope } from "../src/connect";
+import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, verifyBinding, verifyEd25519, type ConnectScope } from "../src/connect";
 import type { Env } from "../src/index";
 import { CONNECT_TOKEN_TTL_MS, MAX_CHALLENGES_PER_DEVICE, MAX_CONNECT_TOKENS_PER_DEVICE } from "../src/tenant";
 import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
@@ -75,15 +75,15 @@ function tenant() {
     return post("/v1/admin/bindings", { id: d.id, binding }, { Authorization: await admin });
   };
   const challenge = async (d: { id: string }) => (await json(await post("/v1/connect/challenge", { tenant: t, device: d.id }))) as { challenge: string; expires_at: number };
-  type Over = { challenge?: string; expires?: number; version?: number; scope?: Scope; signature?: string; tenant?: string; device?: string; signMessage?: Uint8Array };
+  type Over = { challenge?: string; expires?: number; version?: number; scope?: ConnectScope; signature?: string; tenant?: string; device?: string; signMessage?: Uint8Array };
   // The whole proof: a challenge, a signature over the message for it, the token request.
-  const redeem = async (d: Dev, over: Over = {}, scope: Scope = "api") => {
+  const redeem = async (d: Dev, over: Over = {}, scope: ConnectScope = "api") => {
     const ch = over.challenge === undefined ? await challenge(d) : { challenge: over.challenge, expires_at: over.expires ?? 0 };
     const version = over.version ?? 1;
     const signature = over.signature ?? (await edSign(d.key.privateKey, over.signMessage ?? connectMessage(t, d.id, ch.challenge, over.expires ?? ch.expires_at, version, over.scope ?? scope)));
     return post("/v1/connect/token", { tenant: over.tenant ?? t, device: over.device ?? d.id, challenge: ch.challenge, version, scope, signature });
   };
-  const token = async (d: Dev, scope: Scope = "api", version = 1) => {
+  const token = async (d: Dev, scope: ConnectScope = "api", version = 1) => {
     const r = await redeem(d, { version }, scope);
     expect(r.status).toBe(200);
     return (await json(r)).token as string;
