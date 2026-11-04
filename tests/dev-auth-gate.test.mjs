@@ -67,3 +67,41 @@ test("the development auth code path must be gone from gateway and dashboard sou
     assert.match(problems[0], /development auth path present/);
   }
 });
+
+test("every reintroduction pattern fails the gate: other casing, split strings, other file kinds", () => {
+  const enabled = [
+    ["gateway/wrangler.jsonc", '{ "vars": { "dev_auth": "1" } }'],
+    ["gateway/wrangler.jsonc", '{ "vars": { "Dev_Auth": 1 } }'],
+    ["gateway/wrangler.toml", 'DEV_AUTH\n=\n"1"\n'],
+    ["gateway/wrangler.toml", '[vars]\nDEV_AUTH = "yes"\n'],
+    ["gateway/.dev.vars.production", "DEV_AUTH=1\n"],
+    ["gateway/.env", "dev_auth=1\n"],
+    ["gateway/.env.production", "DEV_AUTH=1\n"],
+    ["gateway/wrangler.jsonc", '{ "vars": { "DEV_" + "AUTH": "1" } }'],
+    ["gateway/wrangler.jsonc", '{ "vars": { "DEV_"\n+ "AUTH": "1" } }'],
+    [".github/workflows/deploy.yml", "env:\n  DEV_AUTH: '1'\n"],
+    [".github/workflows/release.yml", "run: wrangler deploy --var dev_auth:1\n"],
+    ["package.json", '{ "scripts": { "deploy": "wrangler deploy --var DEV_AUTH:1" } }'],
+    ["Dockerfile", "ENV DEV_AUTH=1\n"],
+    ["scripts/release.sh", "export DEV_AUTH=1\n"],
+  ];
+  for (const [file, text] of enabled) {
+    const problems = check(repo({ [file]: text }));
+    assert.equal(problems.length, 1, `${file}: ${JSON.stringify(text)}`);
+    assert.match(problems[0], /DEV_AUTH is enabled/);
+  }
+  const code = [
+    ["gateway/src/a.ts", "if (env.dev_auth) return null;"],
+    ["gateway/src/a.ts", "const k = 'DEV_' +\n  'AUTH';"],
+    ["gateway/src/a.ts", "const k = `DEV_${''}AUTH`; // DEV_\\\nAUTH"],
+    ["gateway/src/a.ts", "const m = /^Bearer Dev-Admin:/i.exec(h);"],
+    ["gateway/src/a.ts", "const m = 'dev-' + 'user';"],
+    ["gateway/src/a.ts", "const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(h);"],
+    ["dashboard/src/a.ts", "// dev-\nadmin"],
+  ];
+  for (const [file, text] of code) {
+    const problems = check(repo({ [file]: text }));
+    assert.equal(problems.length, 1, `${file}: ${JSON.stringify(text)}`);
+    assert.match(problems[0], /development auth path present/);
+  }
+});

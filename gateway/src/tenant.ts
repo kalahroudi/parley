@@ -33,6 +33,9 @@ export const DECIDED_RETENTION_MS = 30 * 24 * 3600_000;
 // the secret is stored only as a hash.
 export const SESSION_TTL_MS = 8 * 3600_000;
 export const MAX_SESSIONS_PER_USER = 5;
+// Anyone with an IdP login can hold a user session, so user sessions are capped per tenant too (oldest go first).
+// Admin sessions are never evicted by a flood of user sessions.
+export const MAX_USER_SESSIONS = 1000;
 
 export type Role = "admin" | "user";
 export interface Session {
@@ -149,10 +152,12 @@ export class Tenant extends DurableObject<Env> {
     const secret = random(32);
     const key = `ses:${await sha256(secret)}`; // hashed first: no await between the cap check and the write
     const rec: Session = { email, role, csrf: random(16), created: now, exp: now + SESSION_TTL_MS };
-    const mine = [...(await this.ctx.storage.list<Session>({ prefix: "ses:" }))]
-      .filter(([, s]) => s.email === email && s.role === role)
-      .sort((a, b) => a[1].created - b[1].created);
-    for (const [k] of mine.slice(0, Math.max(0, mine.length - MAX_SESSIONS_PER_USER + 1))) await this.ctx.storage.delete(k);
+    const all = [...(await this.ctx.storage.list<Session>({ prefix: "ses:" }))].sort((a, b) => a[1].created - b[1].created);
+    const mine = all.filter(([, s]) => s.email === email && s.role === role);
+    const evict = new Set(mine.slice(0, Math.max(0, mine.length - MAX_SESSIONS_PER_USER + 1)).map(([k]) => k));
+    const users = all.filter(([k, s]) => s.role === "user" && !evict.has(k));
+    if (role === "user") for (const [k] of users.slice(0, Math.max(0, users.length - MAX_USER_SESSIONS + 1))) evict.add(k);
+    await Promise.all(this.deleteAll([...evict]));
     await this.ctx.storage.put(key, rec);
     await this.schedule(rec.exp);
     return { secret, csrf: rec.csrf, expires_at: rec.exp };

@@ -4,7 +4,10 @@
 import type { Env } from "./index";
 import { SESSION_TTL_MS, type Role, type Tenant } from "./tenant";
 
+// Over HTTPS the cookie is `__Host-` prefixed: the browser then refuses it unless it is Secure, has Path=/ and no
+// Domain, so a sibling subdomain cannot plant or overwrite it. Plain http (local development) cannot use the prefix.
 export const COOKIE = "parley_session";
+const cookieName = (req: Request) => (new URL(req.url).protocol === "https:" ? `__Host-${COOKIE}` : COOKIE);
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SECRET = /^[0-9a-f]{64}$/;
 const json = (status: number, body: unknown, headers: HeadersInit = {}) =>
@@ -22,30 +25,43 @@ export function isAdmin(env: Env, tenant: string, email: string): boolean {
   return (env.ADMINS ?? "").split(",").some((e) => e.trim().toLowerCase() === want);
 }
 
+export function tenantConfigured(env: Env, tenant: string): boolean {
+  return (env.ADMINS ?? "").split(",").some((e) => e.trim().toLowerCase().startsWith(`${tenant.toLowerCase()}:`));
+}
+
 function sessionCookie(req: Request, value: string, maxAgeS: number): string {
   const secure = new URL(req.url).protocol === "https:" ? "; Secure" : "";
-  return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeS}${secure}`;
+  return `${cookieName(req)}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeS}${secure}`;
 }
 
 // Called by the OIDC callback with a verified identity. The token goes only in
 // the HttpOnly cookie; the body carries what the page needs (the CSRF token).
 export async function issueSession(req: Request, env: Env, tenant: string, role: Role, email: string): Promise<Response> {
   if (!ID.test(tenant)) return json(400, { error: "bad_request" });
-  if (role === "admin" && !isAdmin(env, tenant, email)) return json(403, { error: "not_admin" });
+  // One answer for "no such tenant", "not an admin" and "tenant not configured", so a login cannot probe which exist.
+  // Only tenants named in ADMINS can be signed in to at all: nobody can create a tenant by asking for it.
+  if (!tenantConfigured(env, tenant) || (role === "admin" && !isAdmin(env, tenant, email))) return json(403, { error: "not_admin" });
+  // Rotation: a login never reuses a session. The one this browser already presented, if any, ends now.
+  const old = await principal(req, env);
+  if (old) await tenantStub(env, old.tenant).endSession(old.secret);
   const s = await tenantStub(env, tenant).createSession(email, role);
   return json(200, { role, tenant, email, csrf: s.csrf, expires_at: s.expires_at }, { "set-cookie": sessionCookie(req, token(tenant, s.secret), SESSION_TTL_MS / 1000) });
 }
 
 // A session arrives as the cookie (a browser; needs CSRF and Origin checks) or
 // as `Authorization: Bearer ps_...` (a program that holds the token itself; not
-// ambient, so no CSRF risk). Nothing else is accepted.
+// ambient, so no CSRF risk). Nothing else is accepted. Why the exemption is safe: a
+// cross-site page cannot set Authorization without a CORS preflight, which the gateway never
+// grants; the login flow puts the token only in an HttpOnly cookie, so no browser script can
+// learn it to use as a bearer; and the two forms never mix: with an Authorization header the
+// cookie is ignored, without one only the cookie is read.
 export async function principal(req: Request, env: Env): Promise<Principal | null> {
   const auth = req.headers.get("Authorization");
   let raw: string | undefined;
   let via: Principal["via"] = "bearer";
   if (auth !== null) raw = /^Bearer (ps_\S+)$/.exec(auth)?.[1];
   else {
-    raw = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.get("cookie") ?? "")?.[1];
+    raw = new RegExp(`(?:^|;\\s*)${cookieName(req)}=([^;]+)`).exec(req.headers.get("cookie") ?? "")?.[1];
     via = "cookie";
   }
   const m = /^ps_([^.]+)\.(.+)$/.exec(raw ?? "");

@@ -4,7 +4,7 @@
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { isAdmin, issueSession } from "../src/session";
-import { MAX_SESSIONS_PER_USER, SESSION_TTL_MS, type Tenant } from "../src/tenant";
+import { MAX_SESSIONS_PER_USER, MAX_USER_SESSIONS, SESSION_TTL_MS, type Tenant } from "../src/tenant";
 import type { Env } from "../src/index";
 
 let n = 0;
@@ -19,7 +19,7 @@ const call = (path: string, init: { cookie?: string; bearer?: string; origin?: s
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(init.cookie ? { cookie: `parley_session=${init.cookie}` } : {}),
+      ...(init.cookie ? { cookie: `__Host-parley_session=${init.cookie}` } : {}),
       ...(init.bearer ? { Authorization: init.bearer } : {}),
       ...(init.origin ? { Origin: init.origin } : {}),
       ...(init.csrf ? { "X-CSRF-Token": init.csrf } : {}),
@@ -76,7 +76,8 @@ describe("issuing a session", () => {
     const r = await issueSession(req(), e, "tx", "admin", "Root@example.test".toLowerCase());
     expect(r.status).toBe(200);
     const c = r.headers.get("set-cookie")!;
-    expect(c).toMatch(/^parley_session=ps_tx\.[0-9a-f]{64}; /);
+    expect(c).toMatch(/^__Host-parley_session=ps_tx\.[0-9a-f]{64}; /);
+    expect(c).not.toContain("Domain");
     for (const a of ["Path=/", "HttpOnly", "SameSite=Strict", "Secure", `Max-Age=${SESSION_TTL_MS / 1000}`]) expect(c).toContain(a);
     const body = (await r.json()) as any;
     expect(body).toMatchObject({ role: "admin", tenant: "tx", email: "root@example.test" });
@@ -87,6 +88,7 @@ describe("issuing a session", () => {
 
   it("omits Secure over plain http (local development) only", async () => {
     const r = await issueSession(req("http"), e, "tx", "user", "bob@example.test");
+    expect(r.headers.get("set-cookie")).toMatch(/^parley_session=/); // no __Host- prefix without Secure
     expect(r.headers.get("set-cookie")).not.toContain("Secure");
     expect(r.headers.get("set-cookie")).toContain("HttpOnly");
   });
@@ -95,6 +97,34 @@ describe("issuing a session", () => {
     expect((await issueSession(req(), e, "tx", "admin", "mallory@example.test")).status).toBe(403);
     expect((await issueSession(req(), e, "other", "admin", "root@example.test")).status).toBe(403);
     expect((await issueSession(req(), e, "bad tenant", "user", "bob@example.test")).status).toBe(400);
+  });
+
+  it("gives the same refusal for a tenant nobody configured, for either role, and creates nothing there", async () => {
+    for (const role of ["admin", "user"] as const) {
+      const r = await issueSession(req(), e, "nowhere", role, "root@example.test");
+      expect(r.status).toBe(403);
+      expect(await r.json()).toEqual({ error: "not_admin" });
+    }
+    const n = await runInDurableObject(stub("nowhere"), async (_i, ctx) => (await ctx.storage.list({ prefix: "ses:" })).size);
+    expect(n).toBe(0);
+  });
+
+  it("fails closed on an empty or odd ADMINS setting", async () => {
+    for (const admins of [undefined, "", " , ", "*", "tx:*", "tx", ":root@example.test", "tx:root@example.test.evil", "ttx:root@example.test", "tx:root@example.testx"]) {
+      const bad = { ...env, ADMINS: admins } as Env;
+      expect((await issueSession(req(), bad, "tx", "admin", "root@example.test")).status, String(admins)).toBe(403);
+    }
+    expect(isAdmin({ ADMINS: "tx:*" } as Env, "tx", "anyone@example.test")).toBe(false);
+  });
+
+  it("a login ends the session this browser presented, and a new login never reuses a token", async () => {
+    const a = await issueSession(req(), e, "tx", "user", "bob@example.test");
+    const b = await issueSession(req(), e, "tx", "user", "bob@example.test");
+    const tok = (r: Response) => r.headers.get("set-cookie")!.split(";")[0]!.split("=")[1]!;
+    expect(tok(a)).not.toBe(tok(b));
+    const withCookie = new Request("https://gw/auth/google/callback", { headers: { cookie: `__Host-parley_session=${tok(b)}` } });
+    await issueSession(withCookie, { ...env, ADMINS: "tx:root@example.test" } as Env, "tx", "user", "bob@example.test");
+    expect((await SELF.fetch("https://gw/v1/session", { method: "POST", headers: { Authorization: `Bearer ${tok(b)}` } })).status).toBe(401);
   });
 
   it("the issued cookie works, with CSRF", async () => {
@@ -119,6 +149,9 @@ describe("cookie sessions need CSRF protection", () => {
     expect((await mintTok({ origin: "https://evil.example" })).status).toBe(403);
     expect((await mintTok({ origin: undefined })).status).toBe(403);
     expect((await mintTok({ origin: "https://gw.evil.example" })).status).toBe(403);
+    for (const o of ["http://gw", "https://gw:8443", "https://gw/", "https://evil.example/https://gw", "null", "https://gw.evil.example", "https://sub.gw"]) {
+      expect((await mintTok({ origin: o })).status, o).toBe(403);
+    }
     expect(await count()).toBe(0);
 
     expect((await mintTok({})).status).toBe(201);
@@ -174,7 +207,7 @@ describe("expiry and sign-out", () => {
     const cookie = `ps_${t}.${s.secret}`;
     const out = await call("/v1/session/logout", { cookie, origin: "https://gw", csrf: s.csrf });
     expect(out.status).toBe(200);
-    expect(out.headers.get("set-cookie")).toMatch(/^parley_session=; .*Max-Age=0/);
+    expect(out.headers.get("set-cookie")).toMatch(/^__Host-parley_session=; .*Max-Age=0/);
     expect((await call("/v1/admin/enrollments", { cookie, origin: "https://gw", csrf: s.csrf })).status).toBe(401);
     expect((await call("/v1/session", { bearer: `Bearer ${s.token}` })).status).toBe(401);
   });
@@ -222,5 +255,31 @@ describe("allowlist changes", () => {
     const t = tenant();
     const s = await stub(t).createSession("gone@example.test", "admin"); // not on the test allowlist
     expect((await call("/v1/session", { bearer: `Bearer ps_${t}.${s.secret}` })).status).toBe(401);
+  });
+});
+
+describe("session limits", () => {
+  it("user sessions are capped per tenant and a flood never evicts an admin", async () => {
+    const t = tenant();
+    const admin = await mint(t);
+    await runInDurableObject(stub(t), async (_i, ctx) => {
+      const rows: Record<string, unknown> = {};
+      for (let i = 0; i < MAX_USER_SESSIONS; i++) rows[`ses:flood${i}`] = { email: `u${i}@example.test`, role: "user", csrf: "x", created: i + 1, exp: Date.now() + 3600_000 };
+      await ctx.storage.put(rows);
+    });
+    await stub(t).createSession("new@example.test", "user");
+    const keys = await runInDurableObject(stub(t), async (_i, ctx) => [...(await ctx.storage.list<any>({ prefix: "ses:" }))].map(([k, v]) => [k, v.role]));
+    expect(keys.filter(([, r]) => r === "user").length).toBe(MAX_USER_SESSIONS);
+    expect(keys.some(([k]) => k === "ses:flood0")).toBe(false); // the oldest went
+    expect((await call("/v1/session", { bearer: `Bearer ${admin.token}` })).status).toBe(200);
+  });
+
+  it("an admin of one tenant cannot act in another, by token or by renaming it", async () => {
+    const a = tenant();
+    const b = tenant();
+    const sa = await mint(a);
+    for (const tok of [`ps_${b}.${sa.secret}`, `ps_${a}.${sa.secret}`.replace(a, b)]) {
+      expect((await call("/v1/admin/enrollments", { bearer: `Bearer ${tok}` })).status).toBe(401);
+    }
   });
 });
