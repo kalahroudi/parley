@@ -323,7 +323,7 @@ describe("storage", () => {
     await publish(d, card());
     await x.stub.putGroup("eng", ["a@example.test"]);
     const keys = await runInDurableObject(x.stub, async (_i, s) => [...(await s.storage.list()).keys()].map((k) => k.split(":")[0]));
-    expect([...new Set(keys)].sort()).toEqual(["aud", "auds", "card", "enr", "grp"]);
+    expect([...new Set(keys)].sort()).toEqual(["aud", "auds", "card", "enr", "grp", "rl"]);
   });
 });
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Env } from "./index";
+import { clientAddress, sourceKey, tooMany, type Scope } from "./ratelimit";
 import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
 
 const MAX_BODY_BYTES = MAX_LIST_BYTES + 1024;
@@ -38,6 +39,12 @@ async function body(req: Request): Promise<Record<string, unknown> | null> {
     return null;
   }
 }
+// Counts an unauthenticated or self-service call against its source: the
+// signed-in user's email, or the client address, salted per tenant and hashed.
+async function limited(env: Env, tenant: string, scope: Scope, who: string): Promise<Response | null> {
+  const r = await tenantStub(env, tenant).rateLimit(scope, await sourceKey(`${env.FLOW_SECRET}|${tenant}`, who));
+  return r.ok ? null : tooMany(r.retry_after_ms);
+}
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
 // Every route is a POST with a JSON body, so no identifier or secret appears in
@@ -62,6 +69,8 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
       return json(401, { error: "unauthorized" });
     }
     if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
+    const over = await limited(env, tenant, "enroll", user !== undefined ? user.toLowerCase() : clientAddress(req));
+    if (over) return over;
     const r = await tenantStub(env, tenant).request({ user, token, name: str(b.name) ?? "", signing_key: str(b.signing_key) ?? "" });
     if ("error" in r) return json(r.error === "bad_token" ? 401 : r.error === "queue_full" || r.error === "owner_full" ? 429 : 400, { error: r.error });
     return json(202, r);
@@ -70,6 +79,8 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
   if (pathname === "/v1/enroll/status") {
     const tenant = str(b.tenant);
     if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
+    const over = await limited(env, tenant, "status", clientAddress(req));
+    if (over) return over;
     const e = await tenantStub(env, tenant).status(str(b.id) ?? "", str(b.poll) ?? "");
     return e ? json(200, { status: e.status, fingerprint: e.fingerprint, binding: e.binding }) : json(404, { error: "not_found" });
   }

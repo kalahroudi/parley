@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -508,6 +510,82 @@ func TestSubmitChecks(t *testing.T) {
 	}
 	if err := o.Submit(task(c, "c", time.Hour)); err != nil {
 		t.Errorf("after a slot freed: %v", err)
+	}
+}
+
+func TestStatesUseTheGatewaysVocabulary(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "gateway", "src", "a2a.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for st, want := range map[State]string{Waiting: "TASK_STATE_SUBMITTED", Sending: "TASK_STATE_SUBMITTED", Failed: "TASK_STATE_FAILED", Canceled: "TASK_STATE_CANCELED", Sent: ""} {
+		if got := (Status{State: st}).A2AState(); got != want {
+			t.Errorf("state %d: %q, want %q", st, got, want)
+		}
+		if want != "" && !strings.Contains(string(src), `"`+want+`"`) {
+			t.Errorf("gateway/src/a2a.ts no longer names %s", want)
+		}
+	}
+}
+
+// Exactly once: many tasks, some canceled, some whose target drops mid-send, all
+// racing. Each task is sent (Send returned nil) at most once, never concurrently
+// with itself, and never after it was canceled or failed.
+func TestEachTaskIsSentAtMostOnceUnderRaces(t *testing.T) {
+	c := newClock()
+	var mu sync.Mutex
+	sent := map[string]int{}
+	inFlight := map[string]bool{}
+	drops := map[string]int{}
+	o := newOutbox(t, Config{Now: c.Now, Sleep: c.Sleep, Jitter: same, MaxWaiting: 200,
+		Presence: func(_ context.Context, target string) (bool, error) { return target != "card-t7", nil },
+		Send: func(_ context.Context, tk Task) error {
+			mu.Lock()
+			if inFlight[tk.ID] {
+				t.Errorf("%s sent concurrently", tk.ID)
+			}
+			inFlight[tk.ID] = true
+			mu.Unlock()
+			runtime.Gosched() // give a second sender of the same task every chance to overlap
+			mu.Lock()
+			defer mu.Unlock()
+			inFlight[tk.ID] = false
+			if drops[tk.ID] < 2 && tk.ID[len(tk.ID)-1]%2 == 0 {
+				drops[tk.ID]++
+				return ErrOffline
+			}
+			sent[tk.ID]++
+			return nil
+		}})
+	const n = 100
+	for i := 0; i < n; i++ {
+		if err := o.Submit(task(c, fmt.Sprintf("t%d", i), time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < n; i += 3 {
+		wg.Add(1)
+		go func(id string) { defer wg.Done(); _ = o.Cancel(id) }(fmt.Sprintf("t%d", i))
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("t%d", i)
+		if id == "t7" {
+			if err := o.Cancel(id); err != nil { // never online: it is still waiting
+				t.Fatal(err)
+			}
+		}
+		st := waitDone(t, o, id)
+		mu.Lock()
+		n := sent[id]
+		mu.Unlock()
+		if n > 1 || (st.State == Sent) != (n == 1) {
+			t.Fatalf("%s: state %+v sent %d times", id, st, n)
+		}
+		if st.State == Canceled && n != 0 {
+			t.Fatalf("%s sent and canceled", id)
+		}
 	}
 }
 

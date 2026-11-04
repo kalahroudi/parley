@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SEALED_MEDIA_TYPE } from "../src/a2a";
-import { POLICIES, take, type Bucket, type Policy } from "../src/ratelimit";
+import { POLICIES, TENANT_POLICIES, clientAddress, sourceKey, take, tooMany, type Bucket, type Policy } from "../src/ratelimit";
 import { BUCKET_FULL_RETRY_MS, MAX_BUCKETS } from "../src/tenant";
 import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
 
@@ -50,7 +50,50 @@ describe("token bucket arithmetic", () => {
       find: { capacity: 30, refillPerSec: 1 },
       presence: { capacity: 60, refillPerSec: 2 },
       login: { capacity: 10, refillPerSec: 1 / 6 },
+      enroll: { capacity: 20, refillPerSec: 1 / 30 },
+      status: { capacity: 30, refillPerSec: 0.5 },
+      session: { capacity: 30, refillPerSec: 0.5 },
     });
+    expect(TENANT_POLICIES).toEqual({
+      task: { capacity: 400, refillPerSec: 10 },
+      enroll: { capacity: 60, refillPerSec: 1 },
+      status: { capacity: 300, refillPerSec: 10 },
+    });
+  });
+});
+
+describe("source keys and the refusal", () => {
+  it("hashes a source with a salt: stable, 128 bits, different per salt and per value, never the value", async () => {
+    const k = await sourceKey("salt-a|t1", "203.0.113.9");
+    expect(k).toMatch(/^[0-9a-f]{32}$/);
+    expect(await sourceKey("salt-a|t1", "203.0.113.9")).toBe(k);
+    expect(await sourceKey("salt-a|t2", "203.0.113.9")).not.toBe(k);
+    expect(await sourceKey("salt-a|t1", "203.0.113.10")).not.toBe(k);
+    expect(k).not.toContain("203");
+  });
+
+  it("is HMAC-SHA256 truncated to 16 bytes, zero-padded per byte, and the key is not extractable", async () => {
+    // Computed with node:crypto: createHmac("sha256", "salt|t1").update("value4"); it has a byte below 0x10.
+    const spy = vi.spyOn(crypto.subtle, "importKey");
+    expect(await sourceKey("salt|t1", "value4")).toBe("5f42fa0d4816c9e1cd09c0335eca8acc");
+    expect(spy.mock.calls[0]![3]).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("reads the Cloudflare client address, or \"none\"", () => {
+    expect(clientAddress(new Request("https://gw/", { headers: { "CF-Connecting-IP": "192.0.2.1" } }))).toBe("192.0.2.1");
+    expect(clientAddress(new Request("https://gw/"))).toBe("none");
+  });
+
+  it("answers 429 with the exact wait and a whole-second Retry-After that is never zero", async () => {
+    for (const [ms, secs] of [[0, "1"], [1, "1"], [1000, "1"], [1001, "2"], [6000, "6"]] as const) {
+      const r = tooMany(ms);
+      expect(r.status).toBe(429);
+      expect(r.headers.get("retry-after")).toBe(secs);
+      expect(r.headers.get("cache-control")).toBe("no-store");
+      expect(r.headers.get("content-type")).toBe("application/json");
+      expect(await r.json()).toEqual({ error: "rate_limited", retry_after_ms: ms });
+    }
   });
 });
 
@@ -79,6 +122,40 @@ describe("the Tenant DO's counters", () => {
     expect(await call(x, "rateLimit", "message", "alice")).toEqual({ ok: true }); // another scope
   });
 
+  it("a tenant-wide counter limits all sources together, and a refusal charges neither counter", async () => {
+    const x = tenant();
+    const keys = () => runInDurableObject(x.stub, async (_i, st) => [...(await st.storage.list<Bucket>({ prefix: "rl:" }))].sort());
+    expect(await call(x, "rateLimit", "enroll", "s1")).toEqual({ ok: true });
+    expect((await keys()).map(([k]) => k)).toEqual(["rl:enroll:*", "rl:enroll:s1"]);
+    await empty(x, "enroll", "*");
+    const denied = await call(x, "rateLimit", "enroll", "s2");
+    expect(denied.ok).toBe(false);
+    expect(denied.retry_after_ms).toBeGreaterThan(0);
+    expect((await keys()).map(([k]) => k)).toEqual(["rl:enroll:*", "rl:enroll:s1"]); // s2 was not charged (or created)
+    // The other way round: the source is empty, the tenant counter has room and is not charged.
+    const y = tenant();
+    await drain(y, "enroll", "s1", POLICIES.enroll.capacity);
+    const before = await runInDurableObject(y.stub, (_i, st) => st.storage.get<Bucket>("rl:enroll:*"));
+    expect((await call(y, "rateLimit", "enroll", "s1")).ok).toBe(false);
+    expect(await runInDurableObject(y.stub, (_i, st) => st.storage.get<Bucket>("rl:enroll:*"))).toEqual(before);
+  });
+
+  it("the wait is the longer of the two counters', and a scope with no tenant-wide counter has none", async () => {
+    const x = tenant();
+    // Source empty (30 s to a token), tenant-wide empty (1 s): the source decides.
+    await call(x, "rateLimit", "enroll", "s1");
+    await empty(x, "enroll", "*");
+    await empty(x, "enroll", "s1");
+    expect((await call(x, "rateLimit", "enroll", "s1")).retry_after_ms).toBe(30_000);
+    // Source nearly full of tokens (20 ms), tenant-wide empty (100 ms): the tenant decides.
+    await call(x, "rateLimit", "status", "s1");
+    await empty(x, "status", "*");
+    await runInDurableObject(x.stub, async (_i, st) => void (await st.storage.put("rl:status:s1", { tokens: 0.99, at: Date.now() + 3_600_000, full_at: 0 })));
+    expect((await call(x, "rateLimit", "status", "s1")).retry_after_ms).toBe(100);
+    expect(await call(x, "rateLimit", "login", "src")).toEqual({ ok: true });
+    expect(await runInDurableObject(x.stub, (_i, st) => st.storage.get("rl:login:*"))).toBeUndefined();
+  });
+
   it("counters are per tenant", async () => {
     const a = tenant();
     const b = tenant();
@@ -89,24 +166,24 @@ describe("the Tenant DO's counters", () => {
 
   it("forgets a bucket once it has refilled, and keeps (and re-arms for) one that has not", async () => {
     const x = tenant();
-    await drain(x, "task", "spent", 1);
-    await drain(x, "task", "old", 1);
+    await drain(x, "presence", "spent", 1);
+    await drain(x, "presence", "old", 1);
     const keys = () => runInDurableObject(x.stub, async (_i, s) => [...(await s.storage.list({ prefix: "rl:" })).keys()].sort());
-    expect(await keys()).toEqual(["rl:task:old", "rl:task:spent"]);
+    expect(await keys()).toEqual(["rl:presence:old", "rl:presence:spent"]);
     const full = Date.now() + 3_600_000;
     await runInDurableObject(x.stub, async (_i, s) => {
-      await s.storage.put("rl:task:old", { tokens: 0, at: 0, full_at: Date.now() - 1 });
-      await s.storage.put("rl:task:spent", { tokens: 0, at: 0, full_at: full });
+      await s.storage.put("rl:presence:old", { tokens: 0, at: 0, full_at: Date.now() - 1 });
+      await s.storage.put("rl:presence:spent", { tokens: 0, at: 0, full_at: full });
       await s.storage.setAlarm(Date.now() + 10);
     });
     expect(await runDurableObjectAlarm(x.stub)).toBe(true);
-    expect(await keys()).toEqual(["rl:task:spent"]);
+    expect(await keys()).toEqual(["rl:presence:spent"]);
     expect(await runInDurableObject(x.stub, (_i, s) => s.storage.getAlarm())).toBe(full);
   });
 
   it("at the cap a caller with no bucket is refused, one with a bucket is served, and a freed slot is reusable", async () => {
     const x = tenant();
-    await drain(x, "task", "known", 1);
+    await drain(x, "presence", "known", 1);
     await runInDurableObject(x.stub, async (_i, s) => {
       const fill: Record<string, unknown> = {};
       for (let i = 0; i < MAX_BUCKETS - 1; i++) {
@@ -118,10 +195,10 @@ describe("the Tenant DO's counters", () => {
       }
       await s.storage.put(fill);
     });
-    expect(await call(x, "rateLimit", "task", "new")).toEqual({ ok: false, retry_after_ms: BUCKET_FULL_RETRY_MS });
-    expect(await call(x, "rateLimit", "task", "known")).toEqual({ ok: true });
+    expect(await call(x, "rateLimit", "presence", "new")).toEqual({ ok: false, retry_after_ms: BUCKET_FULL_RETRY_MS });
+    expect(await call(x, "rateLimit", "presence", "known")).toEqual({ ok: true });
     await runInDurableObject(x.stub, (_i, s) => s.storage.delete("rl:find:filler0"));
-    expect(await call(x, "rateLimit", "task", "new")).toEqual({ ok: true });
+    expect(await call(x, "rateLimit", "presence", "new")).toEqual({ ok: true });
   });
 });
 
@@ -299,6 +376,59 @@ describe("limits on the directory, and presence", () => {
     const r = await post(x, "/v1/directory/presence", { id: "x" }, alice.auth);
     expect(r.status).toBe(429);
     expect((await r.json()) as any).toEqual({ error: "rate_limited", retry_after_ms: expect.any(Number) });
+  });
+});
+
+describe("limits on enrollment", () => {
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    SELF.fetch(`https://gw${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const salted = (T: string, who: string) => sourceKey(`test-flow-secret|${T}`, who);
+  const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+  const emptyFor = async (x: ReturnType<typeof tenant>, scope: string, who: string) => empty(x, scope, await salted(x.T, who));
+
+  it("limits enrollment requests per user, then refuses with the wait, and others are unaffected", async () => {
+    const x = tenant();
+    const as = (email: string) => ({ Authorization: `Bearer dev-user:${x.T}:${email}` });
+    expect((await post("/v1/enroll/request", { name: "laptop", signing_key: key() }, as("Alice@Example.test"))).status).toBe(202);
+    await emptyFor(x, "enroll", "alice@example.test"); // keyed by the lowercased email
+    const r = await post("/v1/enroll/request", { name: "laptop", signing_key: key() }, as("ALICE@example.test"));
+    expect(r.status).toBe(429);
+    expect(await r.json()).toEqual({ error: "rate_limited", retry_after_ms: expect.any(Number) });
+    expect(r.headers.get("retry-after")).toMatch(/^[1-9][0-9]*$/);
+    expect((await post("/v1/enroll/request", { name: "laptop", signing_key: key() }, as("bob@example.test"))).status).toBe(202);
+  });
+
+  it("limits pod-token attempts and status polls per client address", async () => {
+    const x = tenant();
+    const ip = { "CF-Connecting-IP": "192.0.2.77" };
+    expect((await post("/v1/enroll/request", { tenant: x.T, token: "pet_wrong", name: "pod", signing_key: key() }, ip)).status).toBe(401);
+    await emptyFor(x, "enroll", "192.0.2.77");
+    expect((await post("/v1/enroll/request", { tenant: x.T, token: "pet_wrong", name: "pod", signing_key: key() }, ip)).status).toBe(429);
+    expect((await post("/v1/enroll/request", { tenant: x.T, token: "pet_wrong", name: "pod", signing_key: key() }, { "CF-Connecting-IP": "192.0.2.78" })).status).toBe(401);
+
+    expect((await post("/v1/enroll/status", { tenant: x.T, id: "a", poll: "b" }, ip)).status).toBe(404);
+    await emptyFor(x, "status", "192.0.2.77");
+    const r = await post("/v1/enroll/status", { tenant: x.T, id: "a", poll: "b" }, ip);
+    expect(r.status).toBe(429);
+    expect((await post("/v1/enroll/status", { tenant: x.T, id: "a", poll: "b" }, { "CF-Connecting-IP": "192.0.2.78" })).status).toBe(404);
+  });
+
+  it("a malformed request is refused before it is counted, and the tenant counters hold across sources", async () => {
+    const x = tenant();
+    expect((await post("/v1/enroll/request", { tenant: "bad tenant!", token: "t" })).status).toBe(400);
+    expect(await runInDurableObject(x.stub, (_i, st) => st.storage.list({ prefix: "rl:" }).then((m) => m.size))).toBe(0);
+    await empty(x, "status", "*");
+    expect((await post("/v1/enroll/status", { tenant: x.T, id: "a", poll: "b" }, { "CF-Connecting-IP": "198.51.100.1" })).status).toBe(429);
+  });
+
+  it("stores neither the address nor the email, only salted hashes", async () => {
+    const x = tenant();
+    await post("/v1/enroll/request", { name: "laptop", signing_key: key() }, { Authorization: `Bearer dev-user:${x.T}:carol@example.test`, "CF-Connecting-IP": "192.0.2.99" });
+    await post("/v1/enroll/status", { tenant: x.T, id: "a", poll: "b" }, { "CF-Connecting-IP": "192.0.2.99" });
+    const dump = await runInDurableObject(x.stub, async (_i, st) => JSON.stringify([...(await st.storage.list({ prefix: "rl:" }))]));
+    expect(dump).not.toContain("192.0.2.99");
+    expect(dump).not.toContain("carol");
+    expect(dump).toContain(await salted(x.T, "carol@example.test"));
   });
 });
 

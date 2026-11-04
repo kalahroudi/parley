@@ -79,6 +79,22 @@ type Status struct {
 	Err   error
 }
 
+// a2aStates maps a task the gateway has not seen yet onto the task state machine
+// (src/task.ts, as named in src/a2a.ts): waiting for the recipient is SUBMITTED,
+// the same state the gateway reports once it has the task, so the caller sees one
+// continuous lifecycle. Sent is absent on purpose: from there the gateway's Task
+// DO is the only truth, and the daemon asks it.
+var a2aStates = map[State]string{
+	Waiting:  "TASK_STATE_SUBMITTED",
+	Sending:  "TASK_STATE_SUBMITTED",
+	Failed:   "TASK_STATE_FAILED",
+	Canceled: "TASK_STATE_CANCELED",
+}
+
+// A2AState is the task's state in the gateway's vocabulary, or "" once it is
+// Sent (ask the gateway).
+func (s Status) A2AState() string { return a2aStates[s.State] }
+
 // Config wires the outbox. Presence and Send are required; the rest have defaults.
 type Config struct {
 	// Presence reports whether the target is connected. An error that has a
@@ -86,8 +102,11 @@ type Config struct {
 	// one wrapping ErrGone fails the task; any other error is retried with backoff.
 	Presence func(ctx context.Context, target string) (bool, error)
 	// Send asks the target for a prekey and sends the sealed task. nil means
-	// sent; an error wrapping ErrOffline means keep waiting; any other error
-	// (refused, not permitted, prekey rejected) fails the task.
+	// sent; an error wrapping ErrOffline means keep waiting (it must mean the
+	// gateway did not deliver the task: that is what keeps a task from running
+	// twice); any other error (refused, not permitted, prekey rejected) fails
+	// the task. The outbox calls Send for one task at most once at a time and
+	// never again after it returned nil or a failure.
 	Send func(ctx context.Context, t Task) error
 
 	MaxWaiting  int           // zero means DefaultMaxWaiting

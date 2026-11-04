@@ -20,7 +20,7 @@ import {
   type Page,
 } from "./acl";
 import type { Env } from "./index";
-import { POLICIES, take, type Bucket, type Scope } from "./ratelimit";
+import { POLICIES, TENANT_POLICIES, take, type Bucket, type Scope } from "./ratelimit";
 import { cleanText } from "./text";
 
 export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
@@ -423,15 +423,28 @@ export class Tenant extends DurableObject<Env> {
   // only ever used as a storage key. The counters live here, in the one DO per
   // tenant, so they hold across every Worker instance.
   async rateLimit(scope: Scope, subject: string): Promise<RateResult> {
-    const key = `rl:${scope}:${subject}`;
-    const cur = await this.ctx.storage.get<StoredBucket>(key);
-    if (!cur && (await this.ctx.storage.list({ prefix: "rl:", limit: MAX_BUCKETS })).size >= MAX_BUCKETS) {
+    const now = Date.now();
+    const keys = [`rl:${scope}:${subject}`];
+    const policies = [POLICIES[scope]];
+    const wide = TENANT_POLICIES[scope];
+    if (wide) {
+      keys.push(`rl:${scope}:*`); // "*" is not a subject: they are ids or hex
+      policies.push(wide);
+    }
+    const cur = await Promise.all(keys.map((k) => this.ctx.storage.get<StoredBucket>(k)));
+    if (cur.some((b) => !b) && (await this.ctx.storage.list({ prefix: "rl:", limit: MAX_BUCKETS })).size + cur.filter((b) => !b).length > MAX_BUCKETS) {
       return { ok: false, retry_after_ms: BUCKET_FULL_RETRY_MS };
     }
-    const d = take(cur, Date.now(), POLICIES[scope]);
-    if (!d.ok) return d;
-    await this.ctx.storage.put(key, { ...d.bucket, full_at: d.full_at } satisfies StoredBucket);
-    await this.schedule(d.full_at);
+    const next: Record<string, StoredBucket> = {};
+    let wait = 0;
+    for (const [i, k] of keys.entries()) {
+      const d = take(cur[i], now, policies[i]!);
+      if (d.ok) next[k] = { ...d.bucket, full_at: d.full_at };
+      else wait = Math.max(wait, d.retry_after_ms);
+    }
+    if (wait > 0) return { ok: false, retry_after_ms: wait };
+    await this.ctx.storage.put(next);
+    await this.schedule(Math.min(...Object.values(next).map((b) => b.full_at)));
     return { ok: true };
   }
 
