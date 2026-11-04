@@ -564,9 +564,9 @@ describe("T307 acceptance", () => {
 
 
 describe("retention setting", () => {
-  it("is Queued with a 1 hour TTL until the admin chooses", async () => {
+  it("is Strict with a 1 hour TTL until the admin chooses", async () => {
     const x = tenant();
-    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "queued", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS });
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "strict", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS });
   });
 
   it("sets the mode and the TTL, keeps the TTL when omitted, and audits each change", async () => {
@@ -588,7 +588,7 @@ describe("retention setting", () => {
       { mode: "strict", queue_ttl_ms: 1.5 }, { mode: "strict", queue_ttl_ms: "3600000" }, { mode: "strict", queue_ttl_ms: null },
     ];
     for (const b of bad) expect((await post("/v1/admin/retention/put", b, x.admin)).status, JSON.stringify(b)).toBe(400);
-    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "queued", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS });
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "strict", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS });
     expect((await json(await post("/v1/admin/audit", {}, x.admin))).events).toEqual([]);
     expect(await call(x, "setRetention", [1])).toEqual({ error: "bad_retention" });
     expect(await call(x, "setRetention", null)).toEqual({ error: "bad_retention" });
@@ -602,12 +602,12 @@ describe("retention setting", () => {
       expect((await post(path, { mode: "strict" })).status).toBe(401);
     }
     expect((await post("/v1/admin/retention/other", {}, x.admin)).status).toBe(404);
-    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toMatchObject({ mode: "queued" });
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toMatchObject({ mode: "strict" });
   });
 
   it("applies per tenant", async () => {
     const [a, b] = [tenant(), tenant()];
-    await post("/v1/admin/retention/put", { mode: "strict" }, a.admin);
-    expect((await json(await post("/v1/admin/retention", {}, b.admin))).mode).toBe("queued");
+    await post("/v1/admin/retention/put", { mode: "queued" }, a.admin);
+    expect((await json(await post("/v1/admin/retention", {}, b.admin))).mode).toBe("strict");
   });
 });

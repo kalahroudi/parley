@@ -491,6 +491,47 @@ it("the gateway stores no part bytes: task storage holds metadata only", async (
   expect(dump).not.toContain(btoa("CANARY-CONTENT"));
 });
 
+// Strict: the gateway relays results, status, questions and errors and keeps none of them. Every kind
+// carries a canary in its sealed bytes; afterward no Durable Object of the tenant holds a trace of it.
+it("Strict leaves no canary in any storage after completion, for an online and an offline caller", async () => {
+  const dumpAll = async (w: ReturnType<typeof world>, tasks: string[]) => {
+    const out: unknown[] = [];
+    const stubs = [
+      ...tasks.map((t) => env.TASK.get(env.TASK.idFromName(`${w.T}:${taskHex(t)}`))),
+      env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:alice`)),
+      env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:bob`)),
+      env.TENANT.get(env.TENANT.idFromName(w.T)),
+    ];
+    for (const st of stubs) out.push(await runInDurableObject(st, async (_, ctx) => Object.fromEntries(await ctx.storage.list())));
+    return JSON.stringify(out);
+  };
+  const canary = (k: string) => new TextEncoder().encode(`CANARY-${k}-9c1e`);
+  const w = world();
+  const alice = await connect(w.T, "alice");
+  await connect(w.T, "bob");
+  const send = (kind: SignedKind, from: string, to: string, seq: number, id: string, hint?: string) =>
+    w.rpc(from, "SendMessage", { message: { messageId: `m${seq}`, role: ROLE[kind] ?? "ROLE_AGENT", parts: [w.part(kind, id, from, to, seq, { context: "CANARY-FILE-9c1e.txt" }, 4096, canary(kind))] }, ...(hint ? { metadata: { parley: { hint } } } : {}) });
+  expect((await send("TASK", "alice", "bob", 0, "ok")).result).toBeDefined();
+  for (const [k, seq] of [["STATUS", 1], ["INPUT_REQUIRED", 2]] as const) expect((await send(k, "bob", "alice", seq, "ok")).result).toBeDefined();
+  expect((await send("REPLY", "alice", "bob", 1, "ok")).result).toBeDefined();
+  expect((await send("RESULT", "bob", "alice", 3, "ok")).result.task.status.state).toBe("TASK_STATE_COMPLETED");
+  expect((await send("TASK", "alice", "bob", 0, "bad")).result).toBeDefined();
+  expect((await send("ERROR", "bob", "alice", 1, "bad")).result.task.status.state).toBe("TASK_STATE_FAILED");
+  // An offline caller: refused, not queued.
+  expect((await send("TASK", "alice", "bob", 0, "off")).result).toBeDefined();
+  alice.ws.close(1000, "bye");
+  await gone(w.T, "alice");
+  expect(errCode(await send("RESULT", "bob", "alice", 1, "off"))).toBe(-32010);
+  const dump = await dumpAll(w, ["ok", "bad", "off"]);
+  expect(dump).toContain("COMPLETED");
+  for (const k of ["TASK", "STATUS", "INPUT_REQUIRED", "REPLY", "RESULT", "ERROR"]) {
+    expect(dump).not.toContain(`CANARY-${k}`);
+    expect(dump).not.toContain(btoa(`CANARY-${k}`).slice(0, 16));
+  }
+  expect(dump).not.toContain("CANARY-FILE");
+  expect(dump).not.toContain('"q:');
+});
+
 describe("cancel", () => {
   it("cancels with a sealed, sequenced message that the target receives", async () => {
     const w = world();
@@ -590,8 +631,9 @@ describe("retention modes over the transport", () => {
     await gone(w.T, "alice");
   }
 
-  it("Queued (the default) holds a result for a caller that was offline and delivers it on reconnect", async () => {
+  it("Queued holds a result for a caller that was offline and delivers it on reconnect", async () => {
     const w = world();
+    await setRetention(w.T, { mode: "queued" });
     await offlineCaller(w);
     const r = await w.bob("STATUS", "tk", 1);
     expect(r.result.task.status.state).toBe("TASK_STATE_WORKING"); // accepted, not failed
@@ -636,8 +678,16 @@ describe("retention modes over the transport", () => {
     expect(await heldFor(w.T, "tk")).toEqual([]);
   });
 
+  it("is Strict until the admin chooses Queued: nothing is held for an offline caller", async () => {
+    const w = world();
+    await offlineCaller(w);
+    expect(errCode(await w.bob("RESULT", "tk", 1))).toBe(-32010);
+    expect(await heldFor(w.T, "tk")).toEqual([]);
+  });
+
   it("a task keeps the mode it was created under when the admin changes it", async () => {
     const w = world();
+    await setRetention(w.T, { mode: "queued" });
     await offlineCaller(w, "q1"); // created under Queued
     await setRetention(w.T, { mode: "strict" });
     expect((await w.bob("RESULT", "q1", 1)).result).toBeDefined();
@@ -664,6 +714,7 @@ describe("retention modes over the transport", () => {
 
   it("fails the task when the queue is full", async () => {
     const w = world();
+    await setRetention(w.T, { mode: "queued" });
     await offlineCaller(w);
     for (let i = 1; i <= MAX_QUEUED; i++) expect((await w.bob("STATUS", "tk", i)).result).toBeDefined();
     expect(errCode(await w.bob("STATUS", "tk", MAX_QUEUED + 1))).toBe(-32010);
@@ -672,6 +723,7 @@ describe("retention modes over the transport", () => {
 
   it("fails the task when the caller's device cannot note any more tasks", async () => {
     const w = world();
+    await setRetention(w.T, { mode: "queued" });
     await offlineCaller(w);
     await runInDurableObject(env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:alice`)), (_, ctx) =>
       ctx.storage.put("held", Array.from({ length: MAX_HELD }, (_, i) => ({ tenant: w.T, device: "alice", task: `other${i}`, until: Date.now() + 60_000 }))),
@@ -683,6 +735,7 @@ describe("retention modes over the transport", () => {
 
   it("holds only the sealed envelope: no readable field reaches storage", async () => {
     const w = world();
+    await setRetention(w.T, { mode: "queued" });
     await offlineCaller(w);
     await w.bob("RESULT", "tk", 1);
     const all = await runInDurableObject(env.TASK.get(env.TASK.idFromName(`${w.T}:${taskHex("tk")}`)), async (_, ctx) => Object.fromEntries(await ctx.storage.list()));

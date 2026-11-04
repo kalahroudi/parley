@@ -108,7 +108,7 @@ export const MAX_AUDIT = 500;
 // The device ids a signed revocation list names; anything not a string is ignored.
 const revokedOf = (l: { revoked?: unknown } | undefined | null) => new Set(Array.isArray(l?.revoked) ? l.revoked.filter((x): x is string => typeof x === "string") : []);
 
-// The tenant's retention mode (Queued unless the admin chooses Strict) and how
+// The tenant's retention mode (Strict unless the admin chooses Queued) and how
 // long Queued keeps an unacknowledged result.
 export interface RetentionSettings {
   mode: Retention;
@@ -468,7 +468,7 @@ export class Tenant extends DurableObject<Env> {
   }
 
   async retention(): Promise<RetentionSettings> {
-    return (await this.ctx.storage.get<RetentionSettings>("retention")) ?? { mode: "queued", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS };
+    return (await this.ctx.storage.get<RetentionSettings>("retention")) ?? { mode: "strict", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS };
   }
 
   // Sets the retention mode and, optionally, the Queued TTL (15 minutes to 24
