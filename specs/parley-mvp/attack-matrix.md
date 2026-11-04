@@ -88,4 +88,4 @@ plan.md), attack, outcome, test, subtest (exact `t.Run` name, or `-`).
 | A66 | restart invariant | replay safety across a restart relies on memory-only prekeys | rejected | TestRestartInvariant | - |
 | A67 | core dump and swap | core-dump and swap scans find no key bytes: a scan of the daemon's address space finds no erased key in the locked region (also TestHardenedCrashLeavesNoCore, TestKeyMemoryIsLockedAgainstSwap; scan runs on Linux) | rejected | TestAddressSpaceHoldsNoErasedKey | - |
 | A68 | harness control | no attack: an honest gateway delivers tasks, replies and CANCEL (so the attack tests fail only because of the attack) | control | TestHonestGateway | - |
-| A69 | prekey flood, gateway | the same flood made of prekey requests through the relay the daemon send path adds | pending T412 | TestPending_GatewayRelaysPrekeyRequestsThroughTheLimiter | - |
+| A69 | prekey flood, gateway | the same flood made of prekey requests through the prekey relay | rejected | TestGatewayRelaysPrekeyRequestsThroughTheLimiter | - |

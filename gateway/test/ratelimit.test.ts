@@ -82,8 +82,8 @@ describe("rate limits", () => {
 describe("device and tenant budgets", () => {
   let n = 0;
   const T = () => `rl${++n}`;
-  const small = (over: Record<string, string> = {}) => ({ ...env, RATE_TASK_PER_MIN: "3", RATE_MESSAGE_PER_MIN: "3", RATE_FIND_PER_MIN: "3", ...over }) as Env;
-  const lim = (e: Env, t: string, d: string, scope: "task" | "message" | "find" = "task") => limitDevice(e, t, d, scope);
+  const small = (over: Record<string, string> = {}) => ({ ...env, RATE_TASK_PER_MIN: "3", RATE_MESSAGE_PER_MIN: "3", RATE_FIND_PER_MIN: "3", RATE_PREKEY_PER_MIN: "3", ...over }) as Env;
+  const lim = (e: Env, t: string, d: string, scope: "task" | "message" | "find" | "prekey" = "task") => limitDevice(e, t, d, scope);
 
   it("allows the budget, then refuses with a wait of at most one window, per device and per scope", async () => {
     const e = small();
@@ -96,6 +96,11 @@ describe("device and tenant budgets", () => {
     expect(await lim(e, t, "bob")).toBeNull(); // another device
     expect(await lim(e, t, "alice", "message")).toBeNull(); // another scope
     expect(await lim(e, t, "alice", "find")).toBeNull();
+    // Prekey frames have a budget of their own, in their own bucket.
+    for (let i = 0; i < 3; i++) expect(await lim(e, t, "alice", "prekey")).toBeNull();
+    expect(await lim(e, t, "alice", "prekey")).toBeGreaterThan(0);
+    expect(await lim(e, t, "alice")).toBeGreaterThan(0); // the task scope was spent above, and is a different one
+    expect(await lim(e, t, "carol", "prekey")).toBeNull();
   });
 
   it("budgets never cross tenants, even for the same device id", async () => {
@@ -134,6 +139,8 @@ describe("device and tenant budgets", () => {
     expect(await lim(plain, t, "alice", "message")).not.toBeNull();
     for (let i = 0; i < 60; i++) expect(await lim(plain, t, "alice", "find")).toBeNull();
     expect(await lim(plain, t, "alice", "find")).not.toBeNull();
+    for (let i = 0; i < 300; i++) expect(await lim({ ...plain, RATE_PREKEY_PER_MIN: undefined } as Env, t, "alice", "prekey")).toBeNull();
+    expect(await lim({ ...plain, RATE_PREKEY_PER_MIN: undefined } as Env, t, "alice", "prekey")).not.toBeNull();
   });
 
   it("fails closed when the limiter is unavailable", async () => {

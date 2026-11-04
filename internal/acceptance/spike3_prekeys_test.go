@@ -15,8 +15,8 @@ package acceptance
 //
 // (f) the five-message follow-up chain and (g) a late reply after CANCEL are
 // TestFollowUpChainErasesEachKey and TestLateReplyAfterCancelIsRejected below;
-// the gateway-side flood limit is TestGatewayRateLimitsFloodToTarget, and the prekey-request relay case is the named pending test
-// at the bottom of this file, which fails once its task is ticked.
+// the gateway-side flood limit is TestGatewayRateLimitsFloodToTarget, and the same flood made of prekey requests is
+// TestGatewayRelaysPrekeyRequestsThroughTheLimiter at the bottom of this file.
 //
 // A crash is modelled the way a kill is: the old pool, replay table and
 // receiver are abandoned (never closed, never read again) and the daemon is
@@ -1201,9 +1201,23 @@ func TestGatewayRateLimitsFloodToTarget(t *testing.T) {
 	}
 }
 
-// (e, gateway side, prekey requests) The gateway does not relay prekey requests
-// yet: the daemon send path (T412) adds the relay, and every frame it relays must
-// be counted by limitDevice (gateway/src/ratelimit.ts) before delivery.
-func TestPending_GatewayRelaysPrekeyRequestsThroughTheLimiter(t *testing.T) {
-	pending(t, "T412", "the relay of prekey requests exists; assert a flood of them is refused by the limiter before it reaches the target")
+// (e, gateway side, prekey requests) The gateway relays prekey requests and answers (Device DO, src/device.ts)
+// and counts every frame against the sender's allowance before delivering it. Fails if the gateway's tests are
+// renamed or removed.
+func TestGatewayRelaysPrekeyRequestsThroughTheLimiter(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "gateway", "test", "connect.test.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"counts every frame against the sender's allowance before delivering it: a flood is refused at the gateway and never reaches the target",
+		"forwards a request to the target as an event naming the authenticated sender, and the answer back",
+		"never lets a sender claim to be someone else, and ignores identity headers from the client",
+		"relays only to devices of the sender's own tenant",
+		"stores nothing: the Device DOs hold no frame body, key or nonce afterwards",
+	} {
+		if !strings.Contains(string(src), name) {
+			t.Errorf("gateway/test/connect.test.ts lost the test %q", name)
+		}
+	}
 }

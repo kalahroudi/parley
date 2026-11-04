@@ -13,12 +13,22 @@ import {
   PROTOCOL_VERSION,
   byteLength,
   parseClientMessage,
+  parseRelayFrame,
   type ServerMessage,
 } from "./protocol";
+import { limitDevice } from "./ratelimit";
+
+// Set by the Worker on the request it forwards, after it has verified the device's token.
+export const IDENTITY_TENANT = "x-parley-tenant";
+export const IDENTITY_DEVICE = "x-parley-device";
+const IDENTITY = /^[A-Za-z0-9_-]{1,64}$/;
 
 // Per-connection state, kept in the socket attachment so it survives hibernation.
 interface Attachment {
   ready: boolean;
+  // Who is on the other end, from the Worker. Absent when the socket was not opened by the Worker
+  // (the relay is then off for it).
+  who?: { tenant: string; device: string };
 }
 
 // Session counters, kept in storage so a resume survives eviction. Metadata only.
@@ -73,7 +83,10 @@ export class Device extends DurableObject<Env> {
     }
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    pair[1].serializeAttachment({ ready: false } satisfies Attachment);
+    const tenant = request.headers.get(IDENTITY_TENANT);
+    const device = request.headers.get(IDENTITY_DEVICE);
+    const who = validId(tenant) && validId(device) ? { tenant, device } : undefined;
+    pair[1].serializeAttachment({ ready: false, who } satisfies Attachment);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -180,7 +193,7 @@ export class Device extends DurableObject<Env> {
       // Superseded or dropped during the write: the socket must not become ready, or it
       // would count as connected (and receive events) after its replacement is live.
       if (!isOpen(ws)) return;
-      ws.serializeAttachment({ ready: true } satisfies Attachment);
+      ws.serializeAttachment({ ...(ws.deserializeAttachment() as Attachment), ready: true } satisfies Attachment);
       send(ws, {
         t: "welcome",
         v: PROTOCOL_VERSION,
@@ -211,11 +224,32 @@ export class Device extends DurableObject<Env> {
     if (msg.seq > session.rx_seq) {
       session.rx_seq = msg.seq;
       await this.ctx.storage.put("session", session);
-      // Routing to the Task DO arrives with the task state machine (Phase 2). Frames
-      // relayed to another device (prekey requests, T412) must be counted against the
-      // sender's allowance (limitDevice, src/ratelimit.ts) before they are delivered.
+      // Only a first sight of a frame is relayed, so a retransmission cannot repeat a request.
+      await this.relay(ws, msg.body);
     }
     send(ws, { t: "ack", seq: msg.seq });
+  }
+
+  // Forwards a prekey frame to the device it names. The gateway creates and stores nothing: the frame is
+  // counted against the sender's allowance (limitDevice, src/ratelimit.ts) before anything is delivered,
+  // then pushed to the target as an event naming the sender the gateway authenticated. A request the
+  // gateway cannot deliver, or will not, is answered to the requester with a refusal, so it can wait and
+  // ask again; an answer that cannot be delivered is dropped (the requester times out). Any other body
+  // is ignored, as bodies were before the relay existed.
+  private async relay(ws: WebSocket, body: string): Promise<void> {
+    const who = (ws.deserializeAttachment() as Attachment).who;
+    const frame = parseRelayFrame(body);
+    if (!who || !frame || frame.to === who.device) return;
+    const wait = await limitDevice(this.env, who.tenant, who.device, "prekey");
+    if (wait !== null) {
+      if (frame.t === "prekey_request") await this.deliver(refusedRateLimited(frame.id, frame.to, wait));
+      return;
+    }
+    const { to, ...rest } = frame;
+    const event = JSON.stringify(frame.t === "prekey_refused" ? { ...rest, from: who.device, reason: "refused" } : { ...rest, from: who.device });
+    const peer = this.env.DEVICE.get(this.env.DEVICE.idFromName(`${who.tenant}:${to}`));
+    const r = await peer.deliver(event);
+    if (r.status !== "delivered" && frame.t === "prekey_request") await this.deliver(JSON.stringify({ t: "prekey_refused", id: frame.id, from: to, reason: "offline" }));
   }
 
   async webSocketClose(ws: WebSocket, code: number): Promise<void> {
@@ -234,6 +268,15 @@ export class Device extends DurableObject<Env> {
       .some((s) => isOpen(s) && isReady(s));
     return { connected, session: await this.ctx.storage.get<Session>("session") };
   }
+}
+
+// What the requester is told when the gateway will not carry its prekey request: wait this long.
+function refusedRateLimited(id: string, from: string, retryAfterMs: number): string {
+  return JSON.stringify({ t: "prekey_refused", id, from, reason: "rate_limited", retry_after_ms: retryAfterMs });
+}
+
+function validId(v: string | null): v is string {
+  return v !== null && IDENTITY.test(v);
 }
 
 // A socket with no attachment (never accepted through fetch) is not ready.
