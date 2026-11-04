@@ -22,7 +22,7 @@ test("tier gates match the plan's coverage policy", () => {
 
 // Security-critical packages named by the plan's tier 1 row; moving one down a tier needs the plan to change.
 test("security-critical packages are in tier 1", () => {
-  for (const p of ["internal/binding", "internal/envelope", "internal/revocation", "internal/logx"]) {
+  for (const p of ["internal/binding", "internal/envelope", "internal/revocation", "internal/logx", "internal/prekey", "internal/replay", "internal/receive"]) {
     assert.ok(tiers["1"].packages.includes(p), `${p} must be tier 1`);
   }
 });
