@@ -6,6 +6,8 @@
 // verifies them, it reads the plaintext header and the sizes. Every field can be
 // overridden, so tests can break exactly one thing.
 
+import { SELF, env } from "cloudflare:test";
+import { handleA2A } from "../src/a2a";
 import { SIGNED_TYPE, type SignedKind } from "../src/parts";
 
 const te = new TextEncoder();
@@ -113,4 +115,16 @@ export function header(kind: SignedKind, over: Header = {}): Header {
     prekey: task ? new Uint8Array(40) : new Uint8Array(0),
     ...over,
   };
+}
+
+// Devices have no credential until connect tokens land, so the Worker keeps /a2a
+// and /v1/connect closed. Tests stand in for the Worker after it authenticates:
+// `Bearer dev:<tenant>:<device>` is resolved here, never by the gateway.
+export async function gw(input: string | URL, init?: RequestInit): Promise<Response> {
+  const url = new URL(input);
+  const h = new Headers(init?.headers);
+  const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(h.get("Authorization") ?? "");
+  if (m && url.pathname === "/a2a") return handleA2A(new Request(url, init), env, { tenant: m[1]!, device: m[2]! });
+  if (m && url.pathname === "/v1/connect") return env.DEVICE.get(env.DEVICE.idFromName(`${m[1]}:${m[2]}`)).fetch("https://do/", { headers: { Upgrade: "websocket" } });
+  return SELF.fetch(input, init);
 }

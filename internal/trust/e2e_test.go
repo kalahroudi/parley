@@ -27,14 +27,17 @@ const day = 24 * time.Hour
 
 var tenantSeq atomic.Int64
 
+// testAdmin is the one admin the real gateway is configured with (tests/trust.test.mjs).
+const testAdmin = "admin@example.test"
+
 // gatewayFor returns a gateway base URL and tenant id: the real Worker when
-// PARLEY_TEST_GATEWAY_HTTP is set (with DEV_AUTH on, as `wrangler dev --var
-// DEV_AUTH:1` does), an in-process fake otherwise.
+// PARLEY_TEST_GATEWAY_HTTP is set (tenants come from the prefix the harness
+// made admin of), an in-process fake otherwise.
 func gatewayFor(t *testing.T) (url, tenant string) {
-	tenant = fmt.Sprintf("acc%d-%d", os.Getpid(), tenantSeq.Add(1))
 	if u := os.Getenv("PARLEY_TEST_GATEWAY_HTTP"); u != "" {
-		return u, tenant
+		return u, fmt.Sprintf("%s-%d", os.Getenv("PARLEY_TEST_TENANT_PREFIX"), tenantSeq.Add(1))
 	}
+	tenant = fmt.Sprintf("acc%d-%d", os.Getpid(), tenantSeq.Add(1))
 	return newFake(t, tenant), tenant
 }
 
@@ -72,7 +75,7 @@ func (n *node) boot() {
 }
 
 func newNode(t *testing.T, pin ed25519.PublicKey, url, tenant, email string) *node {
-	n := &node{t: t, dir: t.TempDir(), pin: pin, tenant: tenant, client: &Client{BaseURL: url, Auth: "Bearer dev-user:" + tenant + ":" + email}}
+	n := &node{t: t, dir: t.TempDir(), pin: pin, tenant: tenant, client: &Client{BaseURL: url, Auth: authFor(t, url, tenant, "user", email)}}
 	n.boot()
 	return n
 }
@@ -128,7 +131,7 @@ func adminNode(t *testing.T, r *root.Root, url, tenant string) (*Admin, *revocat
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{BaseURL: url, Auth: "Bearer dev-admin:" + tenant}
+	c := &Client{BaseURL: url, Auth: authFor(t, url, tenant, "admin", testAdmin)}
 	return NewAdmin(r.Private, tenant, c, g), g, dir
 }
 

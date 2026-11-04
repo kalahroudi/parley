@@ -53,7 +53,7 @@ Deliverable: the secure messaging libraries are complete and attack-tested (T201
 - [x] T207 Acceptance: test vectors pass; fuzzing finds no crashes; every attack is rejected or detected
 - [x] T208 Acceptance: crash points (between open and ack, between erase and execute) end in a clean fail and resend; junk frames cannot burn keys
 - [x] T209 Acceptance: core-dump and swap scans find no key bytes; canary test finds zero hits in all storage
-- [ ] T210 Gates: tier 1 at 100% with mutation testing
+- [x] T210 Gates: tier 1 at 100% with mutation testing
 
 ## Phase 3: Tasks and discovery (about 2 to 3 weeks)
 
@@ -64,6 +64,7 @@ Deliverable: `send_task` and `get_task` between two machines with an API-backed 
 - [x] T303 Directory, groups and ACLs
 - [ ] T304 Retention modes (Strict and Queued), TTL deletion
 - [ ] T305 Rate limits; sender-side waiting for offline targets
+- [ ] T310 Device connect tokens: short-lived, bound to tenant and device, issued after enrollment; the Worker accepts them on `/v1/connect` and `/a2a` (both are closed until then). Restores the parked acceptance tests listed in `tests/pending-t310.test.mjs` and `internal/tunnel/pending_test.go`
 - [ ] T306 Acceptance: exhaustive state-machine tests; the official A2A SDK completes a lifecycle
 - [ ] T307 Acceptance: ACL matrix; retention deletion at acknowledgment and TTL
 - [ ] T308 Acceptance: recovery-bookmark test documents what Cloudflare retains; R2 deletion behavior verified
@@ -93,7 +94,7 @@ Milestone M1 (after T414): `parley-cli test` sends an encrypted echo between two
 Deliverable: pilot-ready build. Gate to start: spikes 2, 3, 4 and 9 have passed.
 
 - [ ] T501 Admin page (metadata only)
-  - **RELEASE BLOCKER:** real admin/user session auth (from T102 OIDC sessions) must replace the `DEV_AUTH` placeholder identity in `gateway/src/enroll.ts` before any release; `DEV_AUTH` must not be set in production.
+  - ~~**RELEASE BLOCKER:** real admin/user session auth must replace the `DEV_AUTH` placeholder identity.~~ Done by dashboard task T001 (gateway admin sessions; `DEV_AUTH` removed). `scripts/check-dev-auth.mjs` is the release gate (run by the Release workflow and `tests/dev-auth-gate.test.mjs`).
 - [ ] T502 Stripe billing in test mode with seat enforcement at enrollment, 7-day grace
 - [ ] T503 Offboarding cascade, audit CSV, tenant export and deletion
 - [ ] T504 Auto-update from the pinned project key; distribution channels (GitHub releases, Homebrew tap, Linux package repo, `go install`, source)

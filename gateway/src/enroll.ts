@@ -2,25 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Env } from "./index";
+import { csrfOk, principal, type Principal } from "./session";
 import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
 
 const MAX_BODY_BYTES = MAX_LIST_BYTES + 1024;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
-
-// Placeholder until sessions land (like the device connect token): fails closed
-// without DEV_AUTH. `Bearer dev-admin:<tenant>` is a tenant admin and
-// `Bearer dev-user:<tenant>:<email>` a signed-in user.
-function devIdentity(req: Request, env: Env): { role: "admin" | "user"; tenant: string; email?: string } | null {
-  if (env.DEV_AUTH !== "1") return null;
-  const h = req.headers.get("Authorization") ?? "";
-  let m = /^Bearer dev-admin:([^:]+)$/.exec(h);
-  if (m && ID.test(m[1]!)) return { role: "admin", tenant: m[1]! };
-  m = /^Bearer dev-user:([^:]+):([^:]+)$/.exec(h);
-  if (m && ID.test(m[1]!)) return { role: "user", tenant: m[1]!, email: m[2]! };
-  return null;
-}
 
 const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 
@@ -50,16 +38,17 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
 
   if (pathname === "/v1/enroll/request") {
     const token = str(b.token);
-    const id = devIdentity(req, env);
     let tenant: string | undefined;
     let user: string | undefined;
     if (token !== undefined) {
       tenant = str(b.tenant);
-    } else if (id?.role === "user") {
+    } else {
+      const id = await principal(req, env);
+      if (!id) return json(401, { error: "unauthorized" });
+      if (!csrfOk(req, id)) return json(403, { error: "csrf" });
+      if (id.role !== "user") return json(403, { error: "forbidden" });
       tenant = id.tenant;
       user = id.email;
-    } else {
-      return json(401, { error: "unauthorized" });
     }
     if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
     const r = await tenantStub(env, tenant).request({ user, token, name: str(b.name) ?? "", signing_key: str(b.signing_key) ?? "" });
@@ -83,8 +72,10 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
     return l ? json(200, l) : json(404, { error: "not_found" });
   }
 
-  const admin = devIdentity(req, env);
-  if (admin?.role !== "admin") return json(401, { error: "unauthorized" });
+  const admin: Principal | null = await principal(req, env);
+  if (!admin) return json(401, { error: "unauthorized" });
+  if (!csrfOk(req, admin)) return json(403, { error: "csrf" });
+  if (admin.role !== "admin") return json(403, { error: "forbidden" });
   const stub = tenantStub(env, admin.tenant);
 
   if (pathname === "/v1/admin/enrollment-tokens") {

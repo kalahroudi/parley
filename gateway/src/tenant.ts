@@ -29,6 +29,23 @@ export const MAX_PENDING = 200;
 export const MAX_PENDING_PER_OWNER = 5;
 export const DECIDED_RETENTION_MS = 30 * 24 * 3600_000;
 
+// Admin and user sessions (issued after the OIDC callback). Absolute lifetime;
+// the secret is stored only as a hash.
+export const SESSION_TTL_MS = 8 * 3600_000;
+export const MAX_SESSIONS_PER_USER = 5;
+// Anyone with an IdP login can hold a user session, so user sessions are capped per tenant too (oldest go first).
+// Admin sessions are never evicted by a flood of user sessions.
+export const MAX_USER_SESSIONS = 1000;
+
+export type Role = "admin" | "user";
+export interface Session {
+  email: string;
+  role: Role;
+  csrf: string;
+  created: number;
+  exp: number;
+}
+
 export type EnrollmentStatus = "pending" | "approved" | "rejected";
 
 // Metadata only: who asked, for which device, with which key. No content.
@@ -126,6 +143,40 @@ export class Tenant extends DurableObject<Env> {
     await this.ctx.storage.put(`tok:${await sha256(token)}`, { owner: clean, exp } satisfies StoredToken);
     await this.schedule(exp);
     return { token, expires_at: exp };
+  }
+
+  // Starts a session for a verified login. Only the hash of the returned secret
+  // is kept; the oldest sessions of the same user and role beyond the cap go.
+  async createSession(email: string, role: Role): Promise<{ secret: string; csrf: string; expires_at: number }> {
+    const now = Date.now();
+    const secret = random(32);
+    const key = `ses:${await sha256(secret)}`; // hashed first: no await between the cap check and the write
+    const rec: Session = { email, role, csrf: random(16), created: now, exp: now + SESSION_TTL_MS };
+    const all = [...(await this.ctx.storage.list<Session>({ prefix: "ses:" }))].sort((a, b) => a[1].created - b[1].created);
+    const mine = all.filter(([, s]) => s.email === email && s.role === role);
+    const evict = new Set(mine.slice(0, Math.max(0, mine.length - MAX_SESSIONS_PER_USER + 1)).map(([k]) => k));
+    const users = all.filter(([k, s]) => s.role === "user" && !evict.has(k));
+    if (role === "user") for (const [k] of users.slice(0, Math.max(0, users.length - MAX_USER_SESSIONS + 1))) evict.add(k);
+    await Promise.all(this.deleteAll([...evict]));
+    await this.ctx.storage.put(key, rec);
+    await this.schedule(rec.exp);
+    return { secret, csrf: rec.csrf, expires_at: rec.exp };
+  }
+
+  // Null for an unknown, signed-out or expired session.
+  async getSession(secret: string): Promise<Session | null> {
+    const k = `ses:${await sha256(secret)}`;
+    const rec = await this.ctx.storage.get<Session>(k);
+    if (!rec) return null;
+    if (rec.exp <= Date.now()) {
+      await this.ctx.storage.delete(k);
+      return null;
+    }
+    return rec;
+  }
+
+  async endSession(secret: string): Promise<void> {
+    await this.ctx.storage.delete(`ses:${await sha256(secret)}`);
   }
 
   // `user` is the verified identity of an SSO login (interactive enrollment);
@@ -430,6 +481,7 @@ export class Tenant extends DurableObject<Env> {
     const live = await this.enrolledOwners();
     const orphans = [...(await this.ctx.storage.list({ prefix: "card:", limit: MAX_CARDS_PER_TENANT })).keys()].filter((k) => !live.has(k.slice(5).split(":")[0]!));
     await Promise.all(this.deleteAll(orphans));
+    for (const [k, s] of await this.ctx.storage.list<Session>({ prefix: "ses:" })) await due(k, s.exp);
     if (next !== undefined) await this.ctx.storage.setAlarm(next);
   }
 

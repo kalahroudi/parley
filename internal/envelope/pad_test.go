@@ -132,3 +132,45 @@ func FuzzUnpad(f *testing.F) {
 		}
 	})
 }
+
+// FuzzUnpadShaped reaches what FuzzUnpad cannot: Unpad rejects any input whose
+// length is not a power of two from MinBucket, and byte-level mutation almost never
+// lands on one, so the marker, trailing-zero and canonical-bucket checks see few
+// inputs. Here the fuzzer picks the content, the marker byte, where it sits and
+// the bucket; the buffer is always bucket-sized, so every execution gets past the
+// length check. Padding what Unpad accepts must give the same bytes back, and a
+// plaintext must survive Pad then Unpad.
+func FuzzUnpadShaped(f *testing.F) {
+	f.Add([]byte("hello"), uint8(0), uint8(padMarker), uint16(5), uint8(0))
+	f.Add([]byte{}, uint8(1), uint8(padMarker), uint16(0), uint8(0))
+	f.Add(make([]byte, MinBucket/2), uint8(1), uint8(padMarker), uint16(MinBucket/2-1), uint8(0))
+	f.Add(make([]byte, MinBucket/2), uint8(1), uint8(padMarker), uint16(MinBucket/2), uint8(1))
+	f.Add([]byte("x"), uint8(2), uint8(0x81), uint16(1), uint8(1))
+	f.Fuzz(func(t *testing.T, data []byte, shift, marker uint8, at uint16, junk uint8) {
+		n := MinBucket << (shift % 4)
+		buf := make([]byte, n)
+		copy(buf, data)
+		pos := int(at) % n
+		buf[pos] = marker
+		if junk != 0 && pos+1 < n {
+			buf[n-1] = junk // a non-zero byte after the marker makes the marker not the last
+		}
+		pt, err := Unpad(buf)
+		if err == nil {
+			again, perr := Pad(pt)
+			if perr != nil || !bytes.Equal(again, buf) {
+				t.Fatal("accepted padding is not canonical")
+			}
+		} else if pt != nil {
+			t.Fatal("plaintext returned with an error")
+		}
+		p, err := Pad(data)
+		if err != nil {
+			return
+		}
+		got, err := Unpad(p)
+		if err != nil || !bytes.Equal(got, data) {
+			t.Fatal("pad then unpad changed the plaintext")
+		}
+	})
+}
