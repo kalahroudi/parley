@@ -61,9 +61,11 @@ type Response struct {
 
 // Seams for tests: the OS calls that cannot be made to fail on a healthy machine.
 var (
-	listenUnix = func(path string) (net.Listener, error) { return net.Listen("unix", path) }
-	removeFile = os.Remove
-	dialUnix   = func(ctx context.Context, path string) (net.Conn, error) {
+	listenUnix  = func(path string) (net.Listener, error) { return net.Listen("unix", path) }
+	removeFile  = os.Remove
+	restrictFn  = restrict  // OS-specific: closes the socket file to other users
+	checkPeerFn = checkPeer // OS-specific: the kernel-attested peer uid check
+	dialUnix    = func(ctx context.Context, path string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", path)
 	}
@@ -96,7 +98,7 @@ func Listen(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("localsock: listen: %w", err)
 	}
-	if err := restrict(path); err != nil {
+	if err := restrictFn(path); err != nil {
 		ln.Close()
 		return nil, fmt.Errorf("localsock: restrict socket: %w", err)
 	}
@@ -137,7 +139,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) {
 			time.Sleep(acceptRetry) // transient accept error: do not spin
 			continue
 		}
-		if err := checkPeer(c, s.UID); err != nil {
+		if err := checkPeerFn(c, s.UID); err != nil {
 			c.Close()
 			s.Log.Warn("local connection refused: not this user")
 			continue

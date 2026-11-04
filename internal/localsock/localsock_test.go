@@ -461,3 +461,46 @@ func TestServeEndsOnAnyAcceptErrorOnceShuttingDown(t *testing.T) {
 		t.Fatal("Serve kept accepting after shutdown began")
 	}
 }
+
+func TestListenRestrictFailure(t *testing.T) {
+	old := restrictFn
+	restrictFn = func(string) error { return errors.New("boom") }
+	defer func() { restrictFn = old }()
+	p := filepath.Join(tempDir(t), "s", "d.sock")
+	if _, err := Listen(p); err == nil {
+		t.Fatal("a socket that could not be restricted must not be served")
+	}
+	if _, err := net.Dial("unix", p); err == nil {
+		t.Error("the unrestricted listener was left open")
+	}
+}
+
+// A refused peer is closed and logged, and later connections are still served.
+func TestRefusedPeerDoesNotStopTheServer(t *testing.T) {
+	var calls atomic.Int32
+	old := checkPeerFn
+	checkPeerFn = func(net.Conn, int) error {
+		if calls.Add(1) == 1 {
+			return errors.New("not this user")
+		}
+		return nil
+	}
+	path := filepath.Join(tempDir(t), "s", "d.sock")
+	ln, err := Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &syncBuf{}
+	s := &Server{Log: logx.New(log), UID: os.Geteuid(), Methods: map[string]Method{"x": func(context.Context, json.RawMessage) (any, error) { return 1, nil }}}
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() { s.Serve(ctx, ln); close(finished) }()
+	defer func() { cancel(); <-finished; checkPeerFn = old }()
+	if r, err := Call(context.Background(), path, "x", nil); err == nil && r.OK {
+		t.Error("the refused connection was served")
+	}
+	if r, err := Call(context.Background(), path, "x", nil); err != nil || !r.OK {
+		t.Errorf("a refused connection must not stop later ones being served: %+v %v", r, err)
+	}
+	waitFor(t, "refusal logged", func() bool { return strings.Contains(log.String(), "not this user") })
+}

@@ -7,8 +7,5 @@ package localsock
 
 import "os"
 
-// chmod is a seam so a test can make restricting the socket fail.
-var chmod = os.Chmod
-
 // restrict closes the socket file to everyone but its owner.
-func restrict(path string) error { return chmod(path, 0o600) }
+func restrict(path string) error { return os.Chmod(path, 0o600) }
