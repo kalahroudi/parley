@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,6 +83,19 @@ test("gateway tier 1 files are gated at 100% and mutation tested, with no exclus
     assert.ok(!/console\.|\blogx?\b/.test(read(f)), `${f} logs; the Task DO stores and emits metadata only`);
   }
   assert.match(read("gateway/package.json"), /"test:mutation": "stryker run"/);
-  assert.ok(read("scripts/mutation.sh").includes("test:mutation"), "mutation.sh does not run the gateway mutation tests");
+  assert.ok(read("scripts/mutation.sh").includes("stryker run"), "mutation.sh does not run the gateway mutation tests");
   assert.ok(!stryker.mutate.some((m) => m.startsWith("!")), "no mutation exclusions");
+});
+
+// The cover profile has no statements for assembly; tests/coverage/README.md says what covers it instead.
+test("every assembly file in a tier 1 package has tests beside it and is documented", () => {
+  const doc = read("tests/coverage/README.md");
+  for (const p of tiers["1"].packages) {
+    const names = readdirSync(join(root, p));
+    for (const asm of names.filter((n) => n.endsWith(".s"))) {
+      const stem = asm.slice(0, -2);
+      assert.ok(names.includes(`${stem}_test.go`), `${p}/${asm} has no ${stem}_test.go`);
+      assert.ok(doc.includes(asm.replace(/\.s$/, "")) || doc.includes("scrub_*.s"), `${asm} is not covered by the coverage README`);
+    }
+  }
 });

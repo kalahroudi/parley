@@ -107,9 +107,19 @@ jobs:
         run: node scripts/check-dev-auth.mjs
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
-      # Slow and Linux-only: mutation testing of the tier 1 packages.
-      - name: Mutation testing (tier 1)
-        if: runner.os == 'Linux'
+      # Slow and Linux-only. A pull request mutates only the tier 1 packages and
+      # files it changes (needs the base branch and its history); the full run is
+      # mutation.yml, on every push to main and nightly.
+      - name: Fetch the base branch
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" --depth=500
+      - name: Mutation testing (tier 1, changed code)
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        env:
+          MUTATION_SCOPE: changed
+          BASE: origin/${{ github.base_ref }}
         run: scripts/mutation.sh
       # Slow and Linux-only: each defence the malicious-gateway and prekey crash
       # tests exercise is removed in turn and the acceptance suite must go red.
