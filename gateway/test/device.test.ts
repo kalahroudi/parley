@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_HELD, type Device, type Held } from "../src/device";
 import type { Task } from "../src/task";
 
@@ -678,6 +678,8 @@ describe("held events (Queued)", () => {
   });
 
   it("notes a task once, keeps the later deadline, and stops at MAX_HELD tasks", async () => {
+    // A frozen clock: on a slow disk the 256 writes below outlast a real one-second deadline.
+    vi.useFakeTimers({ toFake: ["Date"] });
     const d = stubFor();
     const at = Date.now() + 1000;
     const h = (task: string, until = at): Held => ({ tenant: "t1", device: dev, task, until });
@@ -692,5 +694,6 @@ describe("held events (Queued)", () => {
     await runInDurableObject(d, async (_, ctx) => ctx.storage.put("held", (await ctx.storage.get<Held[]>("held"))!.map((x) => ({ ...x, until: Date.now() - 1 }))));
     expect(await d.hold(h("overflow"))).toBe("ok");
     expect(await runInDurableObject(d, (_, ctx) => ctx.storage.get("held"))).toEqual([h("overflow")]);
+    vi.useRealTimers();
   });
 });
