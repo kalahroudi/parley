@@ -25,7 +25,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      # Full history: the changed-code mutation run and the vector-lock check diff against the
+      # base branch, which needs a merge base (a shallow checkout has none).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -82,7 +86,7 @@ jobs:
         env:
           BASE: ${{ github.base_ref }}
         run: |
-          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
           node scripts/vectorlock.mjs base "origin/$BASE"
       - name: Gateway install
         working-directory: gateway
@@ -110,11 +114,13 @@ jobs:
       # Slow and Linux-only. A pull request mutates only the tier 1 packages and
       # files it changes (needs the base branch and its history); the full run is
       # mutation.yml, on every push to main and nightly.
+      # The history is already complete; this makes sure origin/<base> exists as a ref. If the merge base
+      # still cannot be computed, scripts/mutation.sh runs everything instead of skipping.
       - name: Fetch the base branch
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         env:
           BASE: ${{ github.base_ref }}
-        run: git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" --depth=500
+        run: git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
       - name: Mutation testing (tier 1, changed code)
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         env:

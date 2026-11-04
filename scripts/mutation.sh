@@ -27,27 +27,16 @@ base=${BASE:-origin/main}
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT INT TERM
 
-changed=
-if [ "$scope" = changed ]; then
-	changed=$(git diff --name-only "$base"...HEAD)
-	# A change to the gates themselves can weaken every package: run them all.
-	if echo "$changed" | grep -Eq '^(go\.mod|tests/coverage/|scripts/mutation|\.github/workflows/ci\.yml|gateway/(stryker\.config\.json|vitest\.(mutation\.)?config\.ts|package-lock\.json))'; then
-		scope=all
-	fi
-elif [ "$scope" != all ]; then
-	echo "MUTATION_SCOPE must be all or changed" >&2
-	exit 2
-fi
-
+# The scope is chosen by scripts/mutation-scope.mjs, which fails closed: when it cannot
+# prove what changed, it returns everything.
+node scripts/mutation-scope.mjs "$scope" "$base" > "$out/scope.json" || exit 2
+scope=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope' "$out/scope.json")
+pkgs=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).packages.join(" ")' "$out/scope.json")
+mutate=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).files.map((f) => f.replace(/^gateway\//, "")).join(" ")' "$out/scope.json")
 stale=--stale
 [ "$scope" = all ] || stale=
-pkgs=$(node -e 'console.log(require("./tests/coverage/tiers.json").tiers["1"].packages.join(" "))')
 status=0
 for p in $pkgs; do
-	if [ "$scope" = changed ] && ! echo "$changed" | grep -q "^$p/"; then
-		echo "== mutation: $p (unchanged, skipped)"
-		continue
-	fi
 	echo "== mutation: $p"
 	json="$out/$(echo "$p" | tr / _).json"
 	go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
@@ -58,19 +47,8 @@ for p in $pkgs; do
 done
 
 # Tier 1 TypeScript. Needs `npm ci` in gateway first.
-ts=$(node -e 'console.log(require("./tests/coverage/gateway-tier1.json").files.map((f) => f.replace(/^gateway\//, "")).join(" "))')
-mutate=
-if [ "$scope" = all ]; then
-	mutate=$ts
-else
-	for f in $ts; do
-		t=$(basename "$f" .ts)
-		# A changed file, or a changed test of it.
-		if echo "$changed" | grep -Eq "^gateway/(src/$t\.ts|test/$t\.test\.ts|test/wire\.ts)\$"; then mutate="$mutate $f"; fi
-	done
-fi
 if [ -z "$mutate" ]; then
-	echo "== mutation: gateway tier 1 files (unchanged, skipped)"
+	echo "== mutation: gateway tier 1 files (none affected by this change)"
 else
 	echo "== mutation: gateway tier 1 files:$mutate"
 	args=
