@@ -4,7 +4,7 @@
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { SEALED_MEDIA_TYPE } from "../src/a2a";
-import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, verifyBinding, type Scope } from "../src/connect";
+import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, verifyBinding, verifyEd25519, type Scope } from "../src/connect";
 import type { Env } from "../src/index";
 import { CONNECT_TOKEN_TTL_MS, MAX_CHALLENGES_PER_DEVICE, MAX_CONNECT_TOKENS_PER_DEVICE } from "../src/tenant";
 import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
@@ -177,6 +177,16 @@ describe("base64 fields", () => {
     expect(b64bytes(k, 31)).toBeNull();
   });
 
+  it("are canonical: whitespace, missing padding and stray trailing bits are refused", () => {
+    const k = bytesB64(new Uint8Array(32).fill(7)); // 44 characters ending in "="
+    expect(b64bytes(k, 32)).not.toBeNull();
+    for (const bad of [`${k}\n`, ` ${k}`, `${k.slice(0, 10)} ${k.slice(10)}`, k.slice(0, -1), `${k.slice(0, 42)}B=`]) expect(b64bytes(bad, 32), JSON.stringify(bad)).toBeNull();
+  });
+
+  it("a key the runtime cannot import fails the check instead of throwing", async () => {
+    expect(await verifyEd25519(new Uint8Array(31), new Uint8Array(64), new Uint8Array(1))).toBe(false);
+  });
+
   it("verify with a key that cannot be exported", async () => {
     const spy = vi.spyOn(crypto.subtle, "importKey");
     try {
@@ -262,6 +272,13 @@ describe("challenges", () => {
     expect((await x.redeem(d)).status).toBe(200); // a fresh one still works
   }, SLOW);
 
+  it("stay at the cap when requested at the same moment", async () => {
+    const x = tenant();
+    const d = await x.enroll();
+    await Promise.all(Array.from({ length: MAX_CHALLENGES_PER_DEVICE * 3 }, () => x.challenge(d)));
+    expect((await x.keys("chal:")).length).toBe(MAX_CHALLENGES_PER_DEVICE);
+  }, SLOW);
+
   it("are removed by the alarm once expired", async () => {
     const x = tenant();
     const d = await x.enroll();
@@ -325,6 +342,17 @@ describe("the token step refuses with one answer and no detail", () => {
     expect(r.status).toBe(401);
     expect(await json(r)).toEqual(UNAUTHORIZED);
   };
+
+  it("a signature that is not in canonical base64 is a 400 and does not burn the challenge", async () => {
+    const x = tenant();
+    const d = await x.enroll();
+    const ch = await x.challenge(d);
+    const good = await edSign(d.key.privateKey, connectMessage(x.t, d.id, ch.challenge, ch.expires_at, 1, "api"));
+    const send = (signature: string) => post("/v1/connect/token", { tenant: x.t, device: d.id, challenge: ch.challenge, version: 1, scope: "api", signature });
+    expect((await send(`${good}\n`)).status).toBe(400);
+    expect((await send(` ${good}`)).status).toBe(400);
+    expect((await send(good)).status).toBe(200);
+  }, SLOW);
 
   it("a signature by another key, or over a message that differs in any one field", async () => {
     const x = tenant();
