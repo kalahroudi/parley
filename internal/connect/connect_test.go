@@ -175,6 +175,9 @@ func TestTokenRefusesBadKeysWithoutCallingTheGateway(t *testing.T) {
 func TestTokenGatewayMisbehaviour(t *testing.T) {
 	pub, priv := key(t)
 	big := strings.Repeat("a", maxResponse+1)
+	// One gateway for every case (the subtests run one after another): a server per case would burn thousands of local
+	// ports under `go test -count=500`.
+	g := newGateway(t, pub)
 	for name, tc := range map[string]struct {
 		path   string // the step that misbehaves
 		status int
@@ -201,7 +204,6 @@ func TestTokenGatewayMisbehaviour(t *testing.T) {
 		"token too large":          {"/v1/connect/token", 200, `{"token":"` + big + `","expires_at":5}`, ErrReply, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			g := newGateway(t, pub)
 			g.override = func(path string, w http.ResponseWriter) bool {
 				if path != tc.path {
 					return false

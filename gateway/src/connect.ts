@@ -66,12 +66,11 @@ function encode(parts: (string | Uint8Array | bigint)[]): Uint8Array {
 export const connectMessage = (tenant: string, device: string, challenge: string, expires: number, version: number, scope: ConnectScope) =>
   encode([CONNECT_LABEL, tenant, device, challenge, BigInt(expires), BigInt(version), scope]);
 
-// The bytes of a base64 string of exactly `length` bytes, else null. Anything that is not a string is null (an array
-// of one string would otherwise be read as that string).
+// The bytes of a base64 string of exactly `length` bytes, else null. Anything that is not a string is null: atob reads
+// an array of one string as that string, but the strict comparison with `v` below does not.
 export function b64bytes(v: unknown, length: number): Uint8Array | null {
-  if (typeof v !== "string") return null;
   try {
-    const bin = atob(v);
+    const bin = atob(v as string);
     // atob also takes whitespace, missing padding and stray trailing bits: only the one canonical spelling is accepted.
     return bin.length === length && btoa(bin) === v ? Uint8Array.from(bin, (c) => c.charCodeAt(0)) : null;
   } catch {

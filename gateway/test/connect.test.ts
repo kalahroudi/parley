@@ -173,7 +173,7 @@ describe("base64 fields", () => {
   it("are exactly the bytes asked for, and only from a string", () => {
     const k = bytesB64(new Uint8Array(32).fill(7));
     expect(b64bytes(k, 32)).toEqual(new Uint8Array(32).fill(7));
-    for (const bad of [[k], 1, null, undefined, {}, "!!!", "", k.slice(1), bytesB64(new Uint8Array(31))]) expect(b64bytes(bad, 32), String(bad)).toBeNull();
+    for (const bad of [[k], new String(k), Symbol("x"), 1, null, undefined, {}, "!!!", "", k.slice(1), bytesB64(new Uint8Array(31))]) expect(b64bytes(bad, 32), String(bad)).toBeNull();
     expect(b64bytes(k, 31)).toBeNull();
   });
 
