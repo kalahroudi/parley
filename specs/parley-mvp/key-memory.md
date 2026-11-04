@@ -95,3 +95,28 @@ evidence are in `memscan-notes.md`.
 - macOS and Windows address-space scans: no portable way to read a process's own
   memory there (Mach task ports, `ReadProcessMemory` on a hardened process).
   Those two rely on the Linux scan exercising the same pool code.
+
+## The device signing key and the local control socket (T410)
+
+The device signing key (Ed25519) is a different secret from the prekeys above:
+it is long-lived and stored, not held in locked memory. `internal/keystore`
+keeps its seed in the OS keychain (macOS Keychain, Windows Credential Manager,
+Linux Secret Service) or, only when the config says `key_store: "file"`, in
+`device.key` (mode 0600 in a private directory; a protected DACL on Windows).
+The keychain keeps other users out; it does not keep out other processes of the
+same user. The file store keeps out other users (checked: owner, mode, no
+symlink) and nothing else; root and the same user can read it. In memory the
+seed is zeroed on shutdown, but Go cannot promise that no copy remains.
+
+The control socket (`internal/localsock`) is a request channel to the daemon,
+not a boundary against the user's own processes:
+
+| | Another standard local user | Same user's other processes | Administrator / root |
+|---|---|---|---|
+| Linux, macOS | cannot connect (0700 directory, 0600 socket, kernel-checked uid) | can connect and call every method | can connect |
+| Windows | cannot open the directory (protected DACL) | can connect and call every method | can connect |
+
+On Windows nothing re-checks the caller once the directory is reachable (AF_UNIX
+there carries no peer credentials); a named pipe with a current-user ACL, or an
+equivalent peer check, is task T505 (`TestPending_WindowsDaemonPeerRestriction`
+fails CI once T505 is ticked).

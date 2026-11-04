@@ -2,11 +2,11 @@
   "tiers": {
     "1": {
       "line": 100,
-      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey", "internal/receive", "internal/outbox"]
+      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey", "internal/receive", "internal/outbox", "internal/fsperm", "internal/keystore", "internal/localsock", "internal/supervisor"]
     },
     "2": {
       "line": 95,
-      "packages": ["internal/root", "internal/trust", "internal/tunnel", "internal/release"]
+      "packages": ["internal/daemon", "internal/root", "internal/trust", "internal/tunnel", "internal/release"]
     },
     "3": {
       "line": 85,

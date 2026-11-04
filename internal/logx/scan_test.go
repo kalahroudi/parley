@@ -58,7 +58,7 @@ var bannedImports = []string{
 
 // logxAPI is every name outside this package may use.
 var logxAPI = map[string]bool{
-	"Logger": true, "New": true, "NewLevel": true, "Msg": true, "Field": true,
+	"Logger": true, "New": true, "NewLevel": true, "ParseLevel": true, "Msg": true, "Field": true,
 	"ID": true, "State": true, "Size": true, "Time": true, "Redacted": true,
 }
 
