@@ -255,8 +255,8 @@ export class Device extends DurableObject<Env> {
     const { to, ...rest } = frame;
     const event = JSON.stringify(frame.t === "prekey_refused" ? { ...rest, from: who.device, reason: "refused" } : { ...rest, from: who.device });
     const peer = this.env.DEVICE.get(this.env.DEVICE.idFromName(`${who.tenant}:${to}`));
-    const r = await peer.deliver(event).catch((): DeliverResult => ({ status: "offline" }));
-    if (r.status !== "delivered" && request) await this.deliver(refusedOffline(frame.id, to));
+    const delivered = await peer.deliver(event).then((r) => r.status === "delivered", () => false);
+    if (!delivered && request) await this.deliver(refusedOffline(frame.id, to));
   }
 
   async webSocketClose(ws: WebSocket, code: number): Promise<void> {

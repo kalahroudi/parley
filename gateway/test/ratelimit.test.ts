@@ -110,6 +110,11 @@ describe("device and tenant budgets", () => {
     expect(await lim(e, t, "late", "prekey", "bob")).toBeGreaterThan(0); // the target's is spent; the caller's is not
     expect(await lim(e, t, "late", "prekey", "dave")).toBeNull(); // so the caller is free for another target
     expect(await lim(e, T(), "late", "prekey", "bob")).toBeNull(); // another tenant's bob is another budget
+    // Being a target is not being a caller: a device's own budget as a caller is separate from the one it has as a target.
+    const t3 = T();
+    for (let i = 0; i < 3; i++) expect(await lim(e, t3, "x", "prekey", "y")).toBeNull();
+    expect(await lim(e, t3, "x", "prekey", "y")).toBeGreaterThan(0);
+    for (let i = 0; i < 3 * TARGET_FACTOR; i++) expect(await lim(e, t3, `c${i}`, "prekey", "x")).toBeNull();
     // A refused caller does not spend the target's budget: a flood by one is stopped by its own.
     const t2 = T();
     for (let i = 0; i < 10; i++) await lim(e, t2, "flood", "prekey", "bob");

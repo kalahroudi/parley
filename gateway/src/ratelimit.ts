@@ -121,8 +121,9 @@ export const TARGET_FACTOR = 3;
 export async function limitDevice(env: Env, tenant: string, device: string, scope: Scope, target?: string): Promise<number | null> {
   const { env: v, dflt } = SCOPES[scope];
   const per = limitFor(env[v], dflt);
-  const mine = await count(env, `dev-${scope}`, `${tenant.length}:${tenant}${device}`, per);
-  const theirs = mine ?? (target === undefined ? null : await count(env, `tgt-${scope}`, `${tenant.length}:${tenant}${target}`, per * TARGET_FACTOR));
+  const dev = `dev-${scope}`;
+  const mine = await count(env, dev, `${tenant.length}:${tenant}${device}`, per);
+  const theirs = mine ?? (target === undefined ? null : await count(env, dev, `to:${tenant.length}:${tenant}${target}`, per * TARGET_FACTOR));
   const wait = theirs ?? (await count(env, `ten-${scope}`, tenant, per * TENANT_FACTOR));
   return wait === null ? null : wait * 1000;
 }

@@ -35,7 +35,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   let m: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return null;
+    if (parsed === null) return null; // other values have no fields, and fall out below
     m = parsed as Record<string, unknown>;
   } catch {
     return null;
@@ -77,7 +77,7 @@ export type RelayFrame =
 
 // The decoded size of canonical standard base64 (what btoa writes), or null when the text is anything else.
 function b64Size(s: unknown, max: number): number | null {
-  if (typeof s !== "string" || s.length === 0 || s.length > Math.ceil(max / 3) * 4) return null;
+  if (typeof s !== "string" || s.length === 0) return null;
   try {
     const bin = atob(s);
     return btoa(bin) === s && bin.length <= max ? bin.length : null;
@@ -86,8 +86,8 @@ function b64Size(s: unknown, max: number): number | null {
   }
 }
 
-const hasOnly = (m: Record<string, unknown>, ...keys: string[]) =>
-  Object.keys(m).length === keys.length && keys.every((k) => k in m);
+// Each frame is checked for every key it should have, so the right number of keys means no others.
+const keyCount = (m: Record<string, unknown>, n: number) => Object.keys(m).length === n;
 
 // Returns null for anything that is not exactly one of the three frames: unknown keys, odd ids, text that is
 // not canonical base64, or a body over MAX_RELAY_BYTES.
@@ -96,7 +96,7 @@ export function parseRelayFrame(body: string): RelayFrame | null {
   let m: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(body);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    if (parsed === null) return null; // other values have no fields, and fall out below
     m = parsed as Record<string, unknown>;
   } catch {
     return null;
@@ -107,13 +107,13 @@ export function parseRelayFrame(body: string): RelayFrame | null {
   const to = m.to as string;
   switch (m.t) {
     case "prekey_request":
-      if (!hasOnly(m, "t", "id", "to", "nonce", "expires_at") || b64Size(m.nonce, MAX_NONCE_BYTES) === null || !Number.isSafeInteger(m.expires_at) || (m.expires_at as number) <= 0) return null;
+      if (!keyCount(m, 5) || b64Size(m.nonce, MAX_NONCE_BYTES) === null || !Number.isSafeInteger(m.expires_at) || (m.expires_at as number) <= 0) return null;
       return { t: "prekey_request", id, to, nonce: m.nonce as string, expires_at: m.expires_at as number };
     case "prekey_reply":
-      if (!hasOnly(m, "t", "id", "to", "prekey") || b64Size(m.prekey, MAX_PREKEY_BYTES) === null) return null;
+      if (!keyCount(m, 4) || b64Size(m.prekey, MAX_PREKEY_BYTES) === null) return null;
       return { t: "prekey_reply", id, to, prekey: m.prekey as string };
     case "prekey_refused":
-      return hasOnly(m, "t", "id", "to") ? { t: "prekey_refused", id, to } : null;
+      return keyCount(m, 3) ? { t: "prekey_refused", id, to } : null;
     default:
       return null;
   }
