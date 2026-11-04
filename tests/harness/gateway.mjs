@@ -6,6 +6,7 @@
 // gateway has no development bypass, so a test logs in the way a person does.
 
 import { spawn, spawnSync } from "node:child_process";
+import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,7 +38,7 @@ function kill(child) {
 export async function startGateway({ admins = "", users = "", userDomains = "", extra = {} } = {}) {
   const idp = await startMockOidc();
   const port = await freePort();
-  const vars = { FLOW_SECRET: "test-flow-secret", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users, USER_DOMAINS: userDomains, RATE_AUTH_PER_MIN: "100000", RATE_TENANT_LOGIN_PER_MIN: "100000", RATE_SESSION_PER_MIN: "100000", ...extra };
+  const vars = { FLOW_SECRET: "test-flow-secret", RATE_CONNECT_PER_MIN: "100000", RATE_CONNECT_DEVICE_PER_MIN: "100000", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users, USER_DOMAINS: userDomains, RATE_AUTH_PER_MIN: "100000", RATE_TENANT_LOGIN_PER_MIN: "100000", RATE_SESSION_PER_MIN: "100000", ...extra };
   // Own state directory and inspector port, so several gateways can run side by side (node --test runs files in parallel).
   const args = ["wrangler", "dev", "--port", String(port), "--inspector-port", String(await freePort()), "--persist-to", mkdtempSync(join(tmpdir(), "parley-gw-"))];
   for (const [k, v] of Object.entries(vars)) if (v) args.push("--var", `${k}:${v}`);
@@ -91,4 +92,71 @@ export async function signIn(url, { tenant, role, email }) {
   const body = await res.json();
   const session = setCookies.find((c) => c.startsWith("parley_session="));
   return { status: res.status, body, setCookies, token: session?.split(";")[0].split("=")[1], csrf: body.csrf };
+}
+
+// The tenant's root key, registered at the gateway the way the admin's daemon will: the gateway verifies every
+// binding against it before a device may connect. Returns the key pair (the test plays the root holder).
+export async function registerRoot(url, adminToken) {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const res = await fetch(`${url}/v1/admin/root`, { method: "POST", headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ root_public_key: raw.toString("base64") }) });
+  if (res.status !== 200) throw new Error(`registering the root answered ${res.status}`);
+  return { privateKey, publicKey: raw };
+}
+
+// Length-prefixed text fields (4 bytes, big endian) and 8-byte big-endian integers, as internal/binding and
+// internal/connect encode them.
+function encode(parts) {
+  return Buffer.concat(parts.map((p) => {
+    if (typeof p === "bigint") return Buffer.from(new BigUint64Array([p]).buffer).reverse();
+    const b = Buffer.from(p);
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(b.length);
+    return Buffer.concat([len, b]);
+  }));
+}
+
+// A device that holds its own key, brought to "approved with a binding the root signed" the way an admin's daemon
+// would: the user requests enrollment with the device's public key, the admin approves and posts a binding (signed
+// by `root`, see registerRoot) naming that key. `userToken` and `adminToken` are session bearer tokens (see signIn).
+// Returns { id, seed, publicKey, binding, version, sign(msg) }: `id` is the device id, `seed` the 32-byte Ed25519
+// seed, `binding` the signed binding as the gateway holds it.
+export async function enrollDevice(url, { tenant, userToken, adminToken, root, owner = "alice@acme.test", name = "laptop", bind = true, version = 1, notAfter = Math.floor(Date.now() / 1000) + 90 * 86400 }) {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const pub = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const seed = Buffer.from(privateKey.export({ format: "jwk" }).d, "base64url");
+  const post = async (path, token, body) => {
+    const res = await fetch(`${url}${path}`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  const req = await post("/v1/enroll/request", userToken, { name, signing_key: pub.toString("base64") });
+  if (req.status !== 202) throw new Error(`enrollment request answered ${req.status}`);
+  const id = req.body.id;
+  const decided = await post("/v1/admin/enrollments/decide", adminToken, { id, decision: "approved" });
+  if (decided.status !== 200) throw new Error(`approval answered ${decided.status}`);
+  let binding;
+  if (bind) {
+    const signature = cryptoSign(null, encode(["parley/binding/v1", tenant, owner, id, pub, BigInt(version), BigInt(notAfter)]), root.privateKey);
+    binding = { tenant, owner, device_id: id, signing_key: pub.toString("base64"), version, not_after: new Date(notAfter * 1000).toISOString().replace(".000Z", "Z"), signature: signature.toString("base64") };
+    const posted = await post("/v1/admin/bindings", adminToken, { id, binding });
+    if (posted.status !== 200) throw new Error(`binding answered ${posted.status}`);
+  }
+  return { id, seed, publicKey: pub, binding, version, sign: (msg) => cryptoSign(null, msg, privateKey) };
+}
+
+// The bytes a device signs to prove it holds its key (internal/connect.Message, gateway/src/connect.ts).
+export function connectMessage(tenant, device, challenge, expiresAtMs, version, scope) {
+  return encode(["parley/connect/v2", tenant, device, challenge, BigInt(expiresAtMs), BigInt(version), scope]);
+}
+
+// Challenge, signature, token: returns the raw responses so a test can assert refusals as well as success.
+export async function connectToken(url, tenant, device, { scope = "api", version = device.version ?? 1 } = {}) {
+  const post = async (path, body) => {
+    const res = await fetch(`${url}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  const ch = await post("/v1/connect/challenge", { tenant, device: device.id });
+  if (ch.status !== 200) return ch;
+  const signature = device.sign(connectMessage(tenant, device.id, ch.body.challenge, ch.body.expires_at, version, scope)).toString("base64");
+  return post("/v1/connect/token", { tenant, device: device.id, challenge: ch.body.challenge, version, scope, signature });
 }

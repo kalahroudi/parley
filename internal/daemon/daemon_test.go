@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/kalahroudi/parley/internal/binding"
 	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/keystore"
 	"github.com/kalahroudi/parley/internal/localsock"
@@ -38,6 +39,10 @@ type env struct {
 	root ed25519.PrivateKey
 	gw   *httptest.Server
 	revs func() *revocation.Signed // what the fake gateway serves
+	// extra, when set, answers requests before the default routes (true when it did).
+	extra func(http.ResponseWriter, *http.Request) bool
+	// before, when set, runs on the new daemon before it runs (to record a binding, for instance).
+	before func(*Daemon)
 }
 
 // newEnv builds a config pointing at a fake gateway that serves a signed
@@ -54,6 +59,9 @@ func newEnv(t *testing.T) *env {
 	}
 	e.revs = func() *revocation.Signed { return first }
 	e.gw = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if e.extra != nil && e.extra(w, r) {
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") && strings.Contains(r.URL.Path, "revocation") {
 			json.NewEncoder(w).Encode(e.revs())
 			return
@@ -89,6 +97,9 @@ func (e *env) start(t *testing.T, mod func(*Deps)) *running {
 	d, err := New(e.cfg, e.dirs, deps)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if e.before != nil {
+		e.before(d)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &running{d: d, cancel: cancel, done: make(chan error, 1)}
@@ -318,9 +329,56 @@ func TestHandleRegistersMethods(t *testing.T) {
 	}
 }
 
-func TestTunnelWaitsForConnectToken(t *testing.T) {
+// fixedKeys is a key store that already holds the device key, so a test knows it before the daemon starts.
+type fixedKeys struct{ k ed25519.PrivateKey }
+
+func (f fixedKeys) Load() (ed25519.PrivateKey, error) {
+	return append(ed25519.PrivateKey(nil), f.k...), nil
+}
+func (f fixedKeys) Save(ed25519.PrivateKey) error { return errors.New("not expected") }
+
+// bind records a root-signed binding for the daemon's own device, as enrollment will (T411).
+func (e *env) bind(t *testing.T, pub ed25519.PublicKey, version uint64) func(*Daemon) {
+	return func(d *Daemon) {
+		s, err := binding.Sign(e.root, binding.Binding{Tenant: "t1", Owner: "o", DeviceID: "dev-1", SigningKey: pub, Version: version, NotAfter: time.Now().Add(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.Trust().Tracker.Accept(s, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// counting answers the connect endpoints with `status` and counts the requests to each path.
+func counting(status int) (func(http.ResponseWriter, *http.Request) bool, func(string) int) {
+	var mu sync.Mutex
+	n := map[string]int{}
+	return func(w http.ResponseWriter, r *http.Request) bool {
+			if !strings.HasPrefix(r.URL.Path, "/v1/connect") {
+				return false
+			}
+			mu.Lock()
+			n[r.URL.Path]++
+			mu.Unlock()
+			http.Error(w, "no", status)
+			return true
+		}, func(path string) int {
+			mu.Lock()
+			defer mu.Unlock()
+			return n[path]
+		}
+}
+
+// The success path (a token earned, the tunnel held open, a fresh token per reconnect) is
+// internal/acceptance TestDaemonGetsConnectTokenAndConnects.
+func TestTunnelStaysDownWhileTheGatewayRefusesTheDevice(t *testing.T) {
 	e := newEnv(t)
-	e.start(t, nil) // the default TunnelConfig returns ErrNoConnectToken
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var asked func(string) int
+	e.extra, asked = counting(http.StatusUnauthorized)
+	e.before = e.bind(t, priv.Public().(ed25519.PublicKey), 1)
+	e.start(t, func(d *Deps) { d.Keys = fixedKeys{priv} })
 	waitFor(t, "tunnel in backoff with restarts", func() bool {
 		for _, c := range status(t, e).Components {
 			if c.Name == "tunnel" && c.Restarts >= 2 && c.State == supervisor.StateBackoff {
@@ -329,8 +387,32 @@ func TestTunnelWaitsForConnectToken(t *testing.T) {
 		}
 		return false
 	})
+	if n := asked("/v1/connect"); n != 0 {
+		t.Errorf("the tunnel was dialed %d times without a token", n)
+	}
 	if status(t, e).Components[1].State != supervisor.StateRunning {
-		t.Error("a missing connect token must not stop the other components")
+		t.Error("a refused device must not stop the other components")
+	}
+}
+
+func TestTunnelWaitsUntilTheDeviceHasABinding(t *testing.T) {
+	e := newEnv(t)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var asked func(string) int
+	e.extra, asked = counting(http.StatusUnauthorized)
+	r := e.start(t, func(d *Deps) { d.Keys = fixedKeys{priv} })
+	time.Sleep(100 * time.Millisecond)
+	if n := asked("/v1/connect/challenge"); n != 0 {
+		t.Fatalf("the gateway was asked for a challenge %d times before any binding existed", n)
+	}
+	e.bind(t, priv.Public().(ed25519.PublicKey), 1)(r.d) // enrollment records the binding
+	waitFor(t, "the first challenge request once bound", func() bool { return asked("/v1/connect/challenge") >= 1 })
+}
+
+func TestTunnelConfigFailsOnAGatewayURLThatIsNotHTTP(t *testing.T) {
+	cfg := connectTunnel(Config{GatewayURL: "ftp://gw"}, nil, nil)
+	if _, err := cfg(context.Background(), nil); err == nil {
+		t.Fatal("no error")
 	}
 }
 
@@ -405,6 +487,7 @@ func TestTunnelFatalErrorIsRetriedBySupervisor(t *testing.T) {
 
 func TestRunInStopsOnShutdownBeforeTheTokenArrives(t *testing.T) {
 	e := newEnv(t)
+	e.extra, _ = counting(http.StatusUnauthorized)
 	r := e.start(t, nil)
 	if err := r.stop(t); err != nil {
 		t.Errorf("stop while the tunnel is waiting for a token: %v", err)

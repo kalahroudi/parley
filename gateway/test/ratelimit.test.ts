@@ -27,6 +27,15 @@ describe("rate limits", () => {
     expect((await get(e, "/v1/session", "198.51.100.2")).status).toBe(401); // another source is not affected
   });
 
+  it("the connect challenge and token endpoints have their own per-source budget", async () => {
+    const e = limited({ RATE_CONNECT_PER_MIN: "2", RATE_SESSION_PER_MIN: "100" });
+    expect((await get(e, "/v1/connect/challenge", "198.51.100.7")).status).toBe(400);
+    expect((await get(e, "/v1/connect/token", "198.51.100.7")).status).toBe(400);
+    expect((await get(e, "/v1/connect/challenge", "198.51.100.7")).status).toBe(429);
+    expect((await get(e, "/v1/session", "198.51.100.7")).status).toBe(401); // the session budget is separate
+    expect((await get(e, "/v1/connect/token", "198.51.100.8")).status).toBe(400); // so is another source's
+  });
+
   it("login and callback share a per-source budget", async () => {
     const e = limited({ RATE_AUTH_PER_MIN: "2" });
     expect((await get(e, "/auth/google/login", "198.51.100.3", "GET")).status).toBe(404);
@@ -378,7 +387,8 @@ describe("login and session budgets", () => {
     await run(e, "/auth/google/login?tenant=AcMe&role=user", { "CF-Connecting-IP": "203.0.113.7" });
     await run(e, "/v1/session", {}, "POST");
     await run(e, "/auth/google/callback", {});
-    expect(names).toEqual([`auth:${await hex("203.0.113.7")}`, `tenant:${await hex("acme")}`, `session:${await hex("unknown")}`, `auth:${await hex("unknown")}`]);
+    await run(e, "/v1/connect/token", { "CF-Connecting-IP": "203.0.113.7" }, "POST");
+    expect(names).toEqual([`auth:${await hex("203.0.113.7")}`, `tenant:${await hex("acme")}`, `session:${await hex("unknown")}`, `auth:${await hex("unknown")}`, `connect:${await hex("203.0.113.7")}`]);
     expect(names.join()).not.toContain("203.0.113.7");
   });
 });

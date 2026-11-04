@@ -130,6 +130,15 @@ func NewTracker(root ed25519.PublicKey, store Store) (*Tracker, error) {
 	return t, nil
 }
 
+// Version is the highest binding version this tracker has recorded for the
+// device, and false when it has recorded none.
+func (t *Tracker) Version(tenant, device string) (uint64, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r, ok := t.seen[deviceKey{tenant, device}]
+	return r.Version, ok
+}
+
 // Accept verifies s, durably records its version, and only then returns nil.
 // The identical binding can be presented repeatedly; a different binding at the
 // same version is rejected. If the store cannot be written, s is rejected.

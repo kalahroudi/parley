@@ -42,7 +42,8 @@ export class RateLimit extends DurableObject<Env> {
 }
 
 const WINDOW_MS = 60_000;
-const DEFAULTS = { auth: 30, tenant: 120, session: 120 } as const;
+// connect: a whole office behind one address may reconnect at once after a deploy (two requests per device).
+const DEFAULTS = { auth: 30, tenant: 120, session: 120, connect: 600 } as const;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export const limitFor = (v: string | undefined, dflt: number) => {
@@ -76,7 +77,7 @@ const tooMany = (retryAfterS: number) =>
     headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": String(retryAfterS) },
   });
 
-// Login and session endpoints are limited per source (the connecting address) and a login also per tenant it asks
+// Login, session and connect-token endpoints are limited per source (the connecting address) and a login also per tenant it asks
 // for, each over a one-minute window. The limits can be raised with RATE_AUTH_PER_MIN, RATE_TENANT_LOGIN_PER_MIN
 // and RATE_SESSION_PER_MIN. Without the address header every request shares one "unknown" source, which only makes
 // the limit tighter.
@@ -90,6 +91,7 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
     if (tenant && ID.test(tenant)) return take(env, "tenant", tenant.toLowerCase(), limitFor(env.RATE_TENANT_LOGIN_PER_MIN, DEFAULTS.tenant));
     return null;
   }
+  if (url.pathname.startsWith("/v1/connect/")) return take(env, "connect", source, limitFor(env.RATE_CONNECT_PER_MIN, DEFAULTS.connect));
   return take(env, "session", source, limitFor(env.RATE_SESSION_PER_MIN, DEFAULTS.session));
 }
 
@@ -102,11 +104,12 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
 // budget and burns at most that much of the tenant's: it takes TENANT_FACTOR devices flooding at once (all of them
 // enrolled and approved) to lock out the tenant's honest ones. Buckets never cross tenants: the tenant is part of
 // every name and comes from the verified credential. Returns null to go on, else the wait in milliseconds.
-export type Scope = "task" | "message" | "find";
-const SCOPES: Record<Scope, { env: "RATE_TASK_PER_MIN" | "RATE_MESSAGE_PER_MIN" | "RATE_FIND_PER_MIN"; dflt: number }> = {
+export type Scope = "task" | "message" | "find" | "connect";
+const SCOPES: Record<Scope, { env: "RATE_TASK_PER_MIN" | "RATE_MESSAGE_PER_MIN" | "RATE_FIND_PER_MIN" | "RATE_CONNECT_DEVICE_PER_MIN"; dflt: number }> = {
   task: { env: "RATE_TASK_PER_MIN", dflt: 30 }, // new tasks
   message: { env: "RATE_MESSAGE_PER_MIN", dflt: 300 }, // status, replies, cancels, GetTask
   find: { env: "RATE_FIND_PER_MIN", dflt: 60 }, // directory searches
+  connect: { env: "RATE_CONNECT_DEVICE_PER_MIN", dflt: 30 }, // connect challenges and tokens (a reconnect is two requests)
 };
 export const TENANT_FACTOR = 10;
 

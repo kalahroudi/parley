@@ -187,7 +187,7 @@ const APPLY_ERR: Readonly<Record<string, Err>> = {
 // Reads the body without ever holding more than `max` bytes: a declared length
 // over the cap is refused unread, and a stream is cut off at the cap, so a missing
 // or false Content-Length cannot make us buffer more.
-async function readBounded(req: Request, max: number): Promise<string | null> {
+export async function readBounded(req: Request, max: number): Promise<string | null> {
   if (Number(req.headers.get("content-length") ?? 0) > max) return null;
   if (!req.body) return "";
   const reader = req.body.getReader();
