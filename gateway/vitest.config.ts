@@ -8,8 +8,9 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
+      // The per-device limits are raised for every suite but ratelimit.test.ts, which sets its own.
       // Tests mint admin sessions for admin@example.test in tenants named <prefix><n>.
-      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(",") } },
+      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(","), RATE_TASK_PER_MIN: "100000", RATE_MESSAGE_PER_MIN: "100000", RATE_FIND_PER_MIN: "100000" } },
     }),
   ],
   test: {
@@ -39,6 +40,8 @@ export default defineConfig({
         // Tier 1 for what the gateway checks about a sealed part before it relays it.
         "src/parts.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         "src/acl.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        // Tier 1 for the rate limiter (login, session and per-device budgets).
+        "src/ratelimit.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },
     },
   },

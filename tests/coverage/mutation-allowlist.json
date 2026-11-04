@@ -145,6 +145,38 @@
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
     },
     {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 46,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 50,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 52,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 66,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
       "package": "internal/receive",
       "file": "receive.go",
       "line": 60,
