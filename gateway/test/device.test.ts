@@ -4,23 +4,23 @@
 import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Device } from "../src/device";
+// A value import, so Stryker's vitest runner (which runs the tests that import a mutated file) finds these tests for device.ts.
+import "../src/device";
 
 // Sockets outlive a test's storage isolation, so each test gets its own device name.
 let n = 0;
 let dev = "d0";
 beforeEach(() => (dev = `d${++n}`));
 
-const auth = (tenant = "t1", device = dev): Record<string, string> => ({
-  Upgrade: "websocket",
-  Authorization: `Bearer dev:${tenant}:${device}`,
-});
 
 const stubFor = (tenant = "t1", device = dev) =>
   env.DEVICE.get(env.DEVICE.idFromName(`${tenant}:${device}`)) as DurableObjectStub<Device>;
 
 // A minimal daemon: queues parsed server messages so tests can await them in order.
 async function connect(tenant = "t1", device = dev) {
-  const res = await SELF.fetch("https://gw/v1/connect", { headers: auth(tenant, device) });
+  // The Worker's /v1/connect stays closed until connect tokens land, so tests
+  // open the socket on the Device DO itself, as the Worker will after authenticating.
+  const res = await stubFor(tenant, device).fetch("https://do/", { headers: { Upgrade: "websocket" } });
   const ws = res.webSocket!;
   expect(res.status).toBe(101);
   ws.accept();
@@ -50,8 +50,8 @@ async function connect(tenant = "t1", device = dev) {
 const hello = (session?: string, last_rx = 0) => ({ t: "hello", v: 1, session, last_rx });
 
 describe("connect", () => {
-  it("rejects unauthenticated and malformed credentials", async () => {
-    for (const h of <Record<string, string>[]>[{ Upgrade: "websocket" }, { Upgrade: "websocket", Authorization: "Bearer dev:t1" }, { Upgrade: "websocket", Authorization: "Bearer dev:t1:d/1" }]) {
+  it("fails closed: no credential opens a device connection yet", async () => {
+    for (const h of <Record<string, string>[]>[{ Upgrade: "websocket" }, { Upgrade: "websocket", Authorization: "Bearer dev:t1:d1" }, { Upgrade: "websocket", Authorization: "Bearer dev-admin:t1" }]) {
       expect((await SELF.fetch("https://gw/v1/connect", { headers: h })).status).toBe(401);
     }
   });
@@ -60,12 +60,6 @@ describe("connect", () => {
     expect((await SELF.fetch("https://gw/v1/connect")).status).toBe(426);
     expect((await SELF.fetch("https://gw/nope")).status).toBe(404);
     expect((await SELF.fetch("https://gw/healthz")).status).toBe(200);
-  });
-
-  it("fails closed when dev auth is off", async () => {
-    const { default: worker } = await import("../src/index");
-    const req = new Request("https://gw/v1/connect", { headers: auth() });
-    expect((await worker.fetch(req, { ...env, DEV_AUTH: undefined })).status).toBe(401);
   });
 
   it("rejects a direct (non-upgrade) request to the Device DO", async () => {

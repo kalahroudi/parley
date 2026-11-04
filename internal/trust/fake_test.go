@@ -44,10 +44,10 @@ func (f *fakeGateway) serve(w http.ResponseWriter, r *http.Request, tenant strin
 		_ = json.NewEncoder(w).Encode(v)
 	}
 	auth := r.Header.Get("Authorization")
-	admin := auth == "Bearer dev-admin:"+tenant
+	admin := strings.HasPrefix(auth, "Bearer fake-admin:"+tenant+":")
 	switch r.URL.Path {
 	case "/v1/enroll/request":
-		email, ok := strings.CutPrefix(auth, "Bearer dev-user:"+tenant+":")
+		email, ok := strings.CutPrefix(auth, "Bearer fake-user:"+tenant+":")
 		if !ok {
 			reply(401, nil)
 			return

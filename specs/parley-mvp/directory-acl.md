@@ -32,7 +32,7 @@ Plaintext metadata only (name 64, description 500, 10 tags of 32, 5 examples of 
 
 ## Admin and audit
 
-Group routes and `/v1/admin/audit` accept only the admin identity. The identity is still the `DEV_AUTH` placeholder shared with enrollment; this change does not widen it, and sessions replace it when the dashboard auth lands. Group puts and deletes, card publishes and removes, and revocation lists are recorded as metadata events (action, actor, subject, counts; never member addresses or card text), each committed in the same write as the change.
+Group routes and `/v1/admin/audit` accept only the admin identity. Admins authenticate with a gateway admin session (cookie with CSRF, or a session bearer), the same as enrollment; devices resolve through the device-credential hook until connect tokens land. Group puts and deletes, card publishes and removes, and revocation lists are recorded as metadata events (action, actor, subject, counts; never member addresses or card text), each committed in the same write as the change.
 
 ## Revocation
 

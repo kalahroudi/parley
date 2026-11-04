@@ -4,26 +4,40 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { MAX_CARDS_PER_DEVICE, MAX_CARDS_PER_TENANT, MAX_GROUPS, MAX_MEMBER_CHARS } from "../src/acl";
+import { handleDirectory, type DeviceAuth } from "../src/directory";
 import { MAX_AUDIT } from "../src/tenant";
 
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
-const post = (path: string, body: unknown, auth?: string) =>
-  SELF.fetch(`https://gw${path}`, {
+// Devices have no credential until connect tokens land: `Bearer dev:<tenant>:<device>`
+// is resolved by a test-only resolver handed to the handler. Admins use real sessions.
+const testDevice: DeviceAuth = async (req) => {
+  const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(req.headers.get("Authorization") ?? "");
+  return m ? { tenant: m[1]!, device: m[2]! } : null;
+};
+const post = async (path: string, body: unknown, auth?: string | Promise<string>) => {
+  const a = auth ? await auth : undefined;
+  const init = {
     method: "POST",
-    headers: { "content-type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    headers: { "content-type": "application/json", ...(a ? { Authorization: a } : {}) },
     body: typeof body === "string" ? body : JSON.stringify(body),
-  });
+  };
+  return a?.startsWith("Bearer dev:") ? handleDirectory(new Request(`https://gw${path}`, init), env, testDevice) : SELF.fetch(`https://gw${path}`, init);
+};
+const session = async (t: string, role: "admin" | "user", email: string) => {
+  const s = await env.TENANT.get(env.TENANT.idFromName(t)).createSession(email, role);
+  return `Bearer ps_${t}.${s.secret}`;
+};
 const json = async (r: Response) => (await r.json()) as any;
 
 let n = 0;
 // A tenant with an admin and a way to bring a user's device to "approved and bound".
 function tenant() {
   const t = `dir${++n}`;
-  const admin = `Bearer dev-admin:${t}`;
+  const admin = session(t, "admin", "admin@example.test");
   const stub = env.TENANT.get(env.TENANT.idFromName(t));
   const enroll = async (email: string, bind = true) => {
     const sk = key();
-    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, `Bearer dev-user:${t}:${email}`));
+    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, session(t, "user", email)));
     await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, admin);
     if (bind) await post("/v1/admin/bindings", { id, binding: { device_id: id, signing_key: sk, version: 1 } }, admin);
     return { id, auth: `Bearer dev:${t}:${id}` };
@@ -60,8 +74,8 @@ describe("publishing cards", () => {
   it("refuses devices that are not enrolled: unknown, pending, rejected, unbound", async () => {
     const x = tenant();
     const unbound = await x.enroll("a@example.test", false);
-    const { id: pending } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, `Bearer dev-user:${x.t}:b@example.test`));
-    const { id: rejected } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, `Bearer dev-user:${x.t}:c@example.test`));
+    const { id: pending } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, session(x.t, "user", "b@example.test")));
+    const { id: rejected } = await json(await post("/v1/enroll/request", { name: "d", signing_key: key() }, session(x.t, "user", "c@example.test")));
     await post("/v1/admin/enrollments/decide", { id: rejected, decision: "rejected" }, x.admin);
     for (const auth of [unbound.auth, `Bearer dev:${x.t}:${pending}`, `Bearer dev:${x.t}:${rejected}`, `Bearer dev:${x.t}:${"0".repeat(32)}`]) {
       expect((await post("/v1/cards/publish", { card: card() }, auth)).status).toBe(403);
@@ -300,18 +314,18 @@ describe("request handling", () => {
     expect((await post("/v1/cards/publish", { card: card() }, "Bearer nonsense")).status).toBe(401);
     expect((await post("/v1/cards/publish", { card: card() }, x.admin)).status).toBe(401); // an admin is not a device
     expect((await post("/v1/directory/find", {}, "Bearer dev:bad/tenant:d")).status).toBe(401);
-    expect((await SELF.fetch("https://gw/v1/directory/find", { headers: { Authorization: d.auth } })).status).toBe(405);
+    expect((await handleDirectory(new Request("https://gw/v1/directory/find", { headers: { Authorization: d.auth } }), env, testDevice)).status).toBe(405);
     for (const bad of ["not json", "[]", "null", "x".repeat(20000)]) expect((await post("/v1/directory/find", bad, d.auth)).status, bad.slice(0, 10)).toBe(400);
     expect((await post("/v1/directory/find", "{}", d.auth)).status).toBe(200);
     expect((await post("/v1/directory/nope", {}, d.auth)).status).toBe(404);
     expect((await post("/v1/cards/nope", {}, d.auth)).status).toBe(404);
-    const big = await SELF.fetch("https://gw/v1/directory/find", { method: "POST", headers: { Authorization: d.auth, "content-length": "99999" }, body: "{}" });
+    const big = await handleDirectory(new Request("https://gw/v1/directory/find", { method: "POST", headers: { Authorization: d.auth, "content-length": "99999" }, body: "{}" }), env, testDevice);
     expect(big.status).toBe(400);
   });
 
-  it("fails closed without DEV_AUTH", async () => {
+  it("fails closed for devices without a credential resolver", async () => {
     const { handleDirectory } = await import("../src/directory");
-    const r = await handleDirectory(new Request("https://gw/v1/directory/find", { method: "POST", headers: { Authorization: "Bearer dev:t:d" }, body: "{}" }), { ...env, DEV_AUTH: undefined });
+    const r = await handleDirectory(new Request("https://gw/v1/directory/find", { method: "POST", headers: { Authorization: "Bearer dev:t:d" }, body: "{}" }), env);
     expect(r.status).toBe(401);
   });
 });
@@ -323,7 +337,7 @@ describe("storage", () => {
     await publish(d, card());
     await x.stub.putGroup("eng", ["a@example.test"]);
     const keys = await runInDurableObject(x.stub, async (_i, s) => [...(await s.storage.list()).keys()].map((k) => k.split(":")[0]));
-    expect([...new Set(keys)].sort()).toEqual(["aud", "auds", "card", "enr", "grp"]);
+    expect([...new Set(keys)].sort()).toEqual(["aud", "auds", "card", "enr", "grp", "ses"]);
   });
 });
 

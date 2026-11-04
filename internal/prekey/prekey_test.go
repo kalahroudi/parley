@@ -668,3 +668,76 @@ func TestErrorsCarryNoKeyMaterial(t *testing.T) {
 		t.Fatal("error carries key or id bytes")
 	}
 }
+
+// Mutation-testing boundaries (T210): each case sits exactly on a limit, or uses
+// more than one slot, so that an off-by-one or a wrong slot offset is caught.
+
+func TestEverySlotHoldsItsOwnKey(t *testing.T) {
+	f := newFixture(t, nil)
+	var all []*Signed
+	for i := 0; i < 4; i++ {
+		s, err := f.pool.Issue(req("c"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, s)
+	}
+	for _, s := range all {
+		err := f.pool.With(s.ID, func(sc *[32]byte) error {
+			pub, err := x25519Public(sc[:])
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(pub, s.PublicKey) {
+				t.Errorf("slot %d holds another key", f.slotOf(s.ID))
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLimitsAreInclusive(t *testing.T) {
+	f := newFixture(t, nil)
+	if _, err := f.pool.Issue(Request{Caller: string(bytes.Repeat([]byte("c"), MaxCaller)), Nonce: []byte{1}}); err != nil {
+		t.Fatalf("longest caller: %v", err)
+	}
+	newFixture(t, func(c *Config) { c.Capacity = MaxCapacity; c.AllowUnlocked = true })
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := New(Config{Tenant: "t", DeviceID: "d", Signer: priv, Capacity: MaxCapacity + 1, AllowUnlocked: true}); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("over max capacity: %v", err)
+	}
+}
+
+func TestTombstonesFillToExactlyTheLimit(t *testing.T) {
+	f := newFixture(t, func(c *Config) { c.MaxTombstones = 3; c.PerCaller = 100 })
+	for i := 1; i <= 6; i++ {
+		s, _ := f.pool.Issue(req("c"))
+		f.pool.Consume(s.ID)
+		if want := min(i, 3); f.tombstones() != want {
+			t.Fatalf("after %d consumes: %d tombstones, want %d", i, f.tombstones(), want)
+		}
+	}
+}
+
+func TestVerifyWindowBoundaries(t *testing.T) {
+	f := newFixture(t, nil)
+	r := req("dev-caller")
+	s, _ := f.pool.Issue(r)
+	// Zero skew in Expect means the default: a prekey dated a minute ahead is fine.
+	e := f.expect(r)
+	e.Now = f.clock().Add(-time.Minute)
+	if err := Verify(f.pub, s, e); err != nil {
+		t.Errorf("default skew: %v", err)
+	}
+	// A validity window of exactly MaxTTL is accepted.
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	p := s.Prekey
+	p.ExpiresAt = p.CreatedAt.Add(MaxTTL)
+	sp := &Signed{Prekey: p, Signature: ed25519.Sign(priv, p.Encode())}
+	if err := Verify(pub, sp, f.expect(r)); err != nil {
+		t.Errorf("exactly MaxTTL: %v", err)
+	}
+}

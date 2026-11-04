@@ -2,28 +2,67 @@
 # Copyright 2026 The Parley Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Mutation testing for the tier 1 Go packages (tests/coverage/tiers.json) with
-# gremlins. Efficacy is killed / (killed + lived); timed-out and uncovered
-# mutants are not counted, so both are listed rather than hidden.
+# Mutation testing for the tier 1 code: the Go packages in tests/coverage/tiers.json
+# with gremlins, and the TypeScript files in tests/coverage/gateway-tier1.json with
+# Stryker. Both must kill every mutant.
 #
-# The 95% floor exists for equivalent mutants that no test can tell apart from
-# the original, such as skipping the directory fsync that makes a rename durable
-# (syncDir in internal/binding and internal/revocation: os.File methods on a nil
-# file return an error, so the failure path looks the same). Any other survivor
-# is a missing test: fix the test, do not lower the floor.
+# Go: every gremlins mutator is on (arithmetic, boundary, negation, increment,
+# negatives and also assignments, bitwise, logical, loop control, self-assignment).
+# Gremlins only counts killed / (killed + lived) and leaves mutants that no test
+# reaches out of the score, so the score is not used: scripts/mutation-gate.mjs
+# fails on every mutant that lived or was not covered (a timed-out one is detected), unless
+# tests/coverage/mutation-allowlist.json names it with a reason. Nothing is
+# silent, and a stale entry fails a full run. TypeScript: stryker.config.json
+# breaks below 100 with no mutant excluded, and a runner error (a mutant whose
+# run crashes) is a failure too, because Stryker leaves it out of the score.
+#
+#   scripts/mutation.sh                 # everything (main, nightly, local)
+#   MUTATION_SCOPE=changed BASE=origin/main scripts/mutation.sh
+#                                       # only tier 1 packages and files changed
+#                                       # since BASE (pull requests)
 set -eu
 cd "$(dirname "$0")/.."
-pkgs=$(node -e 'console.log(require("./tests/coverage/tiers.json").tiers["1"].packages.join(" "))')
+scope=${MUTATION_SCOPE:-all}
+base=${BASE:-origin/main}
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT INT TERM
+
+# The scope is chosen by scripts/mutation-scope.mjs, which fails closed: when it cannot
+# prove what changed, it returns everything.
+node scripts/mutation-scope.mjs "$scope" "$base" > "$out/scope.json" || exit 2
+scope=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope' "$out/scope.json")
+pkgs=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).packages.join(" ")' "$out/scope.json")
+mutate=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).files.map((f) => f.replace(/^gateway\//, "")).join(" ")' "$out/scope.json")
+stale=--stale
+[ "$scope" = all ] || stale=
+# A mutant is given this many times the normal test time before it counts as timed out (detected, see
+# scripts/mutation-gate.mjs). A mutant that survives runs at normal speed, so a pull request can use a
+# small factor and finish fast; the full run keeps a wide margin for slow runners.
+coef=${MUTATION_TIMEOUT_COEFFICIENT:-20}
+[ "$scope" = all ] || coef=${MUTATION_TIMEOUT_COEFFICIENT:-8}
 status=0
 for p in $pkgs; do
 	echo "== mutation: $p"
+	json="$out/$(echo "$p" | tr / _).json"
 	go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
-		--threshold-efficacy 95 --workers 2 --timeout-coefficient 20 "./$p" || status=1
+		--workers 2 --timeout-coefficient "$coef" \
+		--invert-assignments --invert-bitwise --invert-bwassign --invert-logical \
+		--invert-loopctrl --remove-self-assignments -o "$json" "./$p" || status=1
+	node scripts/mutation-gate.mjs "$p" "$json" $stale || status=1
 done
 
-# Tier 1 TypeScript (tests/coverage/gateway-tier1.json): the same bar, with Stryker.
-# Every mutant must be killed (stryker.config.json breaks below 100). Needs
-# `npm ci` in gateway first.
-echo "== mutation: gateway tier 1 files"
-(cd gateway && npm run test:mutation) || status=1
+# Tier 1 TypeScript. Needs `npm ci` in gateway first. Linux only: it is platform independent, so the
+# other OSes (which run this for their own Go files) set MUTATION_TS=0.
+if [ "${MUTATION_TS:-1}" = 0 ]; then
+	echo "== mutation: gateway tier 1 files (skipped on this OS)"
+elif [ -z "$mutate" ]; then
+	echo "== mutation: gateway tier 1 files (none affected by this change)"
+else
+	echo "== mutation: gateway tier 1 files:$mutate"
+	args=
+	for f in $mutate; do args="$args --mutate $f"; done
+	# shellcheck disable=SC2086
+	(cd gateway && npx stryker run $args) || status=1
+	node scripts/stryker-gate.mjs gateway/reports/mutation/mutation.json || status=1
+fi
 exit $status

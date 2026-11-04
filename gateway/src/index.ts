@@ -1,62 +1,58 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { agentCard, handleA2A } from "./a2a";
+import { agentCard } from "./a2a";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
+import { handleSession, issueSession } from "./session";
 import { Device } from "./device";
 import { handleDirectory } from "./directory";
 import { handleEnroll } from "./enroll";
 import { Task } from "./task";
+import { limitAuth, RateLimit } from "./ratelimit";
 import { Tenant } from "./tenant";
 
-export { Device, Task, Tenant };
+export { Device, RateLimit, Task, Tenant };
 
 export interface Env extends AuthEnv {
   DEVICE: DurableObjectNamespace<Device>;
   TENANT: DurableObjectNamespace<Tenant>;
   TASK: DurableObjectNamespace<Task>;
-  // "1" enables the development bearer token `dev:<tenant>:<device>`. Never set in production.
-  DEV_AUTH?: string;
+  RATE: DurableObjectNamespace<RateLimit>;
+  // Per-minute limits for the login and session endpoints (see ratelimit.ts); defaults apply when unset.
+  RATE_AUTH_PER_MIN?: string;
+  RATE_TENANT_LOGIN_PER_MIN?: string;
+  RATE_SESSION_PER_MIN?: string;
+  // Comma-separated `tenant:email` pairs allowed to hold an admin session.
+  ADMINS?: string;
+  // Comma-separated `tenant:email` pairs and `tenant:domain` pairs allowed to hold a user session. With neither set
+  // for a tenant, user logins to it are refused.
+  USERS?: string;
+  USER_DOMAINS?: string;
 }
 
-interface Identity {
-  tenant: string;
-  device: string;
-}
-
-const ID = /^[A-Za-z0-9_-]{1,64}$/;
-
-// Placeholder until connect tokens land. Fails closed:
-// without DEV_AUTH every request is unauthenticated.
-function authenticate(request: Request, env: Env): Identity | null {
-  if (env.DEV_AUTH !== "1") return null;
-  const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(request.headers.get("Authorization") ?? "");
-  if (!m || !ID.test(m[1]!) || !ID.test(m[2]!)) return null;
-  return { tenant: m[1]!, device: m[2]! };
-}
-
+// Fails closed until connect tokens land: no credential opens a device connection.
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Identifiers travel in the Authorization header and frames, never in the URL.
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
-    if (pathname.startsWith("/auth/")) return handleAuth(request, env);
+    if (pathname.startsWith("/auth/") || pathname === "/v1/session" || pathname === "/v1/session/logout") {
+      const refused = await limitAuth(request, env);
+      if (refused) return refused;
+    }
+    if (pathname.startsWith("/auth/")) return handleAuth(request, env, undefined, issueSession.bind(null, request, env));
+    if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {
       return request.method === "GET" ? Response.json(agentCard(new URL(request.url).origin)) : new Response("method not allowed", { status: 405 });
     }
-    if (pathname === "/a2a") {
-      const who = authenticate(request, env);
-      return who ? handleA2A(request, env, who) : new Response("unauthorized", { status: 401 });
-    }
+    // Closed like /v1/connect: the development bearer is gone and device tokens are not here yet.
+    if (pathname === "/a2a") return new Response("unauthorized", { status: 401 });
     if (pathname !== "/v1/connect") return new Response("not found", { status: 404 });
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
-    const id = authenticate(request, env);
-    if (!id) return new Response("unauthorized", { status: 401 });
-    // The tenant id is part of the name, so one tenant can never reach another's device.
-    return env.DEVICE.get(env.DEVICE.idFromName(`${id.tenant}:${id.device}`)).fetch(request);
+    return new Response("unauthorized", { status: 401 });
   },
 } satisfies ExportedHandler<Env>;

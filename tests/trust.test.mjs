@@ -9,11 +9,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startGateway } from "./harness/wrangler.mjs";
+import { startGateway } from "./harness/gateway.mjs";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..");
 const haveGo = spawnSync("go", ["version"], { stdio: "ignore" }).status === 0;
@@ -23,13 +24,25 @@ const skip = !haveGo ? "go not installed" : !haveGateway ? "gateway dependencies
 const needs = skip && !process.env.CI ? { skip } : {};
 
 test("trust: enroll, approve, revoke and stale-list behavior against the real gateway", needs, async () => {
-  const gw = await startGateway(join(root, "gateway"));
+  // The Go tests name their tenants <prefix>-1, <prefix>-2, ...; the admin of each signs in through the mock IdP.
+  const prefix = `trust${randomBytes(4).toString("hex")}`;
+  const tenants = Array.from({ length: 20 }, (_, i) => `${prefix}-${i + 1}`);
+  const admins = tenants.map((t) => `${t}:admin@example.test`).join(",");
+  const gw = await startGateway({ admins, userDomains: tenants.map((t) => `${t}:acme.test`).join(",") });
   try {
     const url = gw.url;
-    const r = spawnSync("go", ["test", "-race", "-count=1", "-v", "./internal/trust"], {
-      cwd: root,
-      encoding: "utf8",
-      env: { ...process.env, PARLEY_TEST_GATEWAY_HTTP: url },
+    // Async: the Go tests sign in through the mock IdP, which lives in this process.
+    const r = await new Promise((resolve, reject) => {
+      const p = spawn("go", ["test", "-race", "-count=1", "-v", "./internal/trust"], {
+        cwd: root,
+        env: { ...process.env, PARLEY_TEST_GATEWAY_HTTP: url, PARLEY_TEST_TENANT_PREFIX: prefix },
+      });
+      let stdout = "";
+      let stderr = "";
+      p.stdout.on("data", (d) => (stdout += d));
+      p.stderr.on("data", (d) => (stderr += d));
+      p.on("error", reject);
+      p.on("close", (status) => resolve({ status, stdout, stderr }));
     });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     // Guard against a silent skip: the scenarios must have run, not been skipped.
@@ -37,6 +50,6 @@ test("trust: enroll, approve, revoke and stale-list behavior against the real ga
       assert.match(r.stdout, new RegExp(`--- PASS: ${name}\\b`));
     }
   } finally {
-    await gw.stop({ clean: true });
+    await gw.close();
   }
 });
