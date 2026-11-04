@@ -36,7 +36,9 @@ Deliverable: two daemons enroll under an admin root and show online; revocation 
 - [x] T107 Acceptance: enroll, approve and revoke; binding rollback rejected; recovery code restores the root; stale revocation list behavior
 - [x] T108 Acceptance: 20 forced reconnects and a deploy during a 10k-message soak lose or duplicate nothing
 - [ ] T109 Real-Cloudflare reality check 1: limits, costs, hibernation timing, deploy-driven disconnects, real Google and Entra logins
+  - Entra real-tenant check: not possible while no free Entra tenant is available (the free tier was removed); covered by T111 simulator conformance. Residual risk: real-Entra quirks (consent screens, admin consent, claim overage, tenant-specific issuer details) are unverified until a real tenant is available, e.g. a design-partner tenant during the pilot. Google real login passed (personal and Workspace); hosted-domain enforcement run still open.
 - [x] T110 Gates: tier 1 at 100%, tier 2 gates met
+- [ ] T111 Entra simulator: an Entra-shaped profile for the local mock IdP (tests/harness/oidc.mjs) with fixtures and gateway conformance tests: v2.0 discovery and issuer format with the tenant id, tid and oid claims, preferred_username without or with unverified email, wrong-tenant and multi-tenant (common/organizations) issuers, key rotation (kid miss then refetch), expired and wrong-audience tokens, replayed code, claim overage; fixtures taken from Microsoft's published claims reference and recorded with their source, cross-checked against one independent open-source mock OIDC server in an optional CI job so we do not only test against our own assumptions; used by gateway tests now and by the dashboard identity-provider setup step later
 
 ## Phase 2: Secure messaging core (about 2 to 3 weeks)
 
