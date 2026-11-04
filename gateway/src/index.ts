@@ -22,6 +22,10 @@ export interface Env extends AuthEnv {
   RATE_AUTH_PER_MIN?: string;
   RATE_TENANT_LOGIN_PER_MIN?: string;
   RATE_SESSION_PER_MIN?: string;
+  // Per-minute limits per device for new tasks, other task messages and directory searches (the tenant's are ten times these).
+  RATE_TASK_PER_MIN?: string;
+  RATE_MESSAGE_PER_MIN?: string;
+  RATE_FIND_PER_MIN?: string;
   // Comma-separated `tenant:email` pairs allowed to hold an admin session.
   ADMINS?: string;
   // Comma-separated `tenant:email` pairs and `tenant:domain` pairs allowed to hold a user session. With neither set

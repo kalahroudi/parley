@@ -3,6 +3,7 @@
 
 import { isCardId, isDeviceId, validatePage } from "./acl";
 import type { Env } from "./index";
+import { limitDevice } from "./ratelimit";
 import { csrfOk, principal } from "./session";
 import type { DirectoryError, Tenant } from "./tenant";
 
@@ -22,6 +23,11 @@ const STATUS: Record<DirectoryError, number> = {
   bad_members: 400,
   too_many_groups: 429,
 };
+const limitedResponse = (retryAfterMs: number) =>
+  new Response(JSON.stringify({ error: "rate_limited", retry_after_ms: retryAfterMs }), {
+    status: 429,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": String(Math.ceil(retryAfterMs / 1000)) },
+  });
 const fail = (r: { error: DirectoryError; field?: string }) => json(STATUS[r.error], r.field ? { error: r.error, field: r.field } : { error: r.error });
 
 // An admin is a session. A device has no credential until connect tokens land,
@@ -90,6 +96,8 @@ export async function handleDirectory(req: Request, env: Env, deviceAuth?: Devic
   if (pathname === "/v1/cards/remove") return (await stub.removeCard(id.device, isCardId(b.id) ? b.id : "")) ? json(200, { ok: true }) : json(404, { error: "not_found" });
   if (pathname === "/v1/directory/find") {
     if (!page) return fail({ error: "bad_query" });
+    const wait = await limitDevice(env, id.tenant, id.device, "find");
+    if (wait !== null) return limitedResponse(wait);
     const r = await stub.find(id.device, b.query, page);
     return "error" in r ? fail(r) : json(200, r);
   }

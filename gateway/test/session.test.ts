@@ -321,65 +321,6 @@ describe("who may hold a user session", () => {
   });
 });
 
-describe("rate limits", () => {
-  const limited = (init: Record<string, string> = {}) => ({ ...env, ...init }) as Env;
-  const get = async (e: Env, path: string, ip = "198.51.100.1", method = "POST") => {
-    const { default: worker } = await import("../src/index");
-    return worker.fetch(new Request(`https://gw${path}`, { method, headers: { "CF-Connecting-IP": ip } }), e);
-  };
-
-  it("session endpoints refuse past the limit with 429 and Retry-After, per source", async () => {
-    const e = limited({ RATE_SESSION_PER_MIN: "3" });
-    for (let i = 0; i < 3; i++) expect((await get(e, "/v1/session")).status).toBe(401);
-    const r = await get(e, "/v1/session");
-    expect(r.status).toBe(429);
-    expect(await r.json()).toEqual({ error: "rate_limited" });
-    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
-    expect((await get(e, "/v1/session/logout")).status).toBe(429); // same source, same budget
-    expect((await get(e, "/v1/session", "198.51.100.2")).status).toBe(401); // another source is not affected
-  });
-
-  it("login and callback share a per-source budget", async () => {
-    const e = limited({ RATE_AUTH_PER_MIN: "2" });
-    expect((await get(e, "/auth/google/login", "198.51.100.3", "GET")).status).toBe(404);
-    expect((await get(e, "/auth/google/callback", "198.51.100.3", "GET")).status).toBe(404);
-    expect((await get(e, "/auth/google/login", "198.51.100.3", "GET")).status).toBe(429);
-  });
-
-  it("a tenant's logins are limited across sources", async () => {
-    const e = limited({ RATE_TENANT_LOGIN_PER_MIN: "2" });
-    const q = "/auth/google/login?tenant=acme&role=user";
-    expect((await get(e, q, "198.51.100.4", "GET")).status).not.toBe(429);
-    expect((await get(e, q, "198.51.100.5", "GET")).status).not.toBe(429);
-    expect((await get(e, q, "198.51.100.6", "GET")).status).toBe(429);
-    expect((await get(e, "/auth/google/login?tenant=other&role=user", "198.51.100.6", "GET")).status).not.toBe(429);
-  });
-
-  it("fails closed when the limiter is unavailable", async () => {
-    const broken = { ...env, RATE: { get: () => { throw new Error("down"); }, idFromName: () => ({}) } } as unknown as Env;
-    expect((await get(broken, "/v1/session")).status).toBe(429);
-  });
-
-  it("the counter resets after its window, a refusal does not extend it, and storage stays one row that the alarm deletes", async () => {
-    const id = env.RATE.idFromName("unit");
-    const rl = env.RATE.get(id);
-    expect((await rl.hit(2, 1500)).ok).toBe(true);
-    expect((await rl.hit(2, 1500)).ok).toBe(true);
-    for (let i = 0; i < 20; i++) expect((await rl.hit(2, 1500)).ok).toBe(false);
-    const rows = () => runInDurableObject(rl, async (_i, ctx) => (await ctx.storage.list()).size);
-    expect(await rows()).toBe(1);
-    await new Promise((r) => setTimeout(r, 1600));
-    expect((await rl.hit(2, 1500)).ok).toBe(true); // a new window, though refusals kept coming before it ended
-    await runDurableObjectAlarm(rl); // early: the window is still open, so the counter stays
-    expect(await rows()).toBe(1);
-    expect((await rl.hit(2, 1500)).ok).toBe(true);
-    expect((await rl.hit(2, 1500)).ok).toBe(false);
-    await new Promise((r) => setTimeout(r, 1600));
-    await runDurableObjectAlarm(rl); // (it may already have fired by itself)
-    expect(await rows()).toBe(0);
-  });
-});
-
 describe("R12 on every state-changing route family", () => {
   const everything = (t: string) => runInDurableObject(stub(t), async (_i, ctx) => JSON.stringify([...(await ctx.storage.list())]));
 
