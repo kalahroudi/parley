@@ -4,6 +4,8 @@
 import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Device } from "../src/device";
+// A value import, so Stryker's vitest runner (which runs the tests that import a mutated file) finds these tests for device.ts.
+import "../src/device";
 
 // Sockets outlive a test's storage isolation, so each test gets its own device name.
 let n = 0;
