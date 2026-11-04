@@ -26,4 +26,6 @@ done
 # `npm ci` in gateway first.
 echo "== mutation: gateway tier 1 files"
 (cd gateway && npm run test:mutation) || status=1
+# Errored and ignored mutants do not count against Stryker's threshold; this gate does.
+node scripts/stryker-gate.mjs || status=1
 exit $status
