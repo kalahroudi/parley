@@ -207,7 +207,7 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 		return err
 	}
 	if r.cfg.Admit != nil {
-		if err := r.cfg.Admit(h); err != nil {
+		if err := r.admit(h); err != nil {
 			return fmt.Errorf("%w: %w", ErrRejected, err)
 		}
 	}
@@ -258,7 +258,7 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 	// Erase. Exactly one of any concurrent deliveries wins this. A kept key is
 	// not erased here; the replay entry recorded above is what stops a second
 	// delivery of this message.
-	if r.cfg.Keep == nil || !r.cfg.Keep(h) {
+	if !r.keep(h) {
 		if err := r.cfg.Pool.Consume(id); err != nil {
 			return fmt.Errorf("%w: %w", ErrDropped, err)
 		}
@@ -274,6 +274,32 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 	}
 	started = true
 	return execute(Delivered{Header: h, Owner: owner, Plaintext: pt})
+}
+
+// admit runs the Admit hook and fails closed: a panic is a refusal. Nothing
+// has been recorded or opened yet, so there is nothing to undo.
+func (r *Receiver) admit(h envelope.Header) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("receive: admit hook panicked")
+		}
+	}()
+	return r.cfg.Admit(h)
+}
+
+// keep runs the Keep hook and fails closed: a panic means the key is not kept,
+// so it is erased as for any message. Without this a panic would unwind past
+// the erase and leave the key behind.
+func (r *Receiver) keep(h envelope.Header) (kept bool) {
+	if r.cfg.Keep == nil {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			kept = false
+		}
+	}()
+	return r.cfg.Keep(h)
 }
 
 // authenticate checks the sender and returns the binding's owner. It reads
