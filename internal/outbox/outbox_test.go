@@ -5,11 +5,8 @@ package outbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,8 +14,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/kalahroudi/parley/internal/trust"
 )
 
 // clock is a fake time source: Sleep advances it at once and records the wait.
@@ -684,37 +679,3 @@ func TestJitterStaysWithinAQuarter(t *testing.T) {
 		t.Fatalf("jitter of one nanosecond: %v", d)
 	}
 }
-
-func TestTrustPresence(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var b struct{ ID string }
-		_ = jsonDecode(r, &b)
-		switch b.ID {
-		case "up":
-			w.Write([]byte(`{"online":true}`))
-		case "limited":
-			w.Header().Set("Retry-After", "4")
-			w.WriteHeader(http.StatusTooManyRequests)
-		default:
-			http.Error(w, "gone", http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	p := TrustPresence(&trust.Client{BaseURL: srv.URL})
-	ctx := context.Background()
-	if on, err := p(ctx, "up"); err != nil || !on {
-		t.Fatalf("%v %v", on, err)
-	}
-	if _, err := p(ctx, "hidden"); !errors.Is(err, ErrGone) {
-		t.Fatalf("not found should be ErrGone: %v", err)
-	}
-	_, err := p(ctx, "limited")
-	if d, ok := retryAfter(err); !ok || d != 4*time.Second || errors.Is(err, ErrGone) {
-		t.Fatalf("rate limit passed through: %v %v %v", d, ok, err)
-	}
-	if _, ok := retryAfter(errors.New("plain")); ok {
-		t.Fatal("a plain error has no retry-after")
-	}
-}
-
-func jsonDecode(r *http.Request, v any) error { return json.NewDecoder(r.Body).Decode(v) }

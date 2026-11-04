@@ -61,16 +61,11 @@ type Task struct {
 type State uint8
 
 const (
-	// Waiting: the target is offline; "waiting for recipient".
-	Waiting State = iota + 1
-	// Sending: the target is online; asking for a prekey and sending.
-	Sending
-	// Sent: handed to the gateway. From here the gateway's task state is the truth.
-	Sent
-	// Failed: never sent. Status.Err says why.
-	Failed
-	// Canceled: the caller canceled before it was sent; the target never heard of it.
-	Canceled
+	Waiting  State = iota + 1 // the target is offline: "waiting for recipient"
+	Sending                   // online: asking for a prekey and sending
+	Sent                      // handed to the gateway, whose task state is the truth from here
+	Failed                    // never sent; Status.Err says why
+	Canceled                  // canceled before it was sent; the target never heard of it
 )
 
 // Status is a task's state, and for Failed the reason.
@@ -79,11 +74,9 @@ type Status struct {
 	Err   error
 }
 
-// a2aStates maps a task the gateway has not seen yet onto the task state machine
-// (src/task.ts, as named in src/a2a.ts): waiting for the recipient is SUBMITTED,
-// the same state the gateway reports once it has the task, so the caller sees one
-// continuous lifecycle. Sent is absent on purpose: from there the gateway's Task
-// DO is the only truth, and the daemon asks it.
+// a2aStates maps a task the gateway has not seen yet onto the gateway's state
+// names (src/a2a.ts): waiting is SUBMITTED, as it is once the gateway has the
+// task. Sent is absent on purpose: from there the gateway's Task DO is the truth.
 var a2aStates = map[State]string{
 	Waiting:  "TASK_STATE_SUBMITTED",
 	Sending:  "TASK_STATE_SUBMITTED",
@@ -91,8 +84,7 @@ var a2aStates = map[State]string{
 	Canceled: "TASK_STATE_CANCELED",
 }
 
-// A2AState is the task's state in the gateway's vocabulary, or "" once it is
-// Sent (ask the gateway).
+// A2AState is the state in the gateway's vocabulary, or "" once Sent.
 func (s Status) A2AState() string { return a2aStates[s.State] }
 
 // Config wires the outbox. Presence and Send are required; the rest have defaults.
@@ -243,8 +235,7 @@ func (o *Outbox) prune(now time.Time) {
 	}
 }
 
-// Status is a task's state, or false if it is not known (never submitted, or
-// forgotten KeepDone after it finished).
+// Status is a task's state, or false if unknown (never submitted, or forgotten).
 func (o *Outbox) Status(id string) (Status, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -255,8 +246,7 @@ func (o *Outbox) Status(id string) (Status, bool) {
 	return e.status, true
 }
 
-// Done is closed when the task reaches Sent, Failed or Canceled. A task that is
-// not known gives a closed channel.
+// Done is closed when the task reaches Sent, Failed or Canceled (or is unknown).
 func (o *Outbox) Done(id string) <-chan struct{} {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -268,8 +258,7 @@ func (o *Outbox) Done(id string) <-chan struct{} {
 	return c
 }
 
-// Cancel stops waiting for a task that has not been sent. Once sending has
-// begun the task belongs to the gateway: cancel it there (a signed CANCEL).
+// Cancel stops waiting for a task that has not been sent; after that, cancel it at the gateway.
 func (o *Outbox) Cancel(id string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()

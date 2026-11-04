@@ -110,9 +110,8 @@ const ok = (id: unknown, result: Json) => Response.json({ jsonrpc: "2.0", id, re
 const fail = (id: unknown, [code, message]: Err) =>
   Response.json({ jsonrpc: "2.0", id, error: { code, message } }, { headers: { "cache-control": "no-store" } });
 
-// Counts one request against the caller's allowance (Tenant DO). Null means go
-// on; otherwise the response to return. Called after the request is known to be
-// well formed and before anything is written or relayed.
+// Counts one well-formed request against the caller's allowance (Tenant DO):
+// null to go on, else the 429 to return. Called before anything is written or relayed.
 async function limited(rid: unknown, env: Env, who: Identity, scope: Scope): Promise<Response | null> {
   const stub = env.TENANT.get(env.TENANT.idFromName(who.tenant)) as DurableObjectStub<Tenant>;
   const r = await stub.rateLimit(scope, who.device);
