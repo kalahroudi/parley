@@ -12,6 +12,9 @@ import (
 
 var errPeer = errors.New("localsock: connection from another user refused")
 
+// There is deliberately no implementation for other platforms: the package does
+// not build there, so an untested port cannot run without the peer check.
+
 // checkPeer accepts only connections from processes running as uid want. The
 // socket's directory is already private; this is the second, kernel-attested
 // check, so a mis-set mode or a bind mount cannot open the daemon to others.
