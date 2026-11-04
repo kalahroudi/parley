@@ -116,7 +116,8 @@ func TestDefaultDirs(t *testing.T) {
 		}
 		return ""
 	}
-	if d, err := DefaultDirs(home, func() (string, error) { return "", errors.New("unused") }); err != nil || d.Config != "/h" || d.State != "/h" {
+	abs, _ := filepath.Abs("/h") // a drive letter is added on Windows
+	if d, err := DefaultDirs(home, func() (string, error) { return "", errors.New("unused") }); err != nil || d.Config != abs || d.State != abs {
 		t.Errorf("PARLEY_HOME: %+v %v", d, err)
 	}
 }
