@@ -7,7 +7,7 @@
 
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NEXT, TASK_METADATA_RETENTION_MS, TASK_TTL_DEFAULT_MS, TASK_TTL_MAX_MS, TERMINAL, type Task, type TaskEvent, type TaskRecord, type TaskState } from "../src/task";
+import { MAX_QUEUED, MAX_QUEUED_BYTES, NEXT, QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, TASK_METADATA_RETENTION_MS, TASK_TTL_DEFAULT_MS, TASK_TTL_MAX_MS, TERMINAL, type Task, type TaskEvent, type TaskRecord, type TaskState } from "../src/task";
 
 type Stub = DurableObjectStub<Task>;
 const T = "t1";
@@ -42,7 +42,7 @@ describe("create", () => {
     expect(r).toMatchObject({ id: "abc", tenant: T, state: "SUBMITTED", caller_seq: 0, target_seq: 0, caller: "alice", target: "bob" });
     expect(r.expires_at - r.created).toBe(TASK_TTL_DEFAULT_MS);
     expect(r.created).toBeGreaterThanOrEqual(t0);
-    expect(Object.keys(r).sort()).toEqual(["caller", "caller_seq", "created", "expires_at", "id", "state", "target", "target_seq", "tenant", "updated"]);
+    expect(Object.keys(r).sort()).toEqual(["caller", "caller_seq", "created", "expires_at", "id", "qseq", "retention", "state", "target", "target_seq", "tenant", "updated"]);
     expect(await rec(s)).toEqual(r);
     expect(await alarmOf(s)).toBe(r.expires_at);
   });
@@ -51,6 +51,7 @@ describe("create", () => {
     const s = stub();
     const ok = { tenant: T, id: "abc", caller: "alice", target: "bob" };
     const bad: Record<string, unknown>[] = [
+      { retention: "lazy" }, { retention: 1 },
       { id: "a/b" }, { tenant: "t:1" }, { caller: "" }, { target: "x".repeat(65) }, { id: 5 }, { tenant: undefined },
       { target: "alice" }, // one device in both roles
       { ttl_ms: 0 }, { ttl_ms: -1 }, { ttl_ms: NaN }, { ttl_ms: 1.5 }, { ttl_ms: "5" }, { ttl_ms: TASK_TTL_MAX_MS + 1 },
@@ -366,7 +367,7 @@ describe("metadata only", () => {
     expect(Object.keys(all)).toEqual(["task"]); // one key, no side tables
     expect(JSON.stringify(all)).not.toContain(CANARY);
     const r = all.task as Record<string, unknown>;
-    expect(Object.keys(r).sort()).toEqual(["caller", "caller_seq", "created", "expires_at", "id", "reason", "state", "target", "target_seq", "tenant", "updated"]);
+    expect(Object.keys(r).sort()).toEqual(["caller", "caller_seq", "created", "expires_at", "id", "qseq", "reason", "retention", "state", "target", "target_seq", "tenant", "updated"]);
     for (const v of Object.values(r)) expect(["string", "number"]).toContain(typeof v);
   });
 
@@ -515,5 +516,176 @@ describe("deadlines, alarms and restarts", () => {
     vi.setSystemTime(Date.now() + 1000);
     await deliverAlarm(s);
     expect(await state(s)).toBe("SUBMITTED");
+  });
+});
+
+
+// Retention modes: Queued holds sealed events for an offline caller until the
+// caller acknowledges them or the TTL passes; Strict holds nothing.
+describe("retention", () => {
+  const HOUR = QUEUE_TTL_DEFAULT_MS;
+  const queued = async () => {
+    const s = stub();
+    expect(typeof (await s.create({ tenant: T, id: "abc", caller: "alice", target: "bob", retention: "queued" }))).toBe("object");
+    return s;
+  };
+  const hold = (s: Stub, body = "sealed", ttl = HOUR) => s.enqueue(T, "bob", body, ttl);
+  const heldKeys = async (s: Stub) => Object.keys(await stored(s)).filter((k) => k.startsWith("q:"));
+  beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));
+
+  it("the queue TTL is 1 hour by default, from 15 minutes to 24 hours", () => {
+    expect([QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MIN_MS, QUEUE_TTL_MAX_MS]).toEqual([3600_000, 900_000, 86_400_000]);
+  });
+
+  it("a task is Strict by default, and a Strict task holds nothing", async () => {
+    const s = await fresh();
+    expect((await rec(s)).retention).toBe("strict");
+    expect(await hold(s)).toBe("not_queued");
+    expect(Object.keys(await stored(s))).toEqual(["task"]);
+  });
+
+  it("holds an event for the caller with its own deadline, and the alarm is the earliest deadline", async () => {
+    const s = await queued();
+    const r = await rec(s);
+    const t0 = Date.now();
+    expect(await hold(s, "one", HOUR)).toEqual({ id: 1, expires_at: t0 + HOUR });
+    expect(await alarmOf(s)).toBe(r.expires_at); // the task expires (15 min) before the event does
+    expect(await hold(s, "two", QUEUE_TTL_MIN_MS)).toEqual({ id: 2, expires_at: t0 + QUEUE_TTL_MIN_MS });
+    expect((await rec(s)).queue_until).toBe(t0 + QUEUE_TTL_MIN_MS);
+    expect(await heldKeys(s)).toEqual(["q:000000000001", "q:000000000002"]);
+    expect(await s.drain(T, "alice")).toEqual([
+      { id: 1, body: "one", exp: t0 + HOUR },
+      { id: 2, body: "two", exp: t0 + QUEUE_TTL_MIN_MS },
+    ]);
+  });
+
+  it("a long task TTL keeps the event deadline as the alarm", async () => {
+    const s = stub();
+    await s.create({ tenant: T, id: "abc", caller: "alice", target: "bob", retention: "queued", ttl_ms: TASK_TTL_MAX_MS });
+    const r = await hold(s, "x", QUEUE_TTL_MIN_MS);
+    expect(await alarmOf(s)).toBe((r as { expires_at: number }).expires_at);
+  });
+
+  it("refuses bad input, the wrong sender, another tenant, and a full queue, and stores nothing for them", async () => {
+    const s = await queued();
+    for (const body of ["", 5 as unknown as string, "x".repeat(MAX_QUEUED_BYTES)]) expect(await hold(s, body)).toBe("bad_request");
+    for (const ttl of [QUEUE_TTL_MIN_MS - 1, QUEUE_TTL_MAX_MS + 1, 1.5, NaN]) expect(await hold(s, "x", ttl)).toBe("bad_request");
+    expect(await s.enqueue(T, "alice", "x", HOUR)).toBe("forbidden"); // the caller's own messages are never held
+    expect(await s.enqueue(T, "mallory", "x", HOUR)).toBe("forbidden");
+    expect(await s.enqueue("t2", "bob", "x", HOUR)).toBe("not_found");
+    expect(await stub().enqueue(T, "bob", "x", HOUR)).toBe("not_found");
+    expect(await heldKeys(s)).toEqual([]);
+    expect((await rec(s)).qseq).toBe(0);
+    for (let i = 0; i < MAX_QUEUED; i++) expect(typeof (await hold(s))).toBe("object");
+    expect(await hold(s)).toBe("full");
+    expect(await heldKeys(s)).toHaveLength(MAX_QUEUED);
+  });
+
+  it("refuses an event that would take the task past its byte limit", async () => {
+    const s = await queued();
+    const big = "x".repeat(1 << 20);
+    for (let i = 0; i < 4; i++) expect(typeof (await hold(s, big))).toBe("object");
+    expect(await hold(s, "x")).toBe("full");
+  });
+
+  it("only the caller can drain and acknowledge", async () => {
+    const s = await queued();
+    await hold(s);
+    for (const who of ["bob", "mallory"]) {
+      expect(await s.drain(T, who)).toBe("forbidden");
+      expect(await s.ack(T, who, 1)).toBe("forbidden");
+    }
+    expect(await s.drain("t2", "alice")).toBe("not_found");
+    expect(await s.ack("t2", "alice", 1)).toBe("not_found");
+    expect(await heldKeys(s)).toHaveLength(1);
+  });
+
+  it("an acknowledged event is deleted at once, and the record says when", async () => {
+    const s = await queued();
+    await hold(s, "one");
+    await hold(s, "two");
+    expect(await s.ack(T, "alice", 1)).toBe(1);
+    expect(await heldKeys(s)).toEqual(["q:000000000002"]);
+    expect((await rec(s)).ciphertext_deleted_at).toBeUndefined(); // one is still held
+    vi.setSystemTime(Date.now() + 1000);
+    const t = Date.now();
+    expect(await s.ack(T, "alice", 1)).toBe(1); // a repeat changes nothing
+    expect(await s.ack(T, "alice", 2)).toBe(0);
+    expect(await heldKeys(s)).toEqual([]);
+    const r = await rec(s);
+    expect(r.ciphertext_deleted_at).toBe(t);
+    expect(r.queue_until).toBeUndefined();
+    expect(await s.drain(T, "alice")).toEqual([]);
+    // Holding another clears the "deleted" record, and the ids keep counting.
+    expect(await hold(s, "three")).toMatchObject({ id: 3 });
+    expect((await rec(s)).ciphertext_deleted_at).toBeUndefined();
+  });
+
+  it("deletes a held event at its TTL, from the alarm, and keeps the task's other deadline", async () => {
+    const s = await queued();
+    const t0 = Date.now();
+    await hold(s, "short", QUEUE_TTL_MIN_MS);
+    await hold(s, "long", HOUR);
+    vi.setSystemTime(t0 + QUEUE_TTL_MIN_MS - 1);
+    await deliverAlarm(s); // early: nothing is deleted
+    expect(await heldKeys(s)).toHaveLength(2);
+    vi.setSystemTime(t0 + QUEUE_TTL_MIN_MS);
+    await deliverAlarm(s);
+    expect(await heldKeys(s)).toEqual(["q:000000000002"]);
+    const r = await rec(s);
+    expect(r.state).toBe("FAILED"); // the task expired at 15 minutes, as before
+    expect(r.queue_until).toBe(t0 + HOUR);
+    expect(r.ciphertext_deleted_at).toBeUndefined();
+    expect(await alarmOf(s)).toBe(t0 + HOUR); // the next held event, ahead of the 90-day purge
+    vi.setSystemTime(t0 + HOUR);
+    await deliverAlarm(s);
+    expect(await heldKeys(s)).toEqual([]);
+    expect((await rec(s)).ciphertext_deleted_at).toBe(t0 + HOUR);
+    expect(await alarmOf(s)).toBe(r.updated + TASK_METADATA_RETENTION_MS);
+    expect(await s.drain(T, "alice")).toEqual([]);
+  });
+
+  it("never returns an event past its TTL, even before the alarm has run", async () => {
+    const s = await queued();
+    await hold(s, "x", QUEUE_TTL_MIN_MS);
+    vi.setSystemTime(Date.now() + QUEUE_TTL_MIN_MS);
+    expect(await s.drain(T, "alice")).toEqual([]);
+    expect(await heldKeys(s)).toEqual([]);
+  });
+
+  it("a state change does not push the event deadline back", async () => {
+    const s = await queued();
+    const t0 = Date.now();
+    await hold(s, "x", QUEUE_TTL_MIN_MS);
+    await asTarget(s, "COMPLETED", 1); // terminal: the next base deadline is 90 days out
+    expect(await alarmOf(s)).toBe(t0 + QUEUE_TTL_MIN_MS);
+    vi.setSystemTime(t0 + QUEUE_TTL_MIN_MS);
+    await deliverAlarm(s);
+    expect(await heldKeys(s)).toEqual([]);
+    expect(await alarmOf(s)).toBe(t0 + TASK_METADATA_RETENTION_MS);
+  });
+
+  it("purging the task's metadata deletes anything still held", async () => {
+    const s = await queued();
+    await hold(s, "x", QUEUE_TTL_MAX_MS);
+    await asTarget(s, "COMPLETED", 1);
+    vi.setSystemTime(Date.now() + TASK_METADATA_RETENTION_MS);
+    await deliverAlarm(s);
+    expect(await stored(s)).toEqual({});
+  });
+
+  it("holds only sealed bodies and ids, never a key that could carry readable content", async () => {
+    const s = await queued();
+    await hold(s, "sealed-body");
+    const all = await stored(s);
+    expect(Object.keys(all).sort()).toEqual(["q:000000000001", "task"]);
+    expect(all["q:000000000001"]).toEqual({ body: "sealed-body", exp: Date.now() + HOUR });
+  });
+
+  it("survives eviction", async () => {
+    const s = await queued();
+    await hold(s, "x");
+    await evictDurableObject(s);
+    expect(await s.drain(T, "alice")).toHaveLength(1);
   });
 });

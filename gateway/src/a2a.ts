@@ -6,6 +6,7 @@ import { MAX_FRAME_BYTES } from "./protocol";
 import { parseSealedPart, SEALED_MEDIA_TYPE, type Shape } from "./parts";
 import { limitDevice, type Scope } from "./ratelimit";
 import type { Task, TaskEvent, TaskRecord, TaskState } from "./task";
+import type { Tenant } from "./tenant";
 
 export { SEALED_MEDIA_TYPE };
 
@@ -141,6 +142,7 @@ export interface Identity {
 }
 
 const taskStub = (env: Env, tenant: string, id: string) => env.TASK.get(env.TASK.idFromName(`${tenant}:${id}`)) as DurableObjectStub<Task>;
+const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 const deviceStub = (env: Env, tenant: string, device: string) => env.DEVICE.get(env.DEVICE.idFromName(`${tenant}:${device}`));
 
 // Task view for responses: metadata only.
@@ -149,7 +151,13 @@ function view(rec: TaskRecord): Json {
     id: rec.id,
     contextId: rec.id, // the gateway keeps no context id; the signed one is inside the sealed part
     status: { state: STATE_NAME[rec.state], timestamp: new Date(rec.updated).toISOString() },
-    metadata: { parley: { expires_at: rec.expires_at, ...(rec.reason ? { reason: rec.reason } : {}) } },
+    metadata: {
+      parley: {
+        expires_at: rec.expires_at,
+        ...(rec.reason ? { reason: rec.reason } : {}),
+        ...(rec.ciphertext_deleted_at ? { ciphertext_deleted_at: rec.ciphertext_deleted_at } : {}),
+      },
+    },
   };
 }
 
@@ -310,7 +318,8 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
   if (shape.kind === "TASK") {
     // A new task: the signed header names the target and the task id.
     if (!isId(shape.target)) return fail(rid, ERR.params);
-    const rec = await stub.create({ tenant: who.tenant, id: shape.taskId, caller: who.device, target: shape.target });
+    // The task keeps the retention mode the tenant has now, whatever the admin sets later.
+    const rec = await stub.create({ tenant: who.tenant, id: shape.taskId, caller: who.device, target: shape.target, retention: (await tenantStub(env, who.tenant).retention()).mode });
     if (rec === "exists") return fail(rid, ERR.exists);
     if (rec === "bad_request") return fail(rid, ERR.params);
     const d = await deviceStub(env, who.tenant, shape.target).deliver(eventBody(rec, who.device, shape.kind, undefined, role, m.messageId, shape.context, parts));
@@ -337,13 +346,28 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
   const rec = await stub.apply(who.tenant, who.device, event, shape.seq);
   if (typeof rec === "string") return fail(rid, APPLY_ERR[rec]!);
   const peer = fromCaller ? rec.target : rec.caller;
-  const d = await deviceStub(env, who.tenant, peer).deliver(eventBody(rec, who.device, (hint as string | undefined) ?? shape.kind, shape.seq, role, m.messageId, shape.context, parts));
+  const body = eventBody(rec, who.device, (hint as string | undefined) ?? shape.kind, shape.seq, role, m.messageId, shape.context, parts);
+  const d = await deviceStub(env, who.tenant, peer).deliver(body);
   if (d.status === "delivered") return ok(rid, { task: view(rec) });
-  // Results and status are relayed only while the caller is connected (Strict).
-  // The retention modes (T304) add the Queued behavior. A reply the target never
-  // saw leaves the task waiting on an answer nobody can act on: close it.
+  // Queued: a result or status for a caller that is offline is held, sealed, until
+  // the caller acknowledges it or the tenant's TTL passes.
+  if (!fromCaller && d.status === "offline" && rec.retention === "queued" && (await hold(env, who, rec, body))) return ok(rid, { task: view(rec) });
+  // Strict (and anything that could not be held): results and status are relayed
+  // only while the caller is connected, and the task fails if it is not. A reply
+  // the target never saw leaves the task waiting on an answer nobody can act on:
+  // close it.
   await stub.callerDisconnected(who.tenant, fromCaller ? who.device : rec.caller);
   return fail(rid, d.status === "offline" ? ERR.offline : ERR.tooLarge);
+}
+
+// Holds `body` for the task's caller in the Task DO and notes it on the caller's
+// Device DO, so the next connection of that device receives it. False when it
+// cannot be held (too many tasks or messages): the task then fails as in Strict.
+async function hold(env: Env, who: Identity, rec: TaskRecord, body: string): Promise<boolean> {
+  const ttl = (await tenantStub(env, who.tenant).retention()).queue_ttl_ms;
+  // The deadline is noted before the event is held, so a held event is never unreachable.
+  const noted = await deviceStub(env, who.tenant, rec.caller).hold({ tenant: who.tenant, device: rec.caller, task: rec.id, until: Date.now() + ttl });
+  return noted === "ok" && typeof (await taskStub(env, who.tenant, rec.id).enqueue(who.tenant, who.device, body, ttl)) === "object";
 }
 
 async function get(rid: unknown, params: Json, env: Env, who: Identity): Promise<Response> {

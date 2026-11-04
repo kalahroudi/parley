@@ -1,17 +1,18 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_REQUEST_BYTES, SEALED_MEDIA_TYPE, STATE_NAME } from "../src/a2a";
 import { MAX_BUCKET, SIGNED_TYPE, type SignedKind } from "../src/parts";
-import { NEXT, type TaskState } from "../src/task";
+import { MAX_HELD } from "../src/device";
+import { MAX_QUEUED, NEXT, QUEUE_TTL_MIN_MS, type TaskState } from "../src/task";
 import { gw, b64, encodeWire, header, taskBytes, taskHex, type Header } from "./wire";
 
 // Each test gets its own tenant, so devices and tasks never collide.
 let n = 0;
 const fresh = () => {
-  const T = `t${++n}`;
+  const T = `a2a${++n}`;
   return { T, bearer: (d: string) => ({ Authorization: `Bearer dev:${T}:${d}` }) };
 };
 
@@ -369,6 +370,7 @@ describe("lifecycle over the transport", () => {
 
   it("a caller that is gone fails the task when the target reports (Strict)", async () => {
     const w = world();
+    await setRetention(w.T, { mode: "strict" });
     await connect(w.T, "bob");
     // Alice has no tunnel, but the task exists: create it through a connected alice, then drop her.
     const alice = await connect(w.T, "alice");
@@ -380,6 +382,7 @@ describe("lifecycle over the transport", () => {
     const t = await w.rpc("bob", "GetTask", { id: taskHex("tk") });
     expect(t.result.status.state).toBe("TASK_STATE_FAILED");
     expect(t.result.metadata.parley.reason).toBe("disconnected");
+    expect(await heldFor(w.T, "tk")).toEqual([]); // nothing was stored for the lost result
   });
 
   it("a reply the target never received fails the task instead of leaving it waiting", async () => {
@@ -566,3 +569,125 @@ describe("cancel", () => {
 
 // Keeps the envelope type numbers visible to the type checker.
 void SIGNED_TYPE;
+
+
+const setRetention = async (T: string, body: unknown) => {
+  const { secret } = await env.TENANT.get(env.TENANT.idFromName(T)).createSession("admin@example.test", "admin");
+  const r = await SELF.fetch("https://gw/v1/admin/retention/put", { method: "POST", headers: { Authorization: `Bearer ps_${T}.${secret}` }, body: JSON.stringify(body) });
+  expect(r.status).toBe(200);
+};
+const heldFor = (T: string, id: string) =>
+  runInDurableObject(env.TASK.get(env.TASK.idFromName(`${T}:${taskHex(id)}`)), async (_, ctx) => [...(await ctx.storage.list({ prefix: "q:" })).keys()]);
+
+describe("retention modes over the transport", () => {
+  afterEach(() => vi.useRealTimers());
+  // A task from alice to bob, with alice then disconnected.
+  async function offlineCaller(w: ReturnType<typeof world>, id = "tk") {
+    const alice = await connect(w.T, "alice");
+    await connect(w.T, "bob");
+    await w.task(id);
+    alice.ws.close(1000, "bye");
+    await gone(w.T, "alice");
+  }
+
+  it("Queued (the default) holds a result for a caller that was offline and delivers it on reconnect", async () => {
+    const w = world();
+    await offlineCaller(w);
+    const r = await w.bob("STATUS", "tk", 1);
+    expect(r.result.task.status.state).toBe("TASK_STATE_WORKING"); // accepted, not failed
+    expect((await w.bob("RESULT", "tk", 2)).result.task.status.state).toBe("TASK_STATE_COMPLETED");
+    expect(await heldFor(w.T, "tk")).toHaveLength(2);
+    const alice = await connect(w.T, "alice");
+    const [a, b] = [await alice.event(), await alice.event()];
+    expect(a.task.status.message.metadata.parley).toMatchObject({ kind: "STATUS", seq: 1 });
+    expect(b.task.status.message.metadata.parley).toMatchObject({ kind: "RESULT", seq: 2 });
+    expect(await heldFor(w.T, "tk")).toHaveLength(2); // until acknowledged
+    expect((await w.rpc("alice", "GetTask", { id: taskHex("tk") })).result.metadata.parley.ciphertext_deleted_at).toBeUndefined();
+    alice.ws.send(JSON.stringify({ t: "ack", seq: 2 }));
+    for (let i = 0; i < 200 && (await heldFor(w.T, "tk")).length; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(await heldFor(w.T, "tk")).toEqual([]);
+    const t = (await w.rpc("alice", "GetTask", { id: taskHex("tk") })).result;
+    expect(t.status.state).toBe("TASK_STATE_COMPLETED");
+    expect(t.metadata.parley.ciphertext_deleted_at).toBeGreaterThan(0);
+  });
+
+  it("Queued deletes a held result at the tenant's TTL if the caller never comes back", async () => {
+    const w = world();
+    await setRetention(w.T, { mode: "queued", queue_ttl_ms: QUEUE_TTL_MIN_MS });
+    await offlineCaller(w);
+    await w.bob("RESULT", "tk", 1);
+    expect(await heldFor(w.T, "tk")).toHaveLength(1);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + QUEUE_TTL_MIN_MS);
+    expect(await runDurableObjectAlarm(env.TASK.get(env.TASK.idFromName(`${w.T}:${taskHex("tk")}`)))).toBe(true);
+    expect(await heldFor(w.T, "tk")).toEqual([]);
+    vi.useRealTimers();
+    const alice = await connect(w.T, "alice"); // nothing is left to deliver
+    expect(alice.pending()).toBe(0);
+    expect((await w.rpc("alice", "GetTask", { id: taskHex("tk") })).result.metadata.parley.ciphertext_deleted_at).toBeGreaterThan(0);
+  });
+
+  it("Strict stores nothing: the task fails when the caller is not connected", async () => {
+    const w = world();
+    await setRetention(w.T, { mode: "strict" });
+    await offlineCaller(w);
+    expect(errCode(await w.bob("STATUS", "tk", 1))).toBe(-32010);
+    expect(await w.state("tk", "bob")).toBe("TASK_STATE_FAILED");
+    expect(await heldFor(w.T, "tk")).toEqual([]);
+  });
+
+  it("a task keeps the mode it was created under when the admin changes it", async () => {
+    const w = world();
+    await offlineCaller(w, "q1"); // created under Queued
+    await setRetention(w.T, { mode: "strict" });
+    expect((await w.bob("RESULT", "q1", 1)).result).toBeDefined();
+    expect(await heldFor(w.T, "q1")).toHaveLength(1);
+    const alice = await connect(w.T, "alice");
+    await w.task("s1"); // created under Strict
+    alice.ws.close(1000, "bye");
+    await gone(w.T, "alice");
+    expect(errCode(await w.bob("RESULT", "s1", 1))).toBe(-32010);
+    expect(await heldFor(w.T, "s1")).toEqual([]);
+  });
+
+  it("never holds what the caller sent, so a reply to an offline target still fails the task", async () => {
+    const w = world();
+    await connect(w.T, "alice");
+    const bob = await connect(w.T, "bob");
+    await w.task("tk");
+    await w.bob("INPUT_REQUIRED", "tk", 1);
+    bob.ws.close(1000, "bye");
+    await gone(w.T, "bob");
+    expect(errCode(await w.alice("REPLY", "tk", 1))).toBe(-32010);
+    expect(await heldFor(w.T, "tk")).toEqual([]);
+  });
+
+  it("fails the task when the queue is full", async () => {
+    const w = world();
+    await offlineCaller(w);
+    for (let i = 1; i <= MAX_QUEUED; i++) expect((await w.bob("STATUS", "tk", i)).result).toBeDefined();
+    expect(errCode(await w.bob("STATUS", "tk", MAX_QUEUED + 1))).toBe(-32010);
+    expect(await w.state("tk", "bob")).toBe("TASK_STATE_FAILED");
+  });
+
+  it("fails the task when the caller's device cannot note any more tasks", async () => {
+    const w = world();
+    await offlineCaller(w);
+    await runInDurableObject(env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:alice`)), (_, ctx) =>
+      ctx.storage.put("held", Array.from({ length: MAX_HELD }, (_, i) => ({ tenant: w.T, device: "alice", task: `other${i}`, until: Date.now() + 60_000 }))),
+    );
+    expect(errCode(await w.bob("STATUS", "tk", 1))).toBe(-32010);
+    expect(await w.state("tk", "bob")).toBe("TASK_STATE_FAILED");
+    expect(await heldFor(w.T, "tk")).toEqual([]);
+  });
+
+  it("holds only the sealed envelope: no readable field reaches storage", async () => {
+    const w = world();
+    await offlineCaller(w);
+    await w.bob("RESULT", "tk", 1);
+    const all = await runInDurableObject(env.TASK.get(env.TASK.idFromName(`${w.T}:${taskHex("tk")}`)), async (_, ctx) => Object.fromEntries(await ctx.storage.list()));
+    const held = JSON.parse((all["q:000000000001"] as { body: string }).body);
+    expect(Object.keys(held.task.status.message.parts[0]).sort()).toEqual(["mediaType", "raw"]);
+    expect(held.task.status.message.metadata.parley).toEqual({ kind: "RESULT", from: "bob", seq: 1 });
+  });
+});
