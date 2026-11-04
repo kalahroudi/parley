@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
@@ -22,6 +24,7 @@ import (
 	"github.com/kalahroudi/parley/internal/keystore"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/logx"
+	"github.com/kalahroudi/parley/internal/pipeline"
 	"github.com/kalahroudi/parley/internal/prekey"
 	"github.com/kalahroudi/parley/internal/revocation"
 	"github.com/kalahroudi/parley/internal/root"
@@ -76,12 +79,27 @@ type Deps struct {
 	// configured gateway, with a token earned by signing its challenge with the
 	// device key (internal/connect).
 	TunnelConfig func(ctx context.Context, signer ed25519.PrivateKey) (tunnel.Config, error)
-	// OnEvent receives every tunnel event, in order. Required whenever
-	// TunnelConfig can succeed: the tunnel stalls if nobody drains it.
+	// OnEvent, if set, sees every tunnel event, in order, before the pipeline
+	// does (a tap for tests and tracing). It must not block for long.
 	OnEvent func(tunnel.Event)
 	HTTP    *http.Client
-	// Supervisor tuning (tests); zero values use the defaults.
-	MinBackoff, ShutdownTimeout time.Duration
+	// Directory finds a peer's current root-signed binding (it is only a source:
+	// the pipeline verifies every binding against the pinned root and the rollback
+	// store). Nil means no peer can be found, so nothing is accepted or sent.
+	Directory func(ctx context.Context, device string) (*binding.Signed, error)
+	// Allow is the owner allowlist for callers into this device's bots; OnInbound
+	// is the bot; OnUpdate gets the progress of tasks this device sent. With
+	// Allow or OnInbound nil no bot runs here and every prekey request is refused.
+	Allow     func(owner string) bool
+	OnInbound func(pipeline.Inbound)
+	OnUpdate  func(pipeline.Update)
+	// AllowUnlockedMemory lets the pipeline run when the OS will not lock its key
+	// memory in RAM (a container without the capability). Prekeys could then be
+	// swapped out; the default refuses to start the pipeline instead.
+	AllowUnlockedMemory bool
+	// Supervisor tuning (tests); zero values use the defaults. SweepEvery is how
+	// often the pipeline ends tasks that ran out of time.
+	MinBackoff, ShutdownTimeout, SweepEvery time.Duration
 }
 
 // Daemon is one parleyd. Create it with New, register Methods with Handle,
@@ -98,6 +116,11 @@ type Daemon struct {
 	sup     *supervisor.Supervisor
 	srv     *localsock.Server
 	started time.Time
+
+	nodeMu sync.Mutex
+	node   *pipeline.Node
+	pool   *prekey.Pool
+	tun    atomic.Pointer[tunnel.Client]
 }
 
 // New validates the environment and opens everything that must be sound before
@@ -110,6 +133,9 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	}
 	if deps.Now == nil {
 		deps.Now = time.Now
+	}
+	if deps.SweepEvery <= 0 {
+		deps.SweepEvery = sweepEvery
 	}
 	if deps.Rand == nil {
 		deps.Rand = rand.Reader
@@ -238,6 +264,7 @@ func (d *Daemon) status(context.Context, json.RawMessage) (any, error) {
 // component would not stop.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer keystore.Zero(d.signer)
+	defer d.closeNode() // before the key is zeroed (defers run last in, first out): the pipeline signs with it until then
 	release, err := lockState(d.dirs.State)
 	if err != nil {
 		return err
@@ -282,6 +309,7 @@ func (d *Daemon) components() []supervisor.Component {
 	return []supervisor.Component{
 		{Name: "tunnel", Run: d.runTunnel, MaxBackoff: 5 * time.Minute},
 		{Name: "revocations", Run: d.runRefresh},
+		{Name: "sweep", Run: d.runSweep},
 	}
 }
 
@@ -293,13 +321,15 @@ func (d *Daemon) runTunnel(ctx context.Context) error {
 		return err
 	}
 	c := tunnel.New(cfg)
+	d.tun.Store(c)
+	defer d.tun.CompareAndSwap(c, nil)
 	// Run closes Events when it returns, so ranging ends the drain and waiting for
 	// it means every event received has been handed on, in order, before we return.
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
 		for ev := range c.Events() {
-			d.deps.OnEvent(ev)
+			d.handleEvent(ctx, ev)
 		}
 	}()
 	err = c.Run(ctx)
