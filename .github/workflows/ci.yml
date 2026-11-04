@@ -102,6 +102,9 @@ jobs:
       - name: Gateway soak (T108)
         working-directory: gateway
         run: npm run test:soak
+      # No development auth may ship (also run by the Release workflow).
+      - name: Release gate (no development auth)
+        run: node scripts/check-dev-auth.mjs
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
       # Slow and Linux-only: mutation testing of the tier 1 packages.
