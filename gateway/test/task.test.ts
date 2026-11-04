@@ -387,10 +387,14 @@ describe("metadata only", () => {
 });
 
 describe("deadlines, alarms and restarts", () => {
+  // Far longer than any storage latency: the real workerd alarm for this deadline must not fire while the test runs
+  // (a 1 s deadline did on slow Windows storage, which re-armed the alarm and expired the task under the frozen clock).
+  // Every time below is relative to the deadline, so its length changes nothing else.
+  const DEADLINE_TTL = 600_000;
   beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));
 
   it("fails a live task at its deadline, on read, without the alarm; the instant itself is expired", async () => {
-    const s = await fresh(1000);
+    const s = await fresh(DEADLINE_TTL);
     const exp = (await rec(s)).expires_at;
     await asTarget(s, "WORKING", 1);
     vi.setSystemTime(exp - 1);
@@ -400,7 +404,7 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("stamps the expiry at the deadline, whenever it is noticed", async () => {
-    const lazy = await fresh(1000);
+    const lazy = await fresh(DEADLINE_TTL);
     const exp = (await rec(lazy)).expires_at;
     vi.setSystemTime(exp + 7_000_000);
     expect((await rec(lazy)).updated).toBe(exp);
@@ -408,8 +412,8 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("refuses updates after the deadline", async () => {
-    const s = await fresh(1000);
-    vi.setSystemTime(Date.now() + 1000);
+    const s = await fresh(DEADLINE_TTL);
+    vi.setSystemTime(Date.now() + DEADLINE_TTL);
     expect(await asTarget(s, "COMPLETED", 1)).toBe("terminal");
     expect(await asCaller(s, "CANCEL", 1)).toBe("terminal");
     expect(await s.callerDisconnected(T, "alice")).toMatchObject({ state: "FAILED", reason: "expired" });
@@ -417,7 +421,7 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("the alarm expires the task and arms the metadata purge; a second delivery changes nothing", async () => {
-    const s = await fresh(1000);
+    const s = await fresh(DEADLINE_TTL);
     const exp = (await rec(s)).expires_at;
     expect(await alarmOf(s)).toBe(exp);
     vi.setSystemTime(exp + 1);
@@ -432,7 +436,7 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("an alarm that fires before the deadline keeps the expiry alarm armed", async () => {
-    const s = await fresh(1000);
+    const s = await fresh(DEADLINE_TTL);
     const exp = (await rec(s)).expires_at;
     await runInDurableObject<Task, void>(s, async (o, ctx) => {
       await ctx.storage.deleteAlarm();
@@ -453,7 +457,7 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("the alarm after retention deletes the record; before it, the purge is re-armed", async () => {
-    const s = await fresh(1000);
+    const s = await fresh(DEADLINE_TTL);
     await asTarget(s, "REJECTED", 1);
     const done = (await rec(s)).updated;
     vi.setSystemTime(done + TASK_METADATA_RETENTION_MS - 1);
@@ -475,7 +479,7 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("the state, the deadline and the alarm survive the object being evicted", async () => {
-    const s = await fresh(1000);
+    const s = await fresh(DEADLINE_TTL);
     const exp = (await rec(s)).expires_at;
     await asTarget(s, "INPUT_REQUIRED", 1);
     await evictDurableObject(s);
@@ -503,7 +507,7 @@ describe("deadlines, alarms and restarts", () => {
   });
 
   it("a clock that jumps far ahead expires the task and anchors retention at the deadline", async () => {
-    const s = await fresh(1000);
+    const s = await fresh(DEADLINE_TTL);
     const exp = (await rec(s)).expires_at;
     vi.setSystemTime(exp + 400 * 24 * 3600_000);
     expect(await runDurableObjectAlarm(s)).toBe(true);
@@ -513,7 +517,7 @@ describe("deadlines, alarms and restarts", () => {
 
   it("a live task with a long deadline is not expired by an alarm delivered late but still before it", async () => {
     const s = await fresh(TASK_TTL_MAX_MS);
-    vi.setSystemTime(Date.now() + 1000);
+    vi.setSystemTime(Date.now() + DEADLINE_TTL);
     await deliverAlarm(s);
     expect(await state(s)).toBe("SUBMITTED");
   });

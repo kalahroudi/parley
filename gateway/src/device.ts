@@ -133,8 +133,10 @@ export class Device extends DurableObject<Env> {
     await this.ctx.blockConcurrencyWhile(async () => {
       const session = (await this.ctx.storage.get<Session>("session"))!; // hello stored it before calling us
       await this.ackHeld(session.acked_tx);
+      const [prevHeld, prevInfl] = await Promise.all([this.ctx.storage.get<Held[]>("held"), this.ctx.storage.get<Inflight[]>("inflight")]);
       const held: Held[] = [];
-      const infl = ((await this.ctx.storage.get<Inflight[]>("inflight")) ?? []).filter((i) => i.until > Date.now());
+      const infl = (prevInfl ?? []).filter((i) => i.until > Date.now());
+      const tx = session.tx_seq;
       for (const h of await this.liveHeld()) {
         const events = await this.taskStub(h).drain(h.tenant, h.device);
         if (typeof events === "string" || !events.length) continue; // the task holds nothing for us any more
@@ -148,7 +150,14 @@ export class Device extends DurableObject<Env> {
         });
         infl.push(...sent.map((e, k) => ({ ...h, until: e.exp, id: e.id, seq: first + k })));
       }
-      await Promise.all([this.ctx.storage.put("session", session), this.ctx.storage.put("held", held), this.ctx.storage.put("inflight", infl)]);
+      // Write only what changed: a connection with nothing held (always so in Strict) writes nothing here, which
+      // also keeps the keys out of storage altogether.
+      const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+      await Promise.all([
+        ...(session.tx_seq === tx ? [] : [this.ctx.storage.put("session", session)]),
+        ...(same(held, prevHeld ?? []) ? [] : [this.ctx.storage.put("held", held)]),
+        ...(same(infl, prevInfl ?? []) ? [] : [this.ctx.storage.put("inflight", infl)]),
+      ]);
     });
   }
 

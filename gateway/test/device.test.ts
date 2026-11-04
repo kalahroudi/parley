@@ -623,6 +623,16 @@ describe("held events (Queued)", () => {
     return { c, welcome };
   };
 
+  it("a connection with nothing held writes no held or in-flight keys (Strict stores nothing, and a connect costs no extra rows)", async () => {
+    const { c } = await open();
+    c.send({ t: "ack", seq: 0 });
+    c.send("ping");
+    expect(await c.next()).toEqual({ t: "pong" });
+    const keys = await runInDurableObject(stubFor(), async (_, ctx) => [...(await ctx.storage.list()).keys()]);
+    expect(keys).not.toContain("held");
+    expect(keys).not.toContain("inflight");
+  });
+
   it("pushes held events, oldest task first, when the daemon connects; an acknowledgment deletes them", async () => {
     await seed(`a${n}`, ["one", "two"]);
     await seed(`b${n}`, ["three"]);
