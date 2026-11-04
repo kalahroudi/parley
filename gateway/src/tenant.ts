@@ -145,8 +145,6 @@ export { cleanText };
 
 export const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 
-export const decodeKey = (b64: string) => decodeBytes(b64, 32);
-
 // One Tenant DO per customer (named by tenant id). It holds the enrollment
 // tokens (as hashes) and the approval queue. Binding signatures come from the
 // admin's daemon, not from here; the gateway only records the decision.
