@@ -10,6 +10,7 @@
 // scope is the full one, with the reason printed on stderr. It never skips.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { owned } from "./mutation-gate.mjs";
 import { fileURLToPath } from "node:url";
 
 // A change to any of these can weaken the gate for every package.
@@ -17,7 +18,11 @@ const GATE = /^(go\.mod|go\.sum|tests\/coverage\/|scripts\/(mutation|stryker-gat
 
 const git = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
-export function select({ scope, base = "origin/main", pkgs, files, cwd = "." }) {
+// `owns(pkg)` says whether this runner owns any Go file of the package (see mutation-gate.mjs): a runner has
+// nothing to judge in a package whose files all belong to an earlier one, so it skips it, which keeps the
+// macOS and Windows runs to the few packages with OS-specific files.
+export function select({ scope, base = "origin/main", pkgs: all, files, cwd = ".", owns = () => true }) {
+  const pkgs = all.filter(owns);
   const run = (...a) => git(cwd, ...a);
   const full = (reason) => ({ scope: "all", reason, packages: pkgs, files });
   if (scope === "all") return full("full run requested");
@@ -54,8 +59,9 @@ export function select({ scope, base = "origin/main", pkgs, files, cwd = "." }) 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const pkgs = JSON.parse(readFileSync("tests/coverage/tiers.json", "utf8")).tiers["1"].packages;
   const files = JSON.parse(readFileSync("tests/coverage/gateway-tier1.json", "utf8")).files;
+  const [goos, goarch] = execFileSync("go", ["env", "GOOS", "GOARCH"], { encoding: "utf8" }).split("\n");
   try {
-    const r = select({ scope: process.argv[2] ?? "all", base: process.argv[3], pkgs, files });
+    const r = select({ scope: process.argv[2] ?? "all", base: process.argv[3], pkgs, files, owns: (p) => owned(p, { goos, goarch }).size > 0 });
     console.error(`mutation scope: ${r.scope} (${r.reason})`);
     console.log(JSON.stringify(r));
   } catch (e) {

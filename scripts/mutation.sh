@@ -35,12 +35,17 @@ pkgs=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).packages
 mutate=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).files.map((f) => f.replace(/^gateway\//, "")).join(" ")' "$out/scope.json")
 stale=--stale
 [ "$scope" = all ] || stale=
+# A mutant is given this many times the normal test time before it counts as timed out (detected, see
+# scripts/mutation-gate.mjs). A mutant that survives runs at normal speed, so a pull request can use a
+# small factor and finish fast; the full run keeps a wide margin for slow runners.
+coef=${MUTATION_TIMEOUT_COEFFICIENT:-20}
+[ "$scope" = all ] || coef=${MUTATION_TIMEOUT_COEFFICIENT:-8}
 status=0
 for p in $pkgs; do
 	echo "== mutation: $p"
 	json="$out/$(echo "$p" | tr / _).json"
 	go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
-		--workers 2 --timeout-coefficient 20 \
+		--workers 2 --timeout-coefficient "$coef" \
 		--invert-assignments --invert-bitwise --invert-bwassign --invert-logical \
 		--invert-loopctrl --remove-self-assignments -o "$json" "./$p" || status=1
 	node scripts/mutation-gate.mjs "$p" "$json" $stale || status=1

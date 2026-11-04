@@ -104,3 +104,21 @@ test("the CI job that runs the changed-code mutation step has the full history",
   assert.match(ci, /actions\/checkout@v4\s+with:\s+fetch-depth: 0/);
   assert.ok(!/fetch[^\n]*--depth/.test(ci), "a depth-limited fetch makes the checkout shallow again");
 });
+
+test("mutation scope: a runner skips packages whose Go files all belong to an earlier runner", () => {
+  const owns = (p) => p === "internal/envelope";
+  const r = pick((put) => put("internal/binding/b.go", "new"), { owns });
+  assert.deepEqual(r.packages, []); // changed, but this runner owns nothing in it
+  assert.deepEqual(pick((put) => put("internal/envelope/e.go", "new"), { owns }).packages, ["internal/envelope"]);
+  const all = pick((put) => put("scripts/mutation.sh", "x"), { owns }); // gates changed: the full scope is still only what it owns
+  assert.deepEqual([all.scope, all.packages], ["all", ["internal/envelope"]]);
+});
+
+test("CI lints every workflow with a pinned, checksum-verified actionlint", async () => {
+  const { readFileSync } = await import("node:fs");
+  const ci = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(ci, /actionlint_\$\{v\}_linux_amd64\.tar\.gz/);
+  assert.match(ci, /sha=[0-9a-f]{64}/);
+  assert.match(ci, /sha256sum -c -\n/);
+  assert.match(ci, /actionlint" -color\n/); // no file arguments: every file in .github/workflows
+});
