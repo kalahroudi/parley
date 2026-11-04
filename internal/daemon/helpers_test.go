@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -28,11 +29,22 @@ func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(
 // limited to about 104 bytes and t.TempDir paths on macOS are too long.
 func shortTemp(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "pd")
+	// Unix socket paths are limited to about 104 bytes (the daemon allows 100) and
+	// a runner's TMPDIR can be much longer, so use /tmp where there is one.
+	base := ""
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat("/tmp"); err == nil && fi.IsDir() {
+			base = "/tmp"
+		}
+	}
+	d, err := os.MkdirTemp(base, "pd")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(d) })
+	if len(d) > 70 {
+		t.Fatalf("temp directory %q is too long for a socket path under it (%d characters, at most 70); set TMPDIR to a short directory", d, len(d))
+	}
 	return d
 }
 

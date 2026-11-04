@@ -5,9 +5,26 @@
 // connection, answered only to processes of the daemon's own user. The socket
 // lives in a private directory (see fsperm); on Linux and macOS the kernel also
 // attests the peer's uid on every connection, so a mis-set mode or a bind mount
-// cannot open the daemon to other users. On Windows the protected DACL on the
-// directory is the restriction (AF_UNIX there carries no peer credentials).
-// Requests and the number of open connections are bounded.
+// cannot open the daemon to other users. Requests and the number of open
+// connections are bounded.
+//
+// What this guarantees, exactly.
+//
+// Linux and macOS: another local user cannot connect (the directory is 0700 and
+// the socket 0600, and the kernel-reported uid of every connection is checked).
+// Root can. Any process running as the same user can connect and use every
+// method; the socket is not a boundary against the user's own processes.
+//
+// Windows: the socket is AF_UNIX inside a directory with a protected DACL that
+// grants only the current user, SYSTEM and Administrators, and it is verified at
+// every start. Another standard user cannot reach the socket because they cannot
+// open its directory. Administrators and SYSTEM can. There is no peer-credential
+// check, so nothing re-verifies the caller once the directory is reachable: any
+// process running as the same user can connect, and anything that is later
+// granted access to the directory (an ACL changed after start, or a process
+// holding SeBackupPrivilege) is served without question. A named pipe with a
+// current-user ACL, or an equivalent peer check, is planned (T505, pinned by
+// TestPending_WindowsDaemonPeerRestriction).
 package localsock
 
 import (

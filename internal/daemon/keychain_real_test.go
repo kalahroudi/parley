@@ -7,6 +7,7 @@ package daemon
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -18,7 +19,10 @@ import (
 // Credential Manager); Linux CI has no Secret Service, so Linux is covered by
 // the file store and the keychain seam. The entry is removed afterwards.
 func TestRealKeychain(t *testing.T) {
-	id := "parley-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+	var suffix [6]byte
+	rand.Read(suffix[:])
+	// Unique per run, so two jobs on one machine never share an entry.
+	id := "parley-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-")) + "-" + hex.EncodeToString(suffix[:])
 	t.Cleanup(func() { keyring.Delete(keystore.KeychainService, id) })
 	ks := &keystore.KeychainStore{Account: id, KR: osKeyring{}}
 	key, created, err := keystore.LoadOrCreate(ks, rand.Reader)

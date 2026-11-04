@@ -21,11 +21,7 @@ import (
 // returns a userConfigDir func for it.
 func configHome(t *testing.T) func() (string, error) {
 	t.Helper()
-	home, err := os.MkdirTemp("", "pd")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(home) })
+	home := shortTempDir(t)
 	dir := filepath.Join(home, "parley")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -122,4 +118,27 @@ func TestRunHonoursParleyHome(t *testing.T) {
 	if err := run(ctx); err != nil {
 		t.Fatalf("run with PARLEY_HOME: %v", err)
 	}
+}
+
+// shortTempDir returns a short private temp directory: the socket path under it
+// must fit the unix limit, and a runner's TMPDIR can be much longer.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	// Unix socket paths are limited to about 104 bytes (the daemon allows 100) and
+	// a runner's TMPDIR can be much longer, so use /tmp where there is one.
+	base := ""
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat("/tmp"); err == nil && fi.IsDir() {
+			base = "/tmp"
+		}
+	}
+	d, err := os.MkdirTemp(base, "pd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	if len(d) > 70 {
+		t.Fatalf("temp directory %q is too long for a socket path under it (%d characters, at most 70); set TMPDIR to a short directory", d, len(d))
+	}
+	return d
 }

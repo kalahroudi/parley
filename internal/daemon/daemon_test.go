@@ -464,3 +464,32 @@ func TestFirstRunKeyCreationNeedsTheInstanceLock(t *testing.T) {
 		t.Errorf("New with a key present: %v", err)
 	}
 }
+
+// Starting and stopping the whole daemon repeatedly must leave no goroutines
+// behind: the server, the supervisor, the tunnel drain and the refresh loop all
+// have to end with Run.
+func TestDaemonLeavesNoGoroutinesBehind(t *testing.T) {
+	e := newEnv(t)
+	noKeepAlive := func(d *Deps) { d.HTTP = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}} }
+	cycle := func() {
+		r := e.start(t, noKeepAlive)
+		waitFor(t, "revocation list fetched", func() bool { return status(t, e).Revocations == "" })
+		if err := r.stop(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cycle() // warm up lazily started runtime goroutines
+	base := runtime.NumGoroutine()
+	for i := 0; i < 5; i++ {
+		cycle()
+	}
+	n := 0
+	for i := 0; i < 300; i++ {
+		runtime.GC()
+		if n = runtime.NumGoroutine(); n <= base {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%d goroutines after 5 start/stop cycles, baseline %d", n, base)
+}

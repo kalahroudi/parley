@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -259,4 +260,47 @@ func TestConstantsArePinned(t *testing.T) {
 	if defaultMinBackoff != 250*time.Millisecond || defaultMaxBackoff != 30*time.Second || defaultShutdown != 10*time.Second {
 		t.Errorf("defaults changed: %v %v %v", defaultMinBackoff, defaultMaxBackoff, defaultShutdown)
 	}
+}
+
+// settle waits for the goroutine count to come back to base: the supervisor and
+// its components must leave nothing behind once Run has returned.
+func settle(t *testing.T, base int, what string) {
+	t.Helper()
+	n := 0
+	for i := 0; i < 300; i++ {
+		runtime.GC()
+		if n = runtime.NumGoroutine(); n <= base {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s: %d goroutines, baseline %d", what, n, base)
+}
+
+func TestSupervisorLeavesNoGoroutinesBehind(t *testing.T) {
+	round := func() {
+		s := &Supervisor{Log: logx.New(&bytes.Buffer{}), MinBackoff: time.Millisecond}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		var failed atomic.Int32
+		go func() {
+			done <- s.Run(ctx,
+				Component{Name: "steady", Run: func(ctx context.Context) error { <-ctx.Done(); return nil }},
+				Component{Name: "flaky", MaxBackoff: 2 * time.Millisecond, Run: func(context.Context) error { failed.Add(1); return errors.New("x") }},
+				Component{Name: "panics", MaxBackoff: 2 * time.Millisecond, Run: func(context.Context) error { panic("x") }},
+			)
+		}()
+		waitFor(t, "restarts", func() bool { return failed.Load() >= 2 })
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	round() // warm up lazily started runtime goroutines
+	settle(t, runtime.NumGoroutine(), "warm-up")
+	base := runtime.NumGoroutine()
+	for i := 0; i < 20; i++ {
+		round()
+	}
+	settle(t, base, "after 20 start/stop rounds")
 }
