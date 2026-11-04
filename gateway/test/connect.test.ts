@@ -633,6 +633,43 @@ describe("what a token opens", () => {
     expect(inbox[1].t).toBe("event");
     ws.close();
   });
+
+  // The connect path must not depend on the tenant's retention mode, and the token flow keeps only what
+  // specs/parley-mvp/connect-tokens.md documents: hashes and metadata, never the secret, the challenge or the signature.
+  for (const mode of ["strict", "queued"]) {
+    it(`works in ${mode} retention and stores only the documented metadata`, async () => {
+      const x = tenant();
+      expect((await post("/v1/admin/retention/put", { mode }, { Authorization: await x.admin })).status).toBe(200);
+      const caller = await x.enroll();
+      const target = await x.enroll();
+      const ws = (await upgrade(await x.token(target, "connect"))).webSocket!;
+      ws.accept();
+      const inbox: any[] = [];
+      ws.addEventListener("message", (e) => inbox.push(JSON.parse(e.data as string)));
+      ws.send(JSON.stringify({ t: "hello", v: 1, last_rx: 0 }));
+      for (let i = 0; i < 100 && !inbox.length; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(inbox[0].t).toBe("welcome");
+
+      const ch = await x.challenge(caller);
+      const signature = await edSign(caller.key.privateKey, connectMessage(x.t, caller.id, ch.challenge, ch.expires_at, 1, "api"));
+      const issued = await json(await post("/v1/connect/token", { tenant: x.t, device: caller.id, challenge: ch.challenge, version: 1, scope: "api", signature }));
+      const secret = (issued.token as string).split(".")[2]!;
+      const part = { raw: b64(encodeWire({ header: header("TASK", { tenant: x.t, sender: caller.id, target: target.id, task: taskBytes(`m-${mode}`) }) })), mediaType: SEALED_MEDIA_TYPE };
+      const r = await json(await post("/a2a", { jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: { messageId: "m1", role: "ROLE_USER", parts: [part] } } }, bearer(issued.token)));
+      expect(r.result.task.status.state).toBe("TASK_STATE_SUBMITTED");
+      for (let i = 0; i < 100 && inbox.length < 2; i++) await new Promise((r2) => setTimeout(r2, 10));
+      expect(inbox[1].t).toBe("event");
+
+      const stored = await x.call(async (_i, ctx) => [...(await ctx.storage.list()).entries()]);
+      const dump = JSON.stringify(stored);
+      for (const leaked of [secret, ch.challenge, signature]) expect(dump).not.toContain(leaked);
+      for (const [k] of stored) expect(k, k).toMatch(/^(aud:|auds$|dtk:|enr:|retention$|root$|ses:)/);
+      // Strict keeps no ciphertext for the task the token sent; the connect path adds nothing of its own to it.
+      const held = await runInDurableObject(env.TASK.get(env.TASK.idFromName(`${x.t}:${taskHex(`m-${mode}`)}`)), async (_i, ctx) => [...(await ctx.storage.list({ prefix: "q:" })).keys()]);
+      if (mode === "strict") expect(held).toEqual([]);
+      ws.close();
+    });
+  }
 });
 
 describe("a token stops working when its device does", () => {
