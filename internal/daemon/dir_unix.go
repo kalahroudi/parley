@@ -42,3 +42,20 @@ func checkPrivateDir(dir string) error {
 	}
 	return nil
 }
+
+// checkPrivateFile fails unless path is a regular file (not a symlink) owned by
+// this user and closed to group and others.
+func checkPrivateFile(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || !ok || int(st.Uid) != geteuid() {
+		return fmt.Errorf("daemon: %s is not a regular file owned by the current user", path)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("daemon: %s is accessible to other users (mode %o); run chmod 600", path, fi.Mode().Perm())
+	}
+	return nil
+}

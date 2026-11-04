@@ -55,8 +55,10 @@ func LoadOrCreate(ks KeyStore, rnd io.Reader) (key ed25519.PrivateKey, created b
 // zero overwrites key material (best effort: Go gives no zeroing guarantee).
 func zero(b []byte) { clear(b) }
 
-func decodeSeed(s string) (ed25519.PrivateKey, error) {
-	seed, err := hex.DecodeString(s)
+func decodeSeed(s []byte) (ed25519.PrivateKey, error) {
+	seed := make([]byte, hex.DecodedLen(len(s)))
+	n, err := hex.Decode(seed, s)
+	seed = seed[:n]
 	if err != nil || len(seed) != ed25519.SeedSize {
 		zero(seed)
 		return nil, ErrKeyCorrupt
@@ -105,7 +107,7 @@ func (k *KeychainStore) Load() (ed25519.PrivateKey, error) {
 		// service details, and the caller only needs to know it failed.
 		return nil, errors.New("daemon: OS keychain unavailable (use key_store \"file\" on headless hosts)")
 	}
-	return decodeSeed(s)
+	return decodeSeed([]byte(s))
 }
 
 func (k *KeychainStore) Save(key ed25519.PrivateKey) error {
@@ -127,14 +129,18 @@ type FileKeyStore struct{ Dir string }
 func (f FileKeyStore) path() string { return filepath.Join(f.Dir, "device.key") }
 
 func (f FileKeyStore) Load() (ed25519.PrivateKey, error) {
-	data, err := os.ReadFile(f.path())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNoKey
+	if err := checkPrivateFile(f.path()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNoKey
+		}
+		return nil, err
 	}
+	data, err := os.ReadFile(f.path())
 	if err != nil {
 		return nil, fmt.Errorf("daemon: read device key: %w", err)
 	}
-	return decodeSeed(string(data))
+	defer zero(data)
+	return decodeSeed(data)
 }
 
 func (f FileKeyStore) Save(key ed25519.PrivateKey) error {
@@ -145,7 +151,11 @@ func (f FileKeyStore) Save(key ed25519.PrivateKey) error {
 	if err != nil {
 		return fmt.Errorf("daemon: create device key file: %w", err)
 	}
-	if _, err := w.WriteString(hex.EncodeToString(key.Seed())); err != nil {
+	enc := make([]byte, hex.EncodedLen(ed25519.SeedSize))
+	hex.Encode(enc, key.Seed())
+	_, err = w.Write(enc)
+	zero(enc)
+	if err != nil {
 		w.Close()
 		os.Remove(f.path())
 		return fmt.Errorf("daemon: write device key: %w", err)

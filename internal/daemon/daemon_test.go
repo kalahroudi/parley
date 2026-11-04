@@ -265,7 +265,9 @@ func TestRunFailsWhenInstanceLockCannotBeOpened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Mkdir(filepath.Join(e.dirs.State, "parleyd.lock"), 0o700) // a directory where the lock file belongs
+	lockPath := filepath.Join(e.dirs.State, "parleyd.lock")
+	os.Remove(lockPath)       // first-run key creation in New leaves one behind
+	os.Mkdir(lockPath, 0o700) // a directory where the lock file belongs
 	if err := d.Run(context.Background()); err == nil || errors.Is(err, ErrAlreadyRunning) {
 		t.Errorf("want a lock error, got %v", err)
 	}

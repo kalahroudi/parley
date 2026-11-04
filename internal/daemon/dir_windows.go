@@ -88,3 +88,17 @@ func checkPrivateDir(dir string) error {
 }
 
 func parentOf(dir string) string { return filepath.Dir(dir) }
+
+// checkPrivateFile: the key file inherits the protected DACL of its directory,
+// which ensurePrivateDir verified; Windows mode bits say nothing, so only a
+// regular-file check is made (no reparse points).
+func checkPrivateFile(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("daemon: %s is not a regular file", path)
+	}
+	return nil
+}

@@ -53,6 +53,11 @@ type Response struct {
 // must hold the instance lock, which is what makes removing a stale socket
 // file safe.
 func listenSocket(path string) (net.Listener, error) {
+	// A path starting with "@" would bind a Linux abstract socket, which has no
+	// file mode and is reachable by every user; absolute paths never do.
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("daemon: socket path must be absolute")
+	}
 	if len(path) > maxSocketPath {
 		return nil, fmt.Errorf("daemon: socket path is longer than %d characters; use a shorter config directory", maxSocketPath)
 	}
@@ -125,6 +130,14 @@ func (s *server) serve(ctx context.Context, ln net.Listener) {
 			continue
 		}
 		s.mu.Lock()
+		if ctx.Err() != nil {
+			// Shutdown's sweep may already have run; a connection added now
+			// would never be closed and wg.Wait would sit out its deadline.
+			s.mu.Unlock()
+			c.Close()
+			<-sem
+			break
+		}
 		s.conns[c] = struct{}{}
 		s.mu.Unlock()
 		wg.Add(1)

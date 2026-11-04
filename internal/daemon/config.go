@@ -5,6 +5,31 @@
 // in the OS keychain, the OS-user-restricted local socket, a supervisor for the
 // background components, and ordered graceful shutdown. It holds no task
 // content; the pipeline that handles tasks plugs in through Deps and Handle.
+//
+// Extension points for the tasks that complete the daemon (no code ahead of them):
+//   - T415 (device connect tokens): Deps.TunnelConfig is called each time the
+//     tunnel (re)starts with the device signing key, and returns the tunnel URL
+//     and a fresh token. Until it is set the tunnel waits, backing off, on
+//     ErrNoConnectToken.
+//   - T411 (enrollment): Daemon.SigningKey and Daemon.Trust give the device key
+//     and a trust.Daemon (Enroll, binding tracker, revocation guard) already
+//     pinned to the configured root; New opens the rollback stores, so a
+//     corrupt or rolled-back store stops startup.
+//   - T412 (receive pipeline): Deps.OnEvent receives every tunnel event in
+//     order and must not block for long; Daemon.Handle registers local socket
+//     methods before Run; a new background job is one more Component in
+//     Daemon.components (restarted with jittered backoff, stopped on shutdown).
+//     Sending must go through Daemon.Trust, which refuses when the binding or
+//     revocation state is missing, stale or rolled back.
+//
+// Key storage guarantees, by key_store: "keychain" keeps the seed in the macOS
+// Keychain, Windows Credential Manager or the Linux Secret Service, protected
+// by the OS login session (access by this user's processes, not by other
+// users); "file" keeps it in device.key (mode 0600, owner checked, in a 0700
+// directory, or a protected DACL on Windows) with no protection against other
+// processes of the same user or against root. A missing key is created once; a
+// corrupt, unreadable or exposed one stops startup, and the device must be
+// re-enrolled deliberately. Zeroing the key in memory is best effort.
 package daemon
 
 import (
@@ -30,6 +55,9 @@ const (
 	// at least weekly; hourly keeps the 7-day warning from ever showing).
 	DefaultRefresh = time.Hour
 	minRefresh     = time.Minute
+	// maxRefresh keeps the 7-day staleness warning meaningful: a longer interval
+	// would let the held list go stale before the next fetch is even tried.
+	maxRefresh     = 24 * time.Hour
 	maxConfigBytes = 64 << 10
 
 	// KeyStoreKeychain is the default: the OS keychain. KeyStoreFile is an explicit
@@ -114,8 +142,8 @@ func (c *Config) validate() error {
 	c.refresh = DefaultRefresh
 	if c.Refresh != "" {
 		d, err := time.ParseDuration(c.Refresh)
-		if err != nil || d < minRefresh {
-			return bad("refresh_interval must be a duration of at least 1m")
+		if err != nil || d < minRefresh || d > maxRefresh {
+			return bad("refresh_interval must be a duration between 1m and 24h")
 		}
 		c.refresh = d
 	}

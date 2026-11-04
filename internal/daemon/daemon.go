@@ -41,7 +41,12 @@ type Dirs struct{ Config, State string }
 // one machine, as in the dev harness), else <user config dir>/parley.
 func DefaultDirs(getenv func(string) string, userConfigDir func() (string, error)) (Dirs, error) {
 	if h := getenv("PARLEY_HOME"); h != "" {
-		return Dirs{Config: h, State: h}, nil
+		// Absolute, so the socket path can never be read as a Linux abstract name ("@...").
+		abs, err := filepath.Abs(h)
+		if err != nil {
+			return Dirs{}, fmt.Errorf("daemon: PARLEY_HOME: %w", err)
+		}
+		return Dirs{Config: abs, State: abs}, nil
 	}
 	d, err := userConfigDir()
 	if err != nil {
@@ -127,7 +132,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	if ks == nil {
 		ks = keyStoreFor(cfg, dirs)
 	}
-	signer, created, err := LoadOrCreate(ks, deps.Rand)
+	signer, created, err := loadOrCreateOnce(ks, deps.Rand, dirs.State)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +210,7 @@ func (d *Daemon) status(context.Context, json.RawMessage) (any, error) {
 // component would not stop.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer zero(d.signer)
-	release, err := d.lock()
+	release, err := lockState(d.dirs.State)
 	if err != nil {
 		return err
 	}
@@ -230,10 +235,27 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
-// lock takes the per-device instance lock; the lock file lives in the state
-// directory and the kernel frees it when the process exits.
-func (d *Daemon) lock() (func(), error) {
-	f, err := os.OpenFile(filepath.Join(d.dirs.State, "parleyd.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+// loadOrCreateOnce is LoadOrCreate with the instance lock held around the
+// creation. Two daemons starting together on a first run would otherwise both
+// find no key and both mint one, and the keychain keeps only the last write:
+// the loser would run under an identity that is stored nowhere. The common case
+// (key present) takes no lock, so a running daemon never blocks a second New.
+func loadOrCreateOnce(ks KeyStore, rnd io.Reader, stateDir string) (ed25519.PrivateKey, bool, error) {
+	if key, err := ks.Load(); !errors.Is(err, ErrNoKey) {
+		return key, false, err
+	}
+	release, err := lockState(stateDir)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+	return LoadOrCreate(ks, rnd)
+}
+
+// lockState takes the per-device instance lock; the lock file lives in the
+// state directory and the kernel frees it when the process exits.
+func lockState(stateDir string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(stateDir, "parleyd.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: open instance lock: %w", err)
 	}
