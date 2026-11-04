@@ -8,6 +8,10 @@
 // cannot open the daemon to other users. Requests and the number of open
 // connections are bounded.
 //
+// Supported platforms are Linux, macOS and Windows. The package deliberately
+// does not build anywhere else (there is no checkPeer for them): an untested
+// port must fail to compile rather than run without the peer check.
+//
 // What this guarantees, exactly.
 //
 // Linux and macOS: another local user cannot connect (the directory is 0700 and
