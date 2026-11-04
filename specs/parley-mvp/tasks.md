@@ -4,7 +4,7 @@ Phased delivery with acceptance tests. Requirements are in [spec.md](spec.md); a
 
 Every phase ends with something you can run and demonstrate, a functional acceptance suite that passes, and coverage gates that hold. The spikes in plan.md are folded into the phases.
 
-Estimates are my judgment, not verified. Including the testing discipline, expect roughly 15 to 19 weeks to a pilot-ready release for one experienced developer working with AI coding agents. The first encrypted two-machine demo lands at the end of Phase 2 (about weeks 6 to 8).
+Estimates are my judgment, not verified. Including the testing discipline, expect roughly 15 to 19 weeks to a pilot-ready release for one experienced developer working with AI coding agents. The secure messaging libraries are done at the end of Phase 2 (about weeks 6 to 8); the first encrypted two-machine echo is milestone M1 (after T414), which runs in parallel with Phase 3.
 
 Revised 2026-11-04: daemon assembly is now explicit (T410 to T415), and the first end-to-end echo moves to milestone M1 after T414.
 
