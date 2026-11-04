@@ -17,6 +17,7 @@ import {
   type ServerMessage,
 } from "./protocol";
 import { limitDevice } from "./ratelimit";
+import { tenantStub } from "./tenant";
 
 // Set by the Worker on the request it forwards, after it has verified the device's token.
 export const IDENTITY_TENANT = "x-parley-tenant";
@@ -240,16 +241,22 @@ export class Device extends DurableObject<Env> {
     const who = (ws.deserializeAttachment() as Attachment).who;
     const frame = parseRelayFrame(body);
     if (!who || !frame || frame.to === who.device) return;
-    const wait = await limitDevice(this.env, who.tenant, who.device, "prekey");
+    const request = frame.t === "prekey_request";
+    const wait = await limitDevice(this.env, who.tenant, who.device, "prekey", request ? frame.to : undefined);
     if (wait !== null) {
-      if (frame.t === "prekey_request") await this.deliver(refusedRateLimited(frame.id, frame.to, wait));
+      if (request) await this.deliver(refusedRateLimited(frame.id, frame.to, wait));
+      return;
+    }
+    // Enrolled and not revoked now, and (for a request) the target visible to the sender: rechecked per frame.
+    if (!(await tenantStub(this.env, who.tenant).mayRelay(who.device, frame.to, request))) {
+      if (request) await this.deliver(refusedOffline(frame.id, frame.to));
       return;
     }
     const { to, ...rest } = frame;
     const event = JSON.stringify(frame.t === "prekey_refused" ? { ...rest, from: who.device, reason: "refused" } : { ...rest, from: who.device });
     const peer = this.env.DEVICE.get(this.env.DEVICE.idFromName(`${who.tenant}:${to}`));
-    const r = await peer.deliver(event);
-    if (r.status !== "delivered" && frame.t === "prekey_request") await this.deliver(JSON.stringify({ t: "prekey_refused", id: frame.id, from: to, reason: "offline" }));
+    const r = await peer.deliver(event).catch((): DeliverResult => ({ status: "offline" }));
+    if (r.status !== "delivered" && request) await this.deliver(refusedOffline(frame.id, to));
   }
 
   async webSocketClose(ws: WebSocket, code: number): Promise<void> {
@@ -273,6 +280,11 @@ export class Device extends DurableObject<Env> {
 // What the requester is told when the gateway will not carry its prekey request: wait this long.
 function refusedRateLimited(id: string, from: string, retryAfterMs: number): string {
   return JSON.stringify({ t: "prekey_refused", id, from, reason: "rate_limited", retry_after_ms: retryAfterMs });
+}
+
+// Not connected, not enrolled, not visible to the requester: one answer for all, so it reveals nothing.
+function refusedOffline(id: string, from: string): string {
+  return JSON.stringify({ t: "prekey_refused", id, from, reason: "offline" });
 }
 
 function validId(v: string | null): v is string {

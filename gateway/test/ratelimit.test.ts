@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { handleA2A, SEALED_MEDIA_TYPE } from "../src/a2a";
 import { handleDirectory, type DeviceAuth } from "../src/directory";
 import type { Env } from "../src/index";
-import { advance, limitDevice, limitFor, reArm, TENANT_FACTOR } from "../src/ratelimit";
+import { advance, limitDevice, limitFor, reArm, TARGET_FACTOR, TENANT_FACTOR } from "../src/ratelimit";
 import { b64, encodeWire, gw, header, taskBytes, taskHex } from "./wire";
 
 describe("rate limits", () => {
@@ -83,7 +83,7 @@ describe("device and tenant budgets", () => {
   let n = 0;
   const T = () => `rl${++n}`;
   const small = (over: Record<string, string> = {}) => ({ ...env, RATE_TASK_PER_MIN: "3", RATE_MESSAGE_PER_MIN: "3", RATE_FIND_PER_MIN: "3", RATE_PREKEY_PER_MIN: "3", ...over }) as Env;
-  const lim = (e: Env, t: string, d: string, scope: "task" | "message" | "find" | "prekey" = "task") => limitDevice(e, t, d, scope);
+  const lim = (e: Env, t: string, d: string, scope: "task" | "message" | "find" | "prekey" = "task", target?: string) => limitDevice(e, t, d, scope, target);
 
   it("allows the budget, then refuses with a wait of at most one window, per device and per scope", async () => {
     const e = small();
@@ -101,6 +101,20 @@ describe("device and tenant budgets", () => {
     expect(await lim(e, t, "alice", "prekey")).toBeGreaterThan(0);
     expect(await lim(e, t, "alice")).toBeGreaterThan(0); // the task scope was spent above, and is a different one
     expect(await lim(e, t, "carol", "prekey")).toBeNull();
+  });
+
+  it("a target's budget is TARGET_FACTOR times the caller's, spent after the caller's, per tenant", async () => {
+    const e = small();
+    const t = T();
+    for (let i = 0; i < 3 * TARGET_FACTOR; i++) expect(await lim(e, t, `c${i}`, "prekey", "bob")).toBeNull();
+    expect(await lim(e, t, "late", "prekey", "bob")).toBeGreaterThan(0); // the target's is spent; the caller's is not
+    expect(await lim(e, t, "late", "prekey", "dave")).toBeNull(); // so the caller is free for another target
+    expect(await lim(e, T(), "late", "prekey", "bob")).toBeNull(); // another tenant's bob is another budget
+    // A refused caller does not spend the target's budget: a flood by one is stopped by its own.
+    const t2 = T();
+    for (let i = 0; i < 10; i++) await lim(e, t2, "flood", "prekey", "bob");
+    for (let i = 0; i < 3 * TARGET_FACTOR - 3; i++) expect(await lim(e, t2, `o${i}`, "prekey", "bob")).toBeNull();
+    expect(await lim(e, t2, "z", "prekey", "bob")).toBeGreaterThan(0);
   });
 
   it("budgets never cross tenants, even for the same device id", async () => {

@@ -255,6 +255,26 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     }
     assert.ok(refused.length > 100);
     for (const r of refused) assert.ok(r.error && !r.result, `a hostile request was accepted: ${JSON.stringify(r)}`);
+    // The prekey relay: the caller asks the target for a one-time prekey and the target answers through the
+    // gateway, so a signed prekey (here, a canary in its place) is in flight in both directions. The gateway
+    // holds it for the length of the relay only: it is in no storage, log or response. The one place it is
+    // meant to be is the tunnel event delivered to the other device (a base64 string, scanned separately).
+    const prekey = mintCanaries(["prekey"]);
+    const nonce = Buffer.alloc(16, 9).toString("base64");
+    caller.send({ t: "frame", seq: 1, body: JSON.stringify({ t: "prekey_request", id: "req1", to: targetDev.id, nonce, expires_at: Date.now() + 900_000 }) });
+    assert.deepEqual(await caller.next(), { t: "ack", seq: 1 });
+    const asked = await target.next();
+    assert.equal(JSON.parse(asked.body).from, callerDev.id, "the request was not relayed");
+    const blob = Buffer.from(prekey.prekey).toString("base64");
+    target.send({ t: "frame", seq: 1, body: JSON.stringify({ t: "prekey_reply", id: "req1", to: callerDev.id, prekey: blob }) });
+    assert.deepEqual(await target.next(), { t: "ack", seq: 1 });
+    const answered = await caller.next();
+    assert.equal(JSON.parse(answered.body).prekey, blob, "the answer was not relayed");
+    // A refused request (rate limit and hidden target look alike to the sender): the refusal carries no prekey.
+    caller.send({ t: "frame", seq: 2, body: JSON.stringify({ t: "prekey_request", id: "req2", to: "f".repeat(32), nonce, expires_at: Date.now() + 900_000 }) });
+    const back = [await caller.next(), await caller.next()]; // the refusal, then the acknowledgment
+    assert.deepEqual(back.map((m) => m.t), ["event", "ack"]);
+    assert.equal(JSON.parse(back[0].body).reason, "offline");
     caller.close();
     target.close();
     // Planted-leak control: a control canary goes into a field the gateway DOES
@@ -313,6 +333,15 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     t.diagnostic(`scanned ${scan.sinks.length} sinks, ${files.length} persisted files, ${rec.seen.length} observed messages; skipped: ${scan.skipped.length}`);
     assert.deepEqual(scan.skipped, [], "the scan skipped something it could not read");
     scan.assertClean();
+    // The prekey canary: in no stored file, log, output or HTTP exchange. The tunnel messages that carry it
+    // between the two devices, and the daemon's own send of it, are left out (that is the relay's job); every other message is scanned.
+    const relayed = new Scan(prekey);
+    for (const [what, data] of rec.seen) if (!(what.startsWith("websocket") && data.includes(Buffer.from(prekey.prekey).toString("base64")))) relayed.text(what, data);
+    relayed.text("gateway output", out[0]);
+    relayed.path(logs);
+    relayed.path(state);
+    assert.deepEqual(relayed.skipped, [], "the prekey scan skipped something it could not read");
+    relayed.assertClean();
   } finally {
     if (gw) await gw.stop();
     if (idp) await idp.close();

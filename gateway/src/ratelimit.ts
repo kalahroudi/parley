@@ -95,7 +95,7 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
   return take(env, "session", source, limitFor(env.RATE_SESSION_PER_MIN, DEFAULTS.session));
 }
 
-// Requests that name a device (A2A sends, status, GetTask, CancelTask, directory search; prekey requests and answers, which the Device DO relays) are counted per scope against two budgets in the same RateLimit DO:
+// Requests that name a device (A2A sends, status, GetTask, CancelTask, directory search; prekey requests and answers, which the Device DO relays) are counted per scope against two budgets (three for prekey requests, which also spend the target's) in the same RateLimit DO:
 //  - the device's own, in a bucket named by a hash salted with the tenant, so the same device id in another
 //    tenant has its own and no name or id is stored;
 //  - the tenant's, TENANT_FACTOR times the device's, which caps what a tenant's devices cost the Worker together.
@@ -112,11 +112,17 @@ const SCOPES: Record<Scope, { env: "RATE_TASK_PER_MIN" | "RATE_MESSAGE_PER_MIN" 
   prekey: { env: "RATE_PREKEY_PER_MIN", dflt: 300 }, // prekey requests and answers relayed between devices (a task costs one request; a bot that answers many callers needs room)
 };
 export const TENANT_FACTOR = 10;
+// A device that is the target of requests (prekey requests) has a budget of its own, TARGET_FACTOR times a caller's,
+// spent after the caller's. Tradeoff: one caller is stopped by its own budget, so it takes TARGET_FACTOR callers
+// flooding one target to use the target's up and lock its other callers out until the window ends; the budget
+// bounds what any set of callers can make one device do. It is advisory: the device's own per-caller limit decides.
+export const TARGET_FACTOR = 3;
 
-export async function limitDevice(env: Env, tenant: string, device: string, scope: Scope): Promise<number | null> {
+export async function limitDevice(env: Env, tenant: string, device: string, scope: Scope, target?: string): Promise<number | null> {
   const { env: v, dflt } = SCOPES[scope];
   const per = limitFor(env[v], dflt);
   const mine = await count(env, `dev-${scope}`, `${tenant.length}:${tenant}${device}`, per);
-  const wait = mine ?? (await count(env, `ten-${scope}`, tenant, per * TENANT_FACTOR));
+  const theirs = mine ?? (target === undefined ? null : await count(env, `tgt-${scope}`, `${tenant.length}:${tenant}${target}`, per * TARGET_FACTOR));
+  const wait = theirs ?? (await count(env, `ten-${scope}`, tenant, per * TENANT_FACTOR));
   return wait === null ? null : wait * 1000;
 }

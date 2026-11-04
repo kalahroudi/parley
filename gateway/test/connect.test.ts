@@ -52,17 +52,18 @@ function tenant() {
     expect(r.status).toBe(200);
     return root;
   })();
-  const enroll = async (opts: { bind?: boolean; decide?: "approved" | "rejected" | false; not_after?: number; version?: number; signer?: CryptoKeyPair; tenantField?: string; skip?: string } = {}): Promise<Dev> => {
+  const enroll = async (opts: { bind?: boolean; decide?: "approved" | "rejected" | false; not_after?: number; version?: number; signer?: CryptoKeyPair; tenantField?: string; skip?: string; owner?: string } = {}): Promise<Dev> => {
+    const owner = opts.owner ?? "alice@example.test";
     const { bind = true, decide = "approved", not_after = Math.floor((Date.now() + YEAR) / 1000), version = 1 } = opts;
     const root = opts.signer ?? (await rootReady);
     const key = await edKeys();
     const pub = await rawPub(key.publicKey);
     const sk = bytesB64(pub);
-    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, { Authorization: await session(t, "user", "alice@example.test") }));
+    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, { Authorization: await session(t, "user", owner) }));
     if (decide) await post("/v1/admin/enrollments/decide", { id, decision: decide }, { Authorization: await admin });
     if (bind) {
-      const fields = { tenant: opts.tenantField ?? t, owner: "alice@example.test", device_id: id, key: pub, version, not_after };
-      const binding = { tenant: fields.tenant, owner: fields.owner, device_id: id, signing_key: sk, version, not_after: new Date(not_after * 1000).toISOString().replace(".000Z", "Z"), signature: await edSign(root.privateKey, bindingBytes(fields)) };
+      const fields = { tenant: opts.tenantField ?? t, owner, device_id: id, key: pub, version, not_after };
+      const binding = { tenant: fields.tenant, owner, device_id: id, signing_key: sk, version, not_after: new Date(not_after * 1000).toISOString().replace(".000Z", "Z"), signature: await edSign(root.privateKey, bindingBytes(fields)) };
       expect((await post("/v1/admin/bindings", { id, binding }, { Authorization: await admin })).status).toBe(200);
     }
     return { id, key, sk };
@@ -747,6 +748,13 @@ describe("the prekey relay", () => {
   const request = (id: string, to: string) => ({ t: "prekey_request", id, to, nonce: NONCE, expires_at: Date.now() + 900_000 });
   const reply = (id: string, to: string) => ({ t: "prekey_reply", id, to, prekey: BLOB });
 
+  // An enrolled device with a card the whole tenant may see: what a daemon that takes requests has.
+  const enr = async (x: ReturnType<typeof tenant>, card: Record<string, unknown> = {}, owner?: string) => {
+    const d = await x.enroll({ owner });
+    expect(await x.call((i) => i.publishCard(d.id, { name: "bot", description: "a bot", visibility: "tenant", ...card }))).toEqual({ id: expect.any(String) });
+    return d;
+  };
+
   // A daemon on the tunnel: frames out (numbered), events in.
   async function daemon(x: ReturnType<typeof tenant>, d: Dev, headers: Record<string, string> = {}) {
     const res = await SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", ...bearer(await x.token(d, "connect")), ...headers } });
@@ -788,8 +796,8 @@ describe("the prekey relay", () => {
 
   async function pair() {
     const x = tenant();
-    const a = await x.enroll();
-    const b = await x.enroll();
+    const a = await enr(x);
+    const b = await enr(x);
     return { x, a, b, A: await daemon(x, a), B: await daemon(x, b) };
   }
 
@@ -807,8 +815,8 @@ describe("the prekey relay", () => {
 
   it("answers the requester with a refusal when the target is not connected", async () => {
     const x = tenant();
-    const a = await x.enroll();
-    const off = await x.enroll();
+    const a = await enr(x);
+    const off = await enr(x);
     const A = await daemon(x, a);
     await A.send(request("r1", off.id));
     expect(A.events()).toEqual([{ t: "prekey_refused", id: "r1", from: off.id, reason: "offline" }]);
@@ -819,9 +827,9 @@ describe("the prekey relay", () => {
 
   it("never lets a sender claim to be someone else, and ignores identity headers from the client", async () => {
     const x = tenant();
-    const a = await x.enroll();
-    const b = await x.enroll();
-    const evil = await x.enroll();
+    const a = await enr(x);
+    const b = await enr(x);
+    const evil = await enr(x);
     const B = await daemon(x, b);
     // The client sends the headers the Worker uses to tell the Device DO who it is; the Worker overwrites them.
     const E = await daemon(x, evil, { "x-parley-tenant": x.t, "x-parley-device": a.id });
@@ -836,8 +844,8 @@ describe("the prekey relay", () => {
   it("relays only to devices of the sender's own tenant", async () => {
     const x = tenant();
     const y = tenant();
-    const a = await x.enroll();
-    const other = await y.enroll();
+    const a = await enr(x);
+    const other = await enr(y);
     const A = await daemon(x, a);
     const O = await daemon(y, other);
     await A.send(request("r1", other.id));
@@ -887,9 +895,9 @@ describe("the prekey relay", () => {
 
   it("counts every frame against the sender's allowance before delivering it: a flood is refused at the gateway and never reaches the target", async () => {
     const x = tenant();
-    const a = await x.enroll();
-    const b = await x.enroll();
-    const honest = await x.enroll();
+    const a = await enr(x);
+    const b = await enr(x);
+    const honest = await enr(x);
     const A = await daemon(x, a);
     const B = await daemon(x, b);
     const H = await daemon(x, honest);
@@ -915,8 +923,8 @@ describe("the prekey relay", () => {
 
   it("tells nobody when an answer cannot be delivered, only the requester when a request cannot", async () => {
     const x = tenant();
-    const a = await x.enroll();
-    const off = await x.enroll();
+    const a = await enr(x);
+    const off = await enr(x);
     const A = await daemon(x, a);
     await A.send(reply("r1", off.id));
     await A.send({ t: "prekey_refused", id: "r2", to: off.id });
@@ -928,7 +936,8 @@ describe("the prekey relay", () => {
 
   it("relays only for a socket the Worker opened with a complete, valid identity", async () => {
     const x = tenant();
-    const b = await x.enroll();
+    const b = await enr(x);
+    const d1 = await enr(x);
     const B = await daemon(x, b);
     const open = async (headers: Record<string, string>) => {
       const stub = env.DEVICE.get(env.DEVICE.idFromName(`${x.t}:direct${Object.keys(headers).join("")}${Object.values(headers).join("")}`)) as any;
@@ -951,15 +960,15 @@ describe("the prekey relay", () => {
     const incomplete: Record<string, string>[] = [{}, { [T]: x.t }, { [D]: "d1" }, { [T]: "bad tenant", [D]: "d1" }, { [T]: x.t, [D]: "bad device" }, { [T]: "", [D]: "d1" }, { [T]: x.t, [D]: "" }];
     for (const headers of incomplete) expect(await open(headers), JSON.stringify(headers)).toEqual(["welcome", "ack"]); // nothing relayed, nothing refused back
     expect(B.events()).toEqual([]);
-    await open({ [T]: x.t, [D]: "d1" });
-    expect(B.events()).toEqual([{ t: "prekey_request", id: "r1", nonce: NONCE, expires_at: expect.any(Number), from: "d1" }]);
+    await open({ [T]: x.t, [D]: d1.id });
+    expect(B.events()).toEqual([{ t: "prekey_request", id: "r1", nonce: NONCE, expires_at: expect.any(Number), from: d1.id }]);
     B.ws.close();
   });
 
   it("stores nothing: the Device DOs hold no frame body, key or nonce afterwards", async () => {
     const x = tenant();
-    const a = await x.enroll();
-    const b = await x.enroll();
+    const a = await enr(x);
+    const b = await enr(x);
     const A = await daemon(x, a);
     const B = await daemon(x, b);
     await A.send(request("r1", b.id));
@@ -973,5 +982,113 @@ describe("the prekey relay", () => {
     }
     A.ws.close();
     B.ws.close();
+  });
+
+  it("refuses a request for a target none of whose cards the sender may see, or that is not enrolled, and allows one with no card", async () => {
+    const x = tenant();
+    expect(await x.call((i) => i.putGroup("ops", ["bob@example.test"]))).toMatchObject({ name: "ops" });
+    const a = await enr(x);
+    const hidden = await enr(x, { visibility: "groups", groups: ["ops"] }, "carol@example.test");
+    const cardless = await x.enroll();
+    const A = await daemon(x, a);
+    const H = await daemon(x, hidden);
+    const C = await daemon(x, cardless);
+    await A.send(request("r1", hidden.id));
+    await A.send(request("r3", "a".repeat(32)));
+    expect(A.events().map((e) => [e.id, e.reason])).toEqual([["r1", "offline"], ["r3", "offline"]]);
+    expect(H.events()).toEqual([]);
+    // No card, nothing for the directory to hide: only enrollment decides.
+    await A.send(request("r2", cardless.id));
+    expect(C.events()).toEqual([{ t: "prekey_request", id: "r2", nonce: NONCE, expires_at: expect.any(Number), from: a.id }]);
+    // Visible to any one of the group's members: the same target is served for bob's device.
+    const bobDev = await enr(x, {}, "bob@example.test");
+    const Bob = await daemon(x, bobDev);
+    await Bob.send(request("r4", hidden.id));
+    expect(H.events()).toEqual([{ t: "prekey_request", id: "r4", nonce: NONCE, expires_at: expect.any(Number), from: bobDev.id }]);
+    Bob.ws.close();
+    A.ws.close();
+    H.ws.close();
+    C.ws.close();
+  });
+
+  it("answers need no card: a target replies to a requester that has none", async () => {
+    const x = tenant();
+    const a = await x.enroll();
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    await A.send(request("r1", b.id));
+    expect(B.events()).toHaveLength(1);
+    await B.send(reply("r1", a.id));
+    expect(A.events()).toEqual([{ t: "prekey_reply", id: "r1", prekey: BLOB, from: b.id }]);
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("stops relaying for a device the moment it is revoked, though its socket is still open, in both directions", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    expect((await x.revoke([a.id], 1)).status).toBe(200);
+    await A.send(request("r1", b.id));
+    await A.send(reply("r2", b.id));
+    expect(B.events()).toEqual([]);
+    await B.send(reply("r3", a.id)); // and nothing reaches a revoked device
+    expect(A.events().map((e) => [e.id, e.reason])).toEqual([["r1", "offline"]]); // and r3 never reached a revoked device
+    await B.send(request("r4", a.id)); // a revoked target is refused to the requester
+    expect(B.events().at(-1)).toEqual({ t: "prekey_refused", id: "r4", from: a.id, reason: "offline" });
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("gives a target a budget of its own: one flooding caller is cut off by its own, and callers together cannot spend more than the target's", async () => {
+    const x = tenant();
+    const t = await enr(x);
+    const other = await enr(x);
+    const T = await daemon(x, t);
+    const O = await daemon(x, other);
+    const callers = [];
+    for (let i = 0; i < 5; i++) {
+      const c = await enr(x);
+      await lowerBudget(x.t, c.id, "2"); // the target's budget is 3 times this: 6
+      callers.push({ c, D: await daemon(x, c) });
+    }
+    // One caller floods: it passes 2, and the target has 4 left for everybody else.
+    for (let i = 0; i < 10; i++) await callers[0]!.D.send(request(`a${i}`, t.id));
+    expect(T.events()).toHaveLength(2);
+    // Others are served up to what is left (4), then refused: the tradeoff of a per-target budget, bounded by it.
+    for (const [i, { D }] of callers.slice(1).entries()) for (let j = 0; j < 2; j++) await D.send(request(`b${i}${j}`, t.id));
+    expect(T.events()).toHaveLength(6);
+    expect(callers[4]!.D.events().filter((e) => e.reason === "rate_limited")).toHaveLength(2);
+    expect(callers[4]!.D.events()[0]).toMatchObject({ from: t.id, retry_after_ms: expect.any(Number) });
+    // The budget is per target: the same callers are served for another one.
+    const fresh = await enr(x);
+    const F = await daemon(x, fresh);
+    await lowerBudget(x.t, fresh.id, "2");
+    await F.send(request("c1", other.id));
+    expect(O.events()).toHaveLength(1);
+    F.ws.close();
+    // Answers are not requests: the target can still answer all of them.
+    await T.send(reply("a0", callers[0]!.c.id));
+    expect(callers[0]!.D.events().at(-1)).toMatchObject({ t: "prekey_reply", id: "a0" });
+    for (const { D } of callers) D.ws.close();
+    T.ws.close();
+    O.ws.close();
+  });
+
+  it("treats a target that cannot be reached as offline, and does not fail the sender's frame", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    await runInDurableObject(env.DEVICE.get(env.DEVICE.idFromName(`${x.t}:${a.id}`)), async (inst) => {
+      const holder = inst as unknown as { env: Record<string, unknown> };
+      holder.env = { ...holder.env, DEVICE: { idFromName: (n: string) => n, get: () => ({ deliver: () => Promise.reject(new Error("overloaded")) }) } };
+    });
+    await A.send(request("r1", b.id));
+    expect(A.events()).toEqual([{ t: "prekey_refused", id: "r1", from: b.id, reason: "offline" }]);
+    A.ws.close();
   });
 });
