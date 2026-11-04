@@ -532,7 +532,14 @@ func TestEachTaskIsSentAtMostOnceUnderRaces(t *testing.T) {
 	sent := map[string]int{}
 	inFlight := map[string]bool{}
 	drops := map[string]int{}
-	o := newOutbox(t, Config{Now: c.Now, Sleep: c.Sleep, Jitter: same, MaxWaiting: 200,
+	// The clock stays put: c.Sleep advances it, and the offline task t7 retries in a tight loop, so
+	// it would move the clock past KeepDone within microseconds and a later Submit would forget the
+	// finished tasks before this test reads them ("task t0 unknown", seen on slow runners).
+	o := newOutbox(t, Config{Now: c.Now, Jitter: same, MaxWaiting: 200,
+		Sleep: func(ctx context.Context, _ time.Duration) error {
+			runtime.Gosched()
+			return ctx.Err()
+		},
 		Presence: func(_ context.Context, target string) (bool, error) { return target != "card-t7", nil },
 		Send: func(_ context.Context, tk Task) error {
 			mu.Lock()
@@ -817,5 +824,26 @@ func TestPruneForgetsEveryAgedTaskAmongWaitingOnes(t *testing.T) {
 	defer o.mu.Unlock()
 	if got := len(o.tasks); got != n+1 {
 		t.Fatalf("%d tasks kept, want the %d waiting ones and the new one", got, n)
+	}
+}
+
+// The sender's answer for a finished task is stable for KeepDone, whatever else the outbox is
+// doing: other tasks' waits (which move a fake clock, as they move a real one) do not shorten it.
+func TestAFinishedTaskStaysKnownForKeepDoneWhileOthersWait(t *testing.T) {
+	c := newClock()
+	o := newOutbox(t, Config{Now: c.Now, Sleep: c.Sleep, Jitter: same, KeepDone: 15 * time.Minute, MaxWaiting: 10, PerTarget: 10,
+		Presence: func(_ context.Context, target string) (bool, error) { return target == "up", nil }})
+	if err := o.Submit(Task{ID: "done", Target: "up", Expiry: c.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if st := waitDone(t, o, "done"); st.State != Sent {
+		t.Fatalf("%+v", st)
+	}
+	c.advance(15*time.Minute - time.Second) // just short of the retention
+	if err := o.Submit(Task{ID: "other", Target: "down", Expiry: c.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := o.Status("done"); !ok || st.State != Sent {
+		t.Fatalf("a finished task was forgotten before KeepDone: %+v %v", st, ok)
 	}
 }
