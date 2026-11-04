@@ -35,12 +35,30 @@ function authenticate(request: Request, env: Env): Identity | null {
   return { tenant: m[1]!, device: m[2]! };
 }
 
+// Sign-in endpoints are open to anyone, so they are limited per client address
+// (login scope, src/ratelimit.ts). The address is hashed before it becomes a
+// Durable Object name, and each address gets its own object, whose bucket is
+// deleted once it refills. The "~" cannot occur in a tenant id (ID above), so
+// these objects never collide with a tenant's. A request with no address (not
+// possible behind Cloudflare) shares one bucket.
+async function loginLimited(request: Request, env: Env): Promise<Response | null> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "none";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ip));
+  const name = `~login:${[...new Uint8Array(digest).slice(0, 16)].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+  const r = await (env.TENANT.get(env.TENANT.idFromName(name)) as DurableObjectStub<Tenant>).rateLimit("login", "ip");
+  if (r.ok) return null;
+  return new Response(JSON.stringify({ error: "rate_limited", retry_after_ms: r.retry_after_ms }), {
+    status: 429,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": String(Math.ceil(r.retry_after_ms / 1000)) },
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Identifiers travel in the Authorization header and frames, never in the URL.
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
-    if (pathname.startsWith("/auth/")) return handleAuth(request, env);
+    if (pathname.startsWith("/auth/")) return (await loginLimited(request, env)) ?? handleAuth(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {

@@ -81,10 +81,11 @@ plan.md), attack, outcome, test, subtest (exact `t.Run` name, or `-`).
 | A59 | prekey expires while waiting | target refuses a frame sealed to an expired prekey | rejected | TestPrekeyExpiresWhileSenderWaits | the target refuses a frame sealed to an expired prekey |
 | A60 | redelivered frame | redelivered frame is dropped | rejected | TestRedeliveredFrameIsDropped | - |
 | A61 | prekey flood, device | one caller cannot hold more than its share of prekeys | rejected | TestPrekeyRequestFloodIsLimited | - |
-| A62 | prekey flood, gateway | flood refused by the Tenant DO before it reaches the target | pending T305 | TestPending_GatewayRateLimitsPrekeyRequests | - |
+| A62 | prekey flood, gateway | a flood of sends aimed at one connected target is refused by the Tenant DO before it reaches the target (shipped gateway test) | rejected | TestGatewayRateLimitsFloodToTarget | - |
 | A63 | follow-up chain | five-message chain erases each key | rejected | TestFollowUpChainErasesEachKey | after a restart |
 | A64 | late reply after CANCEL | reply key erased on CANCEL or FAILED; late reply refused by the device and by the shipped Task DO, also after a restart | rejected | TestLateReplyAfterCancelIsRejected | after a restart |
 | A65 | disk clone | disk clone or restored backup holds no usable keys | rejected | TestDiskCloneAndBackupHoldNoKeys | - |
 | A66 | restart invariant | replay safety across a restart relies on memory-only prekeys | rejected | TestRestartInvariant | - |
 | A67 | core dump and swap | core-dump and swap scans find no key bytes: a scan of the daemon's address space finds no erased key in the locked region (also TestHardenedCrashLeavesNoCore, TestKeyMemoryIsLockedAgainstSwap; scan runs on Linux) | rejected | TestAddressSpaceHoldsNoErasedKey | - |
 | A68 | harness control | no attack: an honest gateway delivers tasks, replies and CANCEL (so the attack tests fail only because of the attack) | control | TestHonestGateway | - |
+| A69 | prekey flood, gateway | the same flood made of prekey requests through the relay the daemon send path adds | pending T412 | TestPending_GatewayRelaysPrekeyRequestsThroughTheLimiter | - |

@@ -38,6 +38,8 @@ export default defineConfig({
         // Tier 1 for what the gateway checks about a sealed part before it relays it.
         "src/parts.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         "src/acl.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        // Tier 1 for the rate limiter's bucket arithmetic.
+        "src/ratelimit.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },
     },
   },

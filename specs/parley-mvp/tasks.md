@@ -59,7 +59,7 @@ Deliverable: `send_task` and `get_task` between two machines with an API-backed 
 - [x] T302 A2A v1.0 transport with encrypted parts, status and INPUT_REQUIRED
 - [x] T303 Directory, groups and ACLs
 - [ ] T304 Retention modes (Strict and Queued), TTL deletion
-- [ ] T305 Rate limits; sender-side waiting for offline targets
+- [x] T305 Rate limits; sender-side waiting for offline targets
 - [ ] T306 Acceptance: exhaustive state-machine tests; the official A2A SDK completes a lifecycle
 - [ ] T307 Acceptance: ACL matrix; retention deletion at acknowledgment and TTL
 - [ ] T308 Acceptance: recovery-bookmark test documents what Cloudflare retains; R2 deletion behavior verified

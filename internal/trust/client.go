@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,31 @@ var defaultHTTP = &http.Client{Timeout: requestTimeout}
 
 // ErrNotFound is returned when the gateway has no such record (HTTP 404).
 var ErrNotFound = errors.New("trust: not found at the gateway")
+
+// maxRetryAfter caps how long a gateway can ask a client to hold off, so a
+// bad or hostile Retry-After cannot park a daemon.
+const maxRetryAfter = time.Minute
+
+// RateLimitedError means the gateway answered 429. Callers wait RetryAfter and
+// try again; the wait is never zero and never more than a minute.
+type RateLimitedError struct{ After time.Duration }
+
+func (e *RateLimitedError) Error() string {
+	return fmt.Sprintf("trust: rate limited by the gateway, retry in %s", e.After)
+}
+
+// RetryAfter is how long the gateway asked us to wait.
+func (e *RateLimitedError) RetryAfter() time.Duration { return e.After }
+
+// retryAfter reads a Retry-After header given in seconds; anything else (absent,
+// not a number, negative, or an HTTP date) counts as one second.
+func retryAfter(h string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(h))
+	if err != nil || secs < 1 {
+		secs = 1
+	}
+	return min(time.Duration(secs)*time.Second, maxRetryAfter)
+}
 
 // Client talks to the gateway's enrollment and trust routes. Auth is the
 // Authorization header value for routes that need an identity; the gateway's
@@ -97,6 +123,8 @@ func (c *Client) post(ctx context.Context, path string, in, out any) error {
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return ErrNotFound
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return &RateLimitedError{After: retryAfter(resp.Header.Get("Retry-After"))}
 	case resp.StatusCode/100 != 2:
 		return fmt.Errorf("trust: gateway answered %d for %s", resp.StatusCode, path)
 	case out == nil:
@@ -120,6 +148,16 @@ func (c *Client) EnrollmentStatus(ctx context.Context, tenant, id, poll string) 
 		return nil, err
 	}
 	return &s, nil
+}
+
+// Presence reports whether the device behind a card the caller can see is
+// connected to the gateway right now. A sender waiting for an offline target
+// polls this, no faster than a RateLimitedError allows. ErrNotFound means the
+// card is gone or hidden from this caller.
+func (c *Client) Presence(ctx context.Context, card string) (bool, error) {
+	var r struct{ Online bool }
+	err := c.post(ctx, "/v1/directory/presence", map[string]string{"id": card}, &r)
+	return r.Online, err
 }
 
 // Pending lists requests awaiting a decision. Needs an admin identity.

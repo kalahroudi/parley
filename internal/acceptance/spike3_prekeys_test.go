@@ -15,7 +15,7 @@ package acceptance
 //
 // (f) the five-message follow-up chain and (g) a late reply after CANCEL are
 // TestFollowUpChainErasesEachKey and TestLateReplyAfterCancelIsRejected below;
-// the gateway-side flood limit is not testable yet and is the named pending test
+// the gateway-side flood limit is TestGatewayRateLimitsFloodToTarget, and the prekey-request relay case is the named pending test
 // at the bottom of this file, which fails once its task is ticked.
 //
 // A crash is modelled the way a kill is: the old pool, replay table and
@@ -1179,8 +1179,31 @@ func TestLateReplyAfterCancelIsRejected(t *testing.T) {
 	})
 }
 
-// (e, gateway side) The plan's per-caller rate limit on prekey requests is
-// enforced twice: on the device (tested above) and in the Tenant DO.
-func TestPending_GatewayRateLimitsPrekeyRequests(t *testing.T) {
-	pending(t, "T305", "needs the Tenant DO rate limit; assert a prekey-request flood through the gateway is refused before it reaches the target")
+// (e, gateway side) The plan's per-caller rate limit is enforced twice: on the
+// device (above) and in the Tenant DO, which refuses a flood aimed at one
+// target before anything is delivered to it. The shipped gateway's test is
+// named below; like the Task DO test above, this fails if it is renamed or removed.
+func TestGatewayRateLimitsFloodToTarget(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "gateway", "test", "ratelimit.test.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"a flood aimed at one connected target is refused at the gateway before it reaches the target",
+		"allows the burst, then refuses with a wait time, per scope and per subject",
+		"refuses new tasks past the burst, before creating anything, and only for that device",
+	} {
+		if !strings.Contains(string(src), name) {
+			t.Errorf("gateway/test/ratelimit.test.ts lost the test %q", name)
+		}
+	}
+}
+
+// (e, gateway side, prekey requests) The gateway does not route prekey requests
+// yet: the daemon's send path (T412) adds the relay. Every frame it relays must
+// be counted against the sender's allowance in the Tenant DO (src/ratelimit.ts)
+// before it is delivered, and this test then drives a prekey-request flood
+// through that relay and asserts the target sees no more than the burst.
+func TestPending_GatewayRelaysPrekeyRequestsThroughTheLimiter(t *testing.T) {
+	pending(t, "T412", "the relay of prekey requests exists; assert a flood of them is refused by the Tenant DO before it reaches the target")
 }

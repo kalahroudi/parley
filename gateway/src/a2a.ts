@@ -4,7 +4,9 @@
 import type { Env } from "./index";
 import { MAX_FRAME_BYTES } from "./protocol";
 import { parseSealedPart, SEALED_MEDIA_TYPE, type Shape } from "./parts";
+import type { Scope } from "./ratelimit";
 import type { Task, TaskEvent, TaskRecord, TaskState } from "./task";
+import type { Tenant } from "./tenant";
 
 export { SEALED_MEDIA_TYPE };
 
@@ -38,7 +40,8 @@ export { SEALED_MEDIA_TYPE };
 //    because a bare cancel is indistinguishable from a gateway forgery.
 //  - Extra JSON-RPC error codes -32010 to -32015, outside the A2A range -32001 to
 //    -32009, for offline recipient, bad sequence, duplicate task, not permitted,
-//    too large and illegal state move.
+//    too large and illegal state move, and -32016 for a rate limit (with HTTP 429,
+//    Retry-After and error.data.retry_after_ms; limits are in src/ratelimit.ts).
 //  - `status.message` on tasks relayed to a daemon carries the sealed part and
 //    metadata.parley {kind, from, seq}; `from` is the gateway's say-so and a
 //    daemon must take the sender from the signed header, never from it.
@@ -76,6 +79,7 @@ const ERR = {
   forbidden: [-32013, "not permitted"],
   tooLarge: [-32014, "message too large"],
   transition: [-32015, "task state does not allow this"],
+  rateLimited: [-32016, "rate limited"],
 } as const;
 type Err = (typeof ERR)[keyof typeof ERR];
 
@@ -105,6 +109,19 @@ type Json = Record<string, unknown>;
 const ok = (id: unknown, result: Json) => Response.json({ jsonrpc: "2.0", id, result }, { headers: { "cache-control": "no-store" } });
 const fail = (id: unknown, [code, message]: Err) =>
   Response.json({ jsonrpc: "2.0", id, error: { code, message } }, { headers: { "cache-control": "no-store" } });
+
+// Counts one request against the caller's allowance (Tenant DO). Null means go
+// on; otherwise the response to return. Called after the request is known to be
+// well formed and before anything is written or relayed.
+async function limited(rid: unknown, env: Env, who: Identity, scope: Scope): Promise<Response | null> {
+  const stub = env.TENANT.get(env.TENANT.idFromName(who.tenant)) as DurableObjectStub<Tenant>;
+  const r = await stub.rateLimit(scope, who.device);
+  if (r.ok) return null;
+  return Response.json(
+    { jsonrpc: "2.0", id: rid, error: { code: ERR.rateLimited[0], message: ERR.rateLimited[1], data: { retry_after_ms: r.retry_after_ms } } },
+    { status: 429, headers: { "cache-control": "no-store", "retry-after": String(Math.ceil(r.retry_after_ms / 1000)) } },
+  );
+}
 
 // The public card for the gateway's transport. Per-bot cards come with the
 // directory (T303).
@@ -290,6 +307,8 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
   const stub = taskStub(env, who.tenant, shape.taskId);
   const role = shape.kind === "TASK" || shape.kind === "REPLY" ? "ROLE_USER" : "ROLE_AGENT";
   if (m.role !== role) return fail(rid, ERR.params);
+  const over = await limited(rid, env, who, shape.kind === "TASK" ? "task" : "message");
+  if (over) return over;
 
   if (shape.kind === "TASK") {
     // A new task: the signed header names the target and the task id.
@@ -332,6 +351,8 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
 
 async function get(rid: unknown, params: Json, env: Env, who: Identity): Promise<Response> {
   if (!isTaskId(params.id) || !onlyKeys(params, "id", "historyLength", "tenant")) return fail(rid, ERR.params);
+  const over = await limited(rid, env, who, "message");
+  if (over) return over;
   const rec = await taskStub(env, who.tenant, params.id).get(who.tenant);
   if (!rec || (rec.caller !== who.device && rec.target !== who.device)) return fail(rid, ERR.notFound);
   return ok(rid, view(rec)); // GetTask answers with the Task itself, not a SendMessageResponse
@@ -349,6 +370,8 @@ async function cancel(rid: unknown, params: Json, env: Env, who: Identity): Prom
   const { parts, shape } = sealed;
   if (shape.kind !== "CANCEL" || shape.taskId !== params.id || shape.tenant !== who.tenant || shape.sender !== who.device) return fail(rid, ERR.params);
   if (meta.seq !== undefined && meta.seq !== shape.seq) return fail(rid, ERR.params);
+  const over = await limited(rid, env, who, "message");
+  if (over) return over;
   const stub = taskStub(env, who.tenant, params.id);
   // A task that is not the caller's looks like one that does not exist.
   const found = await stub.get(who.tenant);

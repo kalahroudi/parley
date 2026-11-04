@@ -20,6 +20,7 @@ import {
   type Page,
 } from "./acl";
 import type { Env } from "./index";
+import { POLICIES, take, type Bucket, type Scope } from "./ratelimit";
 import { cleanText } from "./text";
 
 export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
@@ -28,6 +29,11 @@ export const REQUEST_TTL_MS = 7 * 24 * 3600_000;
 export const MAX_PENDING = 200;
 export const MAX_PENDING_PER_OWNER = 5;
 export const DECIDED_RETENTION_MS = 30 * 24 * 3600_000;
+// Rate-limit buckets held at once. A bucket is deleted as soon as it is full
+// again, so only recently active callers count; at the cap a caller with no
+// bucket is refused (fail closed) until one frees up.
+export const MAX_BUCKETS = 2000;
+export const BUCKET_FULL_RETRY_MS = 1000;
 
 export type EnrollmentStatus = "pending" | "approved" | "rejected";
 
@@ -61,6 +67,10 @@ export type SignedList = { tenant: string; version: number; revoked?: unknown };
 interface StoredEnrollment extends Enrollment {
   poll_hash: string;
 }
+
+type StoredBucket = Bucket & { full_at: number };
+
+export type RateResult = { ok: true } | { ok: false; retry_after_ms: number };
 
 interface StoredToken {
   owner: string;
@@ -408,6 +418,23 @@ export class Tenant extends DurableObject<Env> {
     return { name: n.name, members: r.items, ...(r.next_cursor ? { next_cursor: r.next_cursor } : {}) };
   }
 
+  // One request's worth of the caller's allowance for `scope` (see ratelimit.ts).
+  // The subject is a device id, or a hash of a client address for logins; it is
+  // only ever used as a storage key. The counters live here, in the one DO per
+  // tenant, so they hold across every Worker instance.
+  async rateLimit(scope: Scope, subject: string): Promise<RateResult> {
+    const key = `rl:${scope}:${subject}`;
+    const cur = await this.ctx.storage.get<StoredBucket>(key);
+    if (!cur && (await this.ctx.storage.list({ prefix: "rl:", limit: MAX_BUCKETS })).size >= MAX_BUCKETS) {
+      return { ok: false, retry_after_ms: BUCKET_FULL_RETRY_MS };
+    }
+    const d = take(cur, Date.now(), POLICIES[scope]);
+    if (!d.ok) return d;
+    await this.ctx.storage.put(key, { ...d.bucket, full_at: d.full_at } satisfies StoredBucket);
+    await this.schedule(d.full_at);
+    return { ok: true };
+  }
+
   // Keep the earliest wake-up needed to purge records.
   private async schedule(at: number) {
     const cur = await this.ctx.storage.getAlarm();
@@ -427,6 +454,8 @@ export class Tenant extends DurableObject<Env> {
       await due(k, r.status === "pending" ? r.created + REQUEST_TTL_MS : (r.decided ?? r.created) + DECIDED_RETENTION_MS);
     }
     for (const [k, t] of await this.ctx.storage.list<StoredToken>({ prefix: "tok:" })) await due(k, t.exp);
+    // A bucket that has refilled holds no information: forgetting it is the same as keeping it.
+    for (const [k, b] of await this.ctx.storage.list<StoredBucket>({ prefix: "rl:", limit: MAX_BUCKETS })) await due(k, b.full_at);
     const live = await this.enrolledOwners();
     const orphans = [...(await this.ctx.storage.list({ prefix: "card:", limit: MAX_CARDS_PER_TENANT })).keys()].filter((k) => !live.has(k.slice(5).split(":")[0]!));
     await Promise.all(this.deleteAll(orphans));

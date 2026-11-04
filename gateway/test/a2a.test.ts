@@ -344,6 +344,8 @@ describe("lifecycle over the transport", () => {
     for (const from of Object.keys(reach) as TaskState[]) {
       for (const [name, to, probe] of probes) {
         const id = `x${++k}`;
+        // This test makes 49 tasks from one device, far past the rate limit (covered in ratelimit.test.ts).
+        await runInDurableObject(env.TENANT.get(env.TENANT.idFromName(w.T)), async (_i, st) => void (await st.storage.delete([...(await st.storage.list({ prefix: "rl:" })).keys()])));
         await w.task(id);
         const seq = await reach[from](w, id);
         expect(await w.state(id), `reached ${from}`).toBe(STATE_NAME[from]);

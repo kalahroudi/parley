@@ -21,6 +21,11 @@ const STATUS: Record<DirectoryError, number> = {
   bad_members: 400,
   too_many_groups: 429,
 };
+const limitedResponse = (retryAfterMs: number) =>
+  new Response(JSON.stringify({ error: "rate_limited", retry_after_ms: retryAfterMs }), {
+    status: 429,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": String(Math.ceil(retryAfterMs / 1000)) },
+  });
 const fail = (r: { error: DirectoryError; field?: string }) => json(STATUS[r.error], r.field ? { error: r.error, field: r.field } : { error: r.error });
 
 // Placeholders until sessions and connect tokens land; both fail closed without
@@ -86,8 +91,22 @@ export async function handleDirectory(req: Request, env: Env): Promise<Response>
   if (pathname === "/v1/cards/remove") return (await stub.removeCard(id.device, isCardId(b.id) ? b.id : "")) ? json(200, { ok: true }) : json(404, { error: "not_found" });
   if (pathname === "/v1/directory/find") {
     if (!page) return fail({ error: "bad_query" });
+    const rl = await stub.rateLimit("find", id.device);
+    if (!rl.ok) return limitedResponse(rl.retry_after_ms);
     const r = await stub.find(id.device, b.query, page);
     return "error" in r ? fail(r) : json(200, r);
+  }
+  // Is the bot's device connected right now? A sender waiting for an offline
+  // target polls this (and only this) before asking for a prekey. Metadata the
+  // gateway has anyway; answered only for a card the caller may see, and counted
+  // against the "presence" allowance.
+  if (pathname === "/v1/directory/presence") {
+    const rl = await stub.rateLimit("presence", id.device);
+    if (!rl.ok) return limitedResponse(rl.retry_after_ms);
+    const card = isCardId(b.id) ? await stub.resolve(id.device, b.id) : null;
+    if (!card) return json(404, { error: "not_found" });
+    const dev = env.DEVICE.get(env.DEVICE.idFromName(`${id.tenant}:${card.device_id}`));
+    return json(200, { online: (await dev.status()).connected });
   }
   return json(404, { error: "not_found" });
 }
