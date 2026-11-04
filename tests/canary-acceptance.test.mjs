@@ -134,7 +134,7 @@ test("acceptance: canaries sealed by the daemon leave zero hits in the gateway's
     // machine cannot collide with it.
     // The gateway has no development bypass: users sign in through a mock IdP.
     idp = await startMockOidc();
-    const vars = ["FLOW_SECRET:test-flow-secret", "GOOGLE_CLIENT_ID:parley", `GOOGLE_ISSUER:${idp.issuer}`];
+    const vars = ["FLOW_SECRET:test-flow-secret", "GOOGLE_CLIENT_ID:parley", "USERS:acme:@acme.test", `GOOGLE_ISSUER:${idp.issuer}`];
     gw = await startGateway(join(root, "gateway"), { scratch: join(dir, "gw"), vars });
     const { state, logs, port } = gw;
     const base = gw.url;

@@ -32,10 +32,11 @@ function kill(child) {
 }
 
 // `admins` is the gateway's ADMINS setting (`tenant:email,...`).
-export async function startGateway({ admins = "" } = {}) {
+// `users` is USERS (`tenant:email` or `tenant:@domain`, comma-separated).
+export async function startGateway({ admins = "", users = "" } = {}) {
   const idp = await startMockOidc();
   const port = await freePort();
-  const vars = { FLOW_SECRET: "test-flow-secret", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins };
+  const vars = { FLOW_SECRET: "test-flow-secret", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users };
   // Own state directory and inspector port, so several gateways can run side by side (node --test runs files in parallel).
   const args = ["wrangler", "dev", "--port", String(port), "--inspector-port", String(await freePort()), "--persist-to", mkdtempSync(join(tmpdir(), "parley-gw-"))];
   for (const [k, v] of Object.entries(vars)) if (v) args.push("--var", `${k}:${v}`);

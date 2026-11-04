@@ -18,6 +18,8 @@ export interface Env extends AuthEnv {
   TASK: DurableObjectNamespace<Task>;
   // Comma-separated `tenant:email` pairs allowed to hold an admin session.
   ADMINS?: string;
+  // Comma-separated `tenant:email` or `tenant:@domain` entries allowed to hold a user session.
+  USERS?: string;
 }
 
 // Fails closed until connect tokens land: no credential opens a device connection.

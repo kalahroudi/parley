@@ -22,6 +22,16 @@ export function isAdmin(env: Env, tenant: string, email: string): boolean {
   return (env.ADMINS ?? "").split(",").some((e) => e.trim().toLowerCase() === want);
 }
 
+// USERS is a comma-separated list of `tenant:email` or `tenant:@domain` entries:
+// who may hold a user session. Fails closed like ADMINS; without it, no one signs in as a user.
+export function isUser(env: Env, tenant: string, email: string): boolean {
+  const e = email.toLowerCase();
+  const at = e.lastIndexOf("@");
+  if (at < 1) return false;
+  const wants = [`${tenant}:${e}`, `${tenant}:${e.slice(at)}`];
+  return (env.USERS ?? "").split(",").some((x) => wants.includes(x.trim().toLowerCase()));
+}
+
 function sessionCookie(req: Request, value: string, maxAgeS: number): string {
   const secure = new URL(req.url).protocol === "https:" ? "; Secure" : "";
   return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeS}${secure}`;
@@ -32,6 +42,7 @@ function sessionCookie(req: Request, value: string, maxAgeS: number): string {
 export async function issueSession(req: Request, env: Env, tenant: string, role: Role, email: string): Promise<Response> {
   if (!ID.test(tenant)) return json(400, { error: "bad_request" });
   if (role === "admin" && !isAdmin(env, tenant, email)) return json(403, { error: "not_admin" });
+  if (role === "user" && !isUser(env, tenant, email)) return json(403, { error: "not_allowed" });
   const s = await tenantStub(env, tenant).createSession(email, role);
   return json(200, { role, tenant, email, csrf: s.csrf, expires_at: s.expires_at }, { "set-cookie": sessionCookie(req, token(tenant, s.secret), SESSION_TTL_MS / 1000) });
 }

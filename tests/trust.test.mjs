@@ -27,7 +27,8 @@ test("trust: enroll, approve, revoke and stale-list behavior against the real ga
   // The Go tests name their tenants <prefix>-1, <prefix>-2, ...; the admin of each signs in through the mock IdP.
   const prefix = `trust${randomBytes(4).toString("hex")}`;
   const admins = Array.from({ length: 20 }, (_, i) => `${prefix}-${i + 1}:admin@example.test`).join(",");
-  const gw = await startGateway({ admins });
+  const users = Array.from({ length: 20 }, (_, i) => `${prefix}-${i + 1}:@acme.test`).join(",");
+  const gw = await startGateway({ admins, users });
   try {
     const url = gw.url;
     // Async: the Go tests sign in through the mock IdP, which lives in this process.

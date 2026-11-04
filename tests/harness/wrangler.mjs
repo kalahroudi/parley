@@ -68,7 +68,7 @@ export function stopTree(child) {
 // Returns { port, url, state, logs, output(), stop() }. `stop()` ends the whole
 // process tree (state is flushed to disk by then) and removes nothing: the
 // caller owns `scratch`, or lets stop({ clean: true }) remove it.
-export async function startGateway(gatewayDir, { vars = ["DEV_AUTH:1"], scratch, attempts = 5, startTimeoutMs = 60000 } = {}) {
+export async function startGateway(gatewayDir, { vars = [], scratch, attempts = 5, startTimeoutMs = 60000 } = {}) {
   const wrangler = join(gatewayDir, "node_modules", ".bin", isWindows ? "wrangler.cmd" : "wrangler");
   const own = scratch === undefined;
   const base = scratch ?? mkdtempSync(join(tmpdir(), "parley-gw-"));

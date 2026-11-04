@@ -3,7 +3,7 @@
 
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { isAdmin, issueSession } from "../src/session";
+import { isAdmin, isUser, issueSession } from "../src/session";
 import { MAX_SESSIONS_PER_USER, SESSION_TTL_MS, type Tenant } from "../src/tenant";
 import type { Env } from "../src/index";
 
@@ -68,9 +68,24 @@ describe("who gets in", () => {
   });
 });
 
+describe("the user allowlist", () => {
+  it("is per tenant, by exact email or domain, case-insensitive, and closed by default", () => {
+    const e = { USERS: "t1:@Acme.test, t2:bob@example.test" } as Env;
+    expect(isUser(e, "t1", "Alice@acme.test")).toBe(true);
+    expect(isUser(e, "t1", "alice@evil.acme.test")).toBe(false);
+    expect(isUser(e, "t1", "alice@acme.test.evil")).toBe(false);
+    expect(isUser(e, "t2", "BOB@example.test")).toBe(true);
+    expect(isUser(e, "t2", "eve@example.test")).toBe(false);
+    expect(isUser(e, "t3", "alice@acme.test")).toBe(false);
+    expect(isUser(e, "t1", "no-at-sign")).toBe(false);
+    expect(isUser(e, "t1", "@acme.test")).toBe(false);
+    expect(isUser({} as Env, "t1", "alice@acme.test")).toBe(false);
+  });
+});
+
 describe("issuing a session", () => {
   const req = (proto = "https") => new Request(`${proto}://gw/auth/google/callback`);
-  const e = { ...env, ADMINS: "tx:root@example.test" } as Env;
+  const e = { ...env, ADMINS: "tx:root@example.test", USERS: "tx:@example.test" } as Env;
 
   it("sets an HttpOnly, SameSite=Strict, Secure cookie and keeps the token out of the body", async () => {
     const r = await issueSession(req(), e, "tx", "admin", "Root@example.test".toLowerCase());
@@ -94,6 +109,8 @@ describe("issuing a session", () => {
   it("refuses an admin session to anyone not on the list, and bad tenant ids", async () => {
     expect((await issueSession(req(), e, "tx", "admin", "mallory@example.test")).status).toBe(403);
     expect((await issueSession(req(), e, "other", "admin", "root@example.test")).status).toBe(403);
+    expect((await issueSession(req(), e, "tx", "user", "eve@evil.test")).status).toBe(403);
+    expect((await issueSession(req(), e, "other", "user", "bob@example.test")).status).toBe(403);
     expect((await issueSession(req(), e, "bad tenant", "user", "bob@example.test")).status).toBe(400);
   });
 
