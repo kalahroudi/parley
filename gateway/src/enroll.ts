@@ -78,6 +78,10 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
   if (admin.role !== "admin") return json(403, { error: "forbidden" });
   const stub = tenantStub(env, admin.tenant);
 
+  if (pathname === "/v1/admin/root") {
+    const r = await stub.setRoot(str(b.root_public_key) ?? "");
+    return r === "ok" ? json(200, { ok: true }) : json(r === "conflict" ? 409 : 400, { error: r === "conflict" ? "root_already_set" : "bad_request" });
+  }
   if (pathname === "/v1/admin/enrollment-tokens") {
     const ttl = b.ttl_s === undefined ? undefined : Number(b.ttl_s) * 1000;
     const t = await stub.mintToken(str(b.owner) ?? "", ttl);

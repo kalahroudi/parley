@@ -12,3 +12,4 @@
 ./internal/prekey     FuzzVerify         5s
 ./internal/receive    FuzzReceive        10s
 ./internal/envelope   FuzzUnpadShaped  5s
+./internal/connect    FuzzReplies      5s

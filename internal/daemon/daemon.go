@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
+	"github.com/kalahroudi/parley/internal/connect"
 	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/keystore"
 	"github.com/kalahroudi/parley/internal/localsock"
@@ -31,10 +32,6 @@ import (
 
 // ErrAlreadyRunning means another parleyd holds this device's instance lock.
 var ErrAlreadyRunning = errors.New("daemon: another parleyd is already running for this configuration")
-
-// ErrNoConnectToken is what the default tunnel config returns: the gateway
-// issues device connect tokens in task T415, and until then /v1/connect is closed.
-var ErrNoConnectToken = errors.New("daemon: no device connect token available yet")
 
 // Dirs are the daemon's directories. Config holds config.json and, for the
 // file key store, device.key; State holds the rollback stores, the instance
@@ -74,8 +71,10 @@ type Deps struct {
 	// Harden is called first; a failure stops startup. Default: prekey.Harden
 	// (no core dumps, no Go tracebacks).
 	Harden func() error
-	// TunnelConfig returns the tunnel settings (URL and device connect token)
-	// each time the tunnel component (re)starts. Default: ErrNoConnectToken.
+	// TunnelConfig returns the tunnel settings (URL and a way to get a device
+	// connect token) each time the tunnel component (re)starts. Default: the
+	// configured gateway, with a token earned by signing its challenge with the
+	// device key (internal/connect).
 	TunnelConfig func(ctx context.Context, signer ed25519.PrivateKey) (tunnel.Config, error)
 	// OnEvent receives every tunnel event, in order. Required whenever
 	// TunnelConfig can succeed: the tunnel stalls if nobody drains it.
@@ -118,9 +117,6 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	if deps.Harden == nil {
 		deps.Harden = prekey.Harden
 	}
-	if deps.TunnelConfig == nil {
-		deps.TunnelConfig = noConnectToken
-	}
 	if deps.OnEvent == nil {
 		deps.OnEvent = func(tunnel.Event) {}
 	}
@@ -154,6 +150,9 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 		keystore.Zero(signer)
 		return nil, err
 	}
+	if deps.TunnelConfig == nil {
+		deps.TunnelConfig = connectTunnel(cfg, deps.HTTP, func() (uint64, bool) { return tracker.Version(cfg.Tenant, cfg.DeviceID) })
+	}
 	d := &Daemon{
 		cfg: cfg, dirs: dirs, deps: deps, signer: signer, tracker: tracker, guard: guard,
 		trust: &trust.Daemon{
@@ -166,9 +165,34 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	return d, nil
 }
 
-// noConnectToken is the default TunnelConfig until the gateway issues connect tokens (T415).
-func noConnectToken(context.Context, ed25519.PrivateKey) (tunnel.Config, error) {
-	return tunnel.Config{}, ErrNoConnectToken
+// ErrNotEnrolled means the daemon holds no binding for itself yet, so it has nothing to prove to the gateway.
+var ErrNotEnrolled = errors.New("daemon: no binding recorded for this device (not enrolled yet)")
+
+// connectTunnel is the default TunnelConfig: the tunnel dials the configured gateway and, before every connection
+// attempt, proves possession of the device key (the one in the keystore) for the binding version the daemon has
+// recorded, and gets a fresh single-use connect token. A gateway that refuses the device (not bound, revoked,
+// binding expired) stops the tunnel with a refusal and the supervisor retries later with backoff, so a revoked
+// device does not hammer the gateway; a spent rate limit or a network error is retried inside the tunnel with its
+// jittered backoff; a daemon with no binding yet waits the same way.
+func connectTunnel(cfg Config, hc *http.Client, version func() (uint64, bool)) func(context.Context, ed25519.PrivateKey) (tunnel.Config, error) {
+	return func(_ context.Context, signer ed25519.PrivateKey) (tunnel.Config, error) {
+		url, err := connect.TunnelURL(cfg.GatewayURL)
+		if err != nil {
+			return tunnel.Config{}, err
+		}
+		cl := &connect.Client{BaseURL: cfg.GatewayURL, Tenant: cfg.Tenant, Device: cfg.DeviceID, HTTP: hc}
+		return tunnel.Config{URL: url, TokenSource: func(ctx context.Context) (string, error) {
+			v, ok := version()
+			if !ok {
+				return "", ErrNotEnrolled
+			}
+			tok, err := cl.Token(ctx, signer, v, connect.ScopeConnect)
+			if errors.Is(err, connect.ErrRefused) {
+				return "", fmt.Errorf("%w: %w", tunnel.ErrRefused, err)
+			}
+			return tok.Secret, err
+		}}, nil
+	}
 }
 
 func keyStoreFor(cfg Config, dirs Dirs) keystore.KeyStore {

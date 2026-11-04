@@ -36,10 +36,18 @@ type Event struct {
 	Body string
 }
 
-// Config configures a Client. URL and Token are required.
+// ErrRefused is what a TokenSource returns when the gateway will not issue a token (the device is not bound or
+// was revoked): retrying cannot succeed, so Run stops and the daemon's supervisor decides when to try again.
+var ErrRefused = errors.New("tunnel: credentials refused")
+
+// Config configures a Client. URL and one of Token and TokenSource are required.
 type Config struct {
 	URL   string // ws:// or wss:// URL of /v1/connect
 	Token string // sent as "Authorization: Bearer <Token>"
+	// TokenSource, if set, supplies the token for each connection attempt instead of Token. Device connect tokens
+	// are short-lived and checked when the connection opens, so a reconnect after a drop needs a fresh one. An
+	// error is retried with backoff, except one wrapping ErrRefused, which stops Run.
+	TokenSource func(ctx context.Context) (string, error)
 
 	// HeartbeatTimeout bounds how long a connection may stay silent after a ping.
 	// Zero means 10s. Pings go out at the interval the gateway announces.
@@ -182,9 +190,18 @@ type serverMsg struct {
 // connect runs one connection to completion. welcomed reports whether the
 // handshake succeeded (so the caller resets its backoff).
 func (c *Client) connect(ctx context.Context) (welcomed bool, err error) {
+	token := c.cfg.Token
+	if c.cfg.TokenSource != nil {
+		if token, err = c.cfg.TokenSource(ctx); err != nil {
+			if errors.Is(err, ErrRefused) {
+				return false, &fatalError{"gateway refused credentials"}
+			}
+			return false, errors.New("tunnel: no connect token")
+		}
+	}
 	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
 	conn, resp, err := websocket.Dial(dialCtx, c.cfg.URL, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.cfg.Token}},
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
 	})
 	cancelDial()
 	if err != nil {

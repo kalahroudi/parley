@@ -19,6 +19,7 @@ import {
   type Card,
   type Page,
 } from "./acl";
+import { CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type Scope } from "./connect";
 import type { Env } from "./index";
 import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, type Retention } from "./task";
 import { cleanText } from "./text";
@@ -34,6 +35,12 @@ export const DECIDED_RETENTION_MS = 30 * 24 * 3600_000;
 // the secret is stored only as a hash.
 export const SESSION_TTL_MS = 8 * 3600_000;
 export const MAX_SESSIONS_PER_USER = 5;
+
+// Device connect tokens (src/connect.ts): short-lived, a few per device (a reconnect takes a new one), oldest first out.
+// Outstanding challenges are few per device too; the oldest go first.
+export const CONNECT_TOKEN_TTL_MS = 5 * 60_000;
+export const MAX_CONNECT_TOKENS_PER_DEVICE = 8;
+export const MAX_CHALLENGES_PER_DEVICE = 4;
 // Anyone with an IdP login can hold a user session, so user sessions are capped per tenant too (oldest go first).
 // Admin sessions are never evicted by a flood of user sessions.
 export const MAX_USER_SESSIONS = 1000;
@@ -73,7 +80,8 @@ export const MAX_LIST_BYTES = 65536;
 
 // Opaque signed statements the gateway only relays. Fields the gateway needs for
 // routing and monotonicity checks are named; the rest are carried untouched.
-export type SignedBinding = { device_id: string; signing_key: string; version: number };
+// not_after is the binding's RFC 3339 expiry; a binding without a readable one opens no connection.
+export type SignedBinding = { device_id: string; signing_key: string; version: number; not_after?: string };
 export type SignedList = { tenant: string; version: number; revoked?: unknown };
 
 interface StoredEnrollment extends Enrollment {
@@ -83,6 +91,14 @@ interface StoredEnrollment extends Enrollment {
 interface StoredToken {
   owner: string;
   exp: number;
+}
+
+// A connect challenge or connect token, each kept by hash until it expires. Tokens also carry what they are bound to.
+interface StoredConnect {
+  created: number;
+  exp: number;
+  version?: number;
+  scope?: Scope;
 }
 
 // A published card with the routing facts the gateway derived itself: the
@@ -127,15 +143,17 @@ const random = (n: number) => hex(crypto.getRandomValues(new Uint8Array(n)));
 
 export { cleanText };
 
-export function decodeKey(b64: string): Uint8Array | null {
+function decodeBytes(b64: string, length: number): Uint8Array | null {
   try {
     const bin = atob(b64);
-    if (bin.length !== 32) return null;
+    if (bin.length !== length) return null;
     return Uint8Array.from(bin, (c) => c.charCodeAt(0));
   } catch {
     return null;
   }
 }
+
+export const decodeKey = (b64: string) => decodeBytes(b64, 32);
 
 // One Tenant DO per customer (named by tenant id). It holds the enrollment
 // tokens (as hashes) and the approval queue. Binding signatures come from the
@@ -322,6 +340,87 @@ export class Tenant extends DurableObject<Env> {
     return rec && rec.status === "approved" && rec.binding ? rec.owner.toLowerCase() : null;
   }
 
+  // The tenant's root public key, registered by the admin. The first one stays: the same key again is fine, another
+  // is refused (a new root is a new tenant). Without it no device may connect.
+  async setRoot(b64: string): Promise<"ok" | "conflict" | "bad"> {
+    const key = decodeKey(b64);
+    if (!key) return "bad";
+    const canonical = btoa(String.fromCharCode(...key));
+    const cur = await this.ctx.storage.get<string>("root");
+    if (cur !== undefined) return cur === canonical ? "ok" : "conflict";
+    await this.ctx.storage.put("root", canonical);
+    return "ok";
+  }
+
+  // The device's signing key and binding version if it may connect now: not revoked, an approved enrollment whose
+  // binding the registered root signed for this tenant and device and that has not expired, and whose key is the one
+  // that was enrolled. Anything else is null.
+  private async connectable(tenant: string, device: string): Promise<{ key: Uint8Array; version: number } | null> {
+    const root = decodeKey((await this.ctx.storage.get<string>("root")) ?? "");
+    if (!root || !isDeviceId(device) || (await this.revokedIds()).has(device)) return null;
+    const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${device}`);
+    if (!rec || rec.status !== "approved" || !rec.binding) return null;
+    const ok = await verifyBinding(root, rec.binding, tenant, Date.now());
+    return ok && ok.device === device && btoa(String.fromCharCode(...ok.key)) === rec.signing_key ? ok : null;
+  }
+
+  // A challenge for the device. Only a device that may connect gets one stored (by hash, 60 s, a few at a time);
+  // for any other the answer is the same shape and nothing is stored.
+  async issueChallenge(tenant: string, device: string): Promise<{ challenge: string; expires_at: number }> {
+    const challenge = randomChallenge();
+    const now = Date.now();
+    const out = { challenge, expires_at: now + CHALLENGE_TTL_MS };
+    if (!(await this.connectable(tenant, device))) return out;
+    const mine = [...(await this.ctx.storage.list<StoredConnect>({ prefix: `chal:${device}:` }))].sort((a, b) => a[1].created - b[1].created);
+    await Promise.all([
+      this.ctx.storage.put(`chal:${device}:${await sha256(challenge)}`, { created: now, exp: out.expires_at } satisfies StoredConnect),
+      ...this.deleteAll(mine.slice(0, Math.max(0, mine.length - MAX_CHALLENGES_PER_DEVICE + 1)).map(([k]) => k)),
+    ]);
+    await this.schedule(out.expires_at);
+    return out;
+  }
+
+  // Issues a connect token. The challenge is consumed first, so it is single use whatever else is wrong. Null, for
+  // every reason alike, unless the challenge is ours, unexpired and issued for this device, the device may connect
+  // at exactly `version`, and `signature` is the device's over connectMessage for that challenge, its expiry,
+  // the version and the scope.
+  issueConnectToken(tenant: string, device: string, challenge: string, version: number, scope: Scope, signature: string): Promise<{ secret: string; expires_at: number } | null> {
+    // Serialized: the consumption of a challenge must not interleave with a second redemption of it.
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const k = `chal:${device}:${await sha256(challenge)}`;
+      const rec = await this.ctx.storage.get<StoredConnect>(k);
+      if (!rec) return null;
+      await this.ctx.storage.delete(k);
+      const now = Date.now();
+      const bound = await this.connectable(tenant, device);
+      const sig = decodeBytes(signature, 64);
+      if (rec.exp <= now || !bound || bound.version !== version || !sig) return null;
+      if (!(await verifyEd25519(bound.key, sig, connectMessage(tenant, device, challenge, rec.exp, version, scope)))) return null;
+      const secret = random(32);
+      const mine = [...(await this.ctx.storage.list<StoredConnect>({ prefix: `dtk:${device}:` }))].sort((a, b) => a[1].created - b[1].created);
+      await Promise.all([
+        this.ctx.storage.put(`dtk:${device}:${await sha256(secret)}`, { created: now, exp: now + CONNECT_TOKEN_TTL_MS, version, scope } satisfies StoredConnect),
+        ...this.deleteAll(mine.slice(0, Math.max(0, mine.length - MAX_CONNECT_TOKENS_PER_DEVICE + 1)).map(([k2]) => k2)),
+      ]);
+      await this.schedule(now + CONNECT_TOKEN_TTL_MS);
+      return { secret, expires_at: now + CONNECT_TOKEN_TTL_MS };
+    });
+  }
+
+  // Whether the token authenticates the device for `scope` now: known, of that scope, unexpired, and the device
+  // still connectable at the binding version the token was issued for. A "connect" token is deleted by being
+  // presented, before any check but its existence (the read and the delete have no other await between them).
+  async connectAuth(tenant: string, device: string, secret: string, scope: Scope): Promise<boolean> {
+    const k = `dtk:${device}:${await sha256(secret)}`;
+    const rec = await this.ctx.storage.get<StoredConnect>(k);
+    if (!rec || rec.scope !== scope) return false;
+    if (scope === "connect" || rec.exp <= Date.now()) await this.ctx.storage.delete(k);
+    const bound = rec.exp > Date.now() ? await this.connectable(tenant, device) : null;
+    if (bound?.version === rec.version) return true;
+    await this.ctx.storage.delete(k);
+    return false;
+  }
+
   // Every live device and its owner. A card is only as live as its device: once
   // the enrollment is purged or the device revoked, the card stops being listed
   // or resolvable.
@@ -506,6 +605,7 @@ export class Tenant extends DurableObject<Env> {
     const orphans = [...(await this.ctx.storage.list({ prefix: "card:", limit: MAX_CARDS_PER_TENANT })).keys()].filter((k) => !live.has(k.slice(5).split(":")[0]!));
     await Promise.all(this.deleteAll(orphans));
     for (const [k, s] of await this.ctx.storage.list<Session>({ prefix: "ses:" })) await due(k, s.exp);
+    for (const prefix of ["dtk:", "chal:"]) for (const [k, c] of await this.ctx.storage.list<StoredConnect>({ prefix })) await due(k, c.exp);
     if (next !== undefined) await this.ctx.storage.setAlarm(next);
   }
 

@@ -66,6 +66,16 @@ func TestEmitCanaryFrames(t *testing.T) {
 		}
 	}
 
+	// The gateway names devices itself (enrollment ids), so the test names the caller and the target the way the
+	// gateway will see them; alone, the readable names are used.
+	caller, target := "caller", "target"
+	if v := os.Getenv("PARLEY_CANARY_CALLER"); v != "" {
+		caller = v
+	}
+	if v := os.Getenv("PARLEY_CANARY_TARGET"); v != "" {
+		target = v
+	}
+
 	w := newCrashWorld(t)
 	var frames []canaryFrame
 	var needles [][]byte
@@ -110,8 +120,8 @@ func TestEmitCanaryFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskID := newTask()
-	h := envelope.Header{Tenant: "acme", SenderDevice: "caller", SenderKeyID: "k-c", BindingVersion: 1,
-		TargetDevice: "target", PrekeyID: receive.PrekeyID(sp.ID), ContextID: "ctx", TaskID: taskID,
+	h := envelope.Header{Tenant: "acme", SenderDevice: caller, SenderKeyID: "k-c", BindingVersion: 1,
+		TargetDevice: target, PrekeyID: receive.PrekeyID(sp.ID), ContextID: "ctx", TaskID: taskID,
 		Type: envelope.TypeTask, IssuedAt: w.now, Expiry: exp, RPK: rsk.PublicKey().Bytes(), Prekey: sp.Encode()}
 	task, err := envelope.SealPadded(w.callerK, sp.PublicKey, h, inner)
 	if err != nil {
@@ -131,8 +141,8 @@ func TestEmitCanaryFrames(t *testing.T) {
 		{"RESULT", envelope.TypeResult, c["result"]},
 		{"ERROR", envelope.TypeError, c["error"]},
 	} {
-		rh := envelope.Header{Tenant: "acme", SenderDevice: "target", SenderKeyID: "k-t", BindingVersion: 1,
-			TargetDevice: "caller", PrekeyID: "reply", ContextID: "ctx", TaskID: taskID, Seq: uint64(i + 1),
+		rh := envelope.Header{Tenant: "acme", SenderDevice: target, SenderKeyID: "k-t", BindingVersion: 1,
+			TargetDevice: caller, PrekeyID: "reply", ContextID: "ctx", TaskID: taskID, Seq: uint64(i + 1),
 			Type: r.typ, IssuedAt: w.now, Expiry: exp, PrevHash: prev[:]}
 		m, err := envelope.SealPadded(ed25519.PrivateKey(w.targetK), rsk.PublicKey().Bytes(), rh, []byte(r.text))
 		if err != nil {
@@ -160,7 +170,7 @@ func TestEmitCanaryFrames(t *testing.T) {
 					TargetDevice: st.to, PrekeyID: "next", ContextID: "ctx", TaskID: taskID, Seq: st.seq,
 					Type: st.typ, IssuedAt: w.now, Expiry: exp, PrevHash: prev[:]}
 				key := w.callerK
-				if st.from == "target" {
+				if st.from == target {
 					key = ed25519.PrivateKey(w.targetK)
 				}
 				m, err = envelope.SealPadded(key, rsk.PublicKey().Bytes(), hh, []byte(st.text))
@@ -179,15 +189,15 @@ func TestEmitCanaryFrames(t *testing.T) {
 	}
 	chain(0, newTask(), []canaryStep{
 		{kind: "TASK", typ: envelope.TypeTask},
-		{"STATUS", envelope.TypeStatus, "target", "caller", 1, c["status"]},
-		{"INPUT_REQUIRED", envelope.TypeInputRequired, "target", "caller", 2, c["question"]},
-		{"REPLY", envelope.TypeReply, "caller", "target", 1, "the answer is " + c["input"]},
-		{"RESULT", envelope.TypeResult, "target", "caller", 3, c["result"]},
+		{"STATUS", envelope.TypeStatus, target, caller, 1, c["status"]},
+		{"INPUT_REQUIRED", envelope.TypeInputRequired, target, caller, 2, c["question"]},
+		{"REPLY", envelope.TypeReply, caller, target, 1, "the answer is " + c["input"]},
+		{"RESULT", envelope.TypeResult, target, caller, 3, c["result"]},
 	})
-	chain(1, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"ERROR", envelope.TypeError, "target", "caller", 1, c["error"]}})
-	chain(2, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"REJECTED", envelope.TypeError, "target", "caller", 1, c["error"]}})
+	chain(1, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"ERROR", envelope.TypeError, target, caller, 1, c["error"]}})
+	chain(2, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"REJECTED", envelope.TypeError, target, caller, 1, c["error"]}})
 
-	chain(3, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"CANCEL", envelope.TypeCancel, "caller", "target", 1, ""}})
+	chain(3, newTask(), []canaryStep{{kind: "TASK", typ: envelope.TypeTask}, {"CANCEL", envelope.TypeCancel, caller, target, 1, ""}})
 
 	b, _ := json.Marshal(map[string]any{"frames": frames, "blobs": blobs, "chains": chains})
 	if err := os.WriteFile(out, b, 0o600); err != nil {
