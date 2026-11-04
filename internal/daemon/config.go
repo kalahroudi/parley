@@ -7,10 +7,10 @@
 // content; the pipeline that handles tasks plugs in through Deps and Handle.
 //
 // Extension points for the tasks that complete the daemon (no code ahead of them):
-//   - T415 (device connect tokens): Deps.TunnelConfig is called each time the
-//     tunnel (re)starts with the device signing key, and returns the tunnel URL
-//     and a fresh token. Until it is set the tunnel waits, backing off, on
-//     ErrNoConnectToken.
+//   - Device connect tokens (T415): the tunnel dials the configured gateway
+//     and, before each connection attempt, signs the gateway's challenge with
+//     the device key for a short-lived token (internal/connect). Deps.TunnelConfig
+//     replaces this (tests); it is called each time the tunnel (re)starts.
 //   - T411 (enrollment): Daemon.SigningKey and Daemon.Trust give the device key
 //     and a trust.Daemon (Enroll, binding tracker, revocation guard) already
 //     pinned to the configured root; New opens the rollback stores, so a

@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
-import type { Device } from "../src/device";
-// A value import, so Stryker's vitest runner (which runs the tests that import a mutated file) finds these tests for device.ts.
-import "../src/device";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_HELD, type Device, type Held } from "../src/device";
+import type { Task } from "../src/task";
 
 // Sockets outlive a test's storage isolation, so each test gets its own device name.
 let n = 0;
@@ -592,5 +591,119 @@ describe("socket teardown", () => {
     });
     const closed = await c.closed();
     expect([closed?.code, closed?.reason]).toEqual([1011, "error"]);
+  });
+});
+
+
+// Queued retention: the Task DO holds sealed events for an offline caller; the
+// Device DO pushes them when the caller's daemon connects and deletes each one
+// when the daemon acknowledges it.
+describe("held events (Queued)", () => {
+  const taskStub = (id: string) => env.TASK.get(env.TASK.idFromName(`t1:${id}`)) as DurableObjectStub<Task>;
+  const heldKeys = (id: string) => runInDurableObject(taskStub(id), async (_, ctx) => [...(await ctx.storage.list({ prefix: "q:" })).keys()]);
+  const until = async (f: () => Promise<boolean>) => {
+    for (let i = 0; i < 200; i++) {
+      if (await f()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("condition not reached");
+  };
+  // A queued task from this test's device (the caller) to "srv" holding the given bodies, and the device told about it.
+  async function seed(id: string, bodies: string[], ttl = 3600_000) {
+    const t = taskStub(id);
+    await t.create({ tenant: "t1", id, caller: dev, target: "srv", retention: "queued" });
+    for (const b of bodies) await t.enqueue("t1", "srv", b, ttl);
+    expect(await stubFor().hold({ tenant: "t1", device: dev, task: id, until: Date.now() + ttl })).toBe("ok");
+  }
+  const open = async (session?: string, last_rx = 0) => {
+    const c = await connect();
+    c.send(hello(session, last_rx));
+    const welcome = await c.next();
+    expect(welcome.t).toBe("welcome");
+    return { c, welcome };
+  };
+
+  it("a connection with nothing held writes no held or in-flight keys (Strict stores nothing, and a connect costs no extra rows)", async () => {
+    const { c } = await open();
+    c.send({ t: "ack", seq: 0 });
+    c.send("ping");
+    expect(await c.next()).toEqual({ t: "pong" });
+    const keys = await runInDurableObject(stubFor(), async (_, ctx) => [...(await ctx.storage.list()).keys()]);
+    expect(keys).not.toContain("held");
+    expect(keys).not.toContain("inflight");
+  });
+
+  it("pushes held events, oldest task first, when the daemon connects; an acknowledgment deletes them", async () => {
+    await seed(`a${n}`, ["one", "two"]);
+    await seed(`b${n}`, ["three"]);
+    const { c } = await open();
+    expect([await c.next(), await c.next(), await c.next()]).toEqual([
+      { t: "event", seq: 1, body: "one" },
+      { t: "event", seq: 2, body: "two" },
+      { t: "event", seq: 3, body: "three" },
+    ]);
+    expect(await heldKeys(`a${n}`)).toHaveLength(2); // held until acknowledged
+    c.send({ t: "ack", seq: 2 });
+    await until(async () => (await heldKeys(`a${n}`)).length === 0);
+    expect(await heldKeys(`b${n}`)).toHaveLength(1); // seq 3 is not acknowledged yet
+    c.send({ t: "ack", seq: 3 });
+    await until(async () => (await heldKeys(`b${n}`)).length === 0);
+    c.send({ t: "ack", seq: 3 }); // a repeat is harmless
+  });
+
+  it("pushes an unacknowledged event again after a reconnect, until the daemon says it has it", async () => {
+    await seed(`a${n}`, ["one"]);
+    const first = await open();
+    expect(await first.c.next()).toEqual({ t: "event", seq: 1, body: "one" });
+    first.c.ws.close(1000, "bye"); // dropped before acknowledging
+    const second = await open(first.welcome.session, 0);
+    expect(await second.c.next()).toEqual({ t: "event", seq: 2, body: "one" });
+    second.c.ws.close(1000, "bye");
+    // The daemon reports having received seq 2 (hello's last_rx counts as an acknowledgment).
+    const third = await open(first.welcome.session, 2);
+    await until(async () => (await heldKeys(`a${n}`)).length === 0);
+    third.c.send({ t: "ack", seq: 2 });
+  });
+
+  it("drops tasks that hold nothing any more, or are gone, and sends nothing for them", async () => {
+    await seed(`gone${n}`, ["x"]);
+    await runInDurableObject(taskStub(`gone${n}`), (_, ctx) => ctx.storage.deleteAll());
+    await seed(`empty${n}`, ["x"]);
+    await taskStub(`empty${n}`).ack("t1", dev, 1);
+    const { c } = await open();
+    c.send({ t: "ping" });
+    expect((await c.next()).t).not.toBe("event");
+    expect(await runInDurableObject(stubFor(), (_, ctx) => ctx.storage.get("held"))).toEqual([]);
+  });
+
+  it("forgets a task after its deadline, whatever the Task DO says", async () => {
+    await seed(`a${n}`, ["x"], 900_000);
+    await runInDurableObject(stubFor(), async (_, ctx) => {
+      const held = (await ctx.storage.get<Held[]>("held"))!;
+      await ctx.storage.put("held", held.map((h) => ({ ...h, until: Date.now() - 1 })));
+    });
+    const { c } = await open();
+    c.send({ t: "ping" });
+    expect((await c.next()).t).not.toBe("event");
+  });
+
+  it("notes a task once, keeps the later deadline, and stops at MAX_HELD tasks", async () => {
+    // A frozen clock: on a slow disk the 256 writes below outlast a real one-second deadline.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const d = stubFor();
+    const at = Date.now() + 1000;
+    const h = (task: string, until = at): Held => ({ tenant: "t1", device: dev, task, until });
+    expect(await d.hold(h("t0", at))).toBe("ok");
+    expect(await d.hold(h("t0", at + 500))).toBe("ok");
+    expect(await d.hold(h("t0", at - 500))).toBe("ok");
+    expect(await runInDurableObject(d, (_, ctx) => ctx.storage.get("held"))).toEqual([h("t0", at + 500)]);
+    for (let i = 1; i < MAX_HELD; i++) expect(await d.hold(h(`t${i}`))).toBe("ok");
+    expect(await d.hold(h("overflow"))).toBe("full");
+    expect(await d.hold(h("t5", at + 9))).toBe("ok"); // a task already noted is never refused
+    // Expired notes make room.
+    await runInDurableObject(d, async (_, ctx) => ctx.storage.put("held", (await ctx.storage.get<Held[]>("held"))!.map((x) => ({ ...x, until: Date.now() - 1 }))));
+    expect(await d.hold(h("overflow"))).toBe("ok");
+    expect(await runInDurableObject(d, (_, ctx) => ctx.storage.get("held"))).toEqual([h("overflow")]);
+    vi.useRealTimers();
   });
 });

@@ -5,6 +5,7 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { MAX_CARDS_PER_DEVICE, MAX_CARDS_PER_TENANT, MAX_GROUPS, MAX_MEMBER_CHARS } from "../src/acl";
 import { handleDirectory, type DeviceAuth } from "../src/directory";
+import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS } from "../src/task";
 import { MAX_AUDIT } from "../src/tenant";
 
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
@@ -559,4 +560,54 @@ describe("groups pages and the audit log", () => {
 // Needs the daemon side (the allowlist in the signed binding), which has no gateway test harness yet.
 describe("T307 acceptance", () => {
   it.todo("T307: ACL matrix end to end: gateway visibility x the target daemon's allowlist from the signed binding; the daemon refuses a visible card whose binding does not name the caller");
+});
+
+
+describe("retention setting", () => {
+  it("is Strict with a 1 hour TTL until the admin chooses", async () => {
+    const x = tenant();
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "strict", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS });
+  });
+
+  it("sets the mode and the TTL, keeps the TTL when omitted, and audits each change", async () => {
+    const x = tenant();
+    const put = (b: unknown) => post("/v1/admin/retention/put", b, x.admin);
+    expect(await json(await put({ mode: "strict", queue_ttl_ms: QUEUE_TTL_MIN_MS }))).toEqual({ mode: "strict", queue_ttl_ms: QUEUE_TTL_MIN_MS });
+    expect(await json(await put({ mode: "queued" }))).toEqual({ mode: "queued", queue_ttl_ms: QUEUE_TTL_MIN_MS });
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "queued", queue_ttl_ms: QUEUE_TTL_MIN_MS });
+    expect((await put({ mode: "queued", queue_ttl_ms: QUEUE_TTL_MAX_MS })).status).toBe(200);
+    const events = (await json(await post("/v1/admin/audit", {}, x.admin))).events.filter((e: any) => e.action === "retention.put");
+    expect(events.map((e: any) => [e.subject, e.detail.queue_ttl_ms])).toEqual([["strict", QUEUE_TTL_MIN_MS], ["queued", QUEUE_TTL_MIN_MS], ["queued", QUEUE_TTL_MAX_MS]]);
+  });
+
+  it("refuses a bad mode, a TTL outside 15 minutes to 24 hours, and anything else, and changes nothing", async () => {
+    const x = tenant();
+    const bad: unknown[] = [
+      {}, { mode: "lazy" }, { mode: 1 }, { queue_ttl_ms: QUEUE_TTL_MIN_MS }, { mode: "strict", extra: 1 },
+      { mode: "strict", queue_ttl_ms: QUEUE_TTL_MIN_MS - 1 }, { mode: "strict", queue_ttl_ms: QUEUE_TTL_MAX_MS + 1 },
+      { mode: "strict", queue_ttl_ms: 1.5 }, { mode: "strict", queue_ttl_ms: "3600000" }, { mode: "strict", queue_ttl_ms: null },
+    ];
+    for (const b of bad) expect((await post("/v1/admin/retention/put", b, x.admin)).status, JSON.stringify(b)).toBe(400);
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toEqual({ mode: "strict", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS });
+    expect((await json(await post("/v1/admin/audit", {}, x.admin))).events).toEqual([]);
+    expect(await call(x, "setRetention", [1])).toEqual({ error: "bad_retention" });
+    expect(await call(x, "setRetention", null)).toEqual({ error: "bad_retention" });
+  });
+
+  it("is for the tenant admin only, and unknown paths are 404", async () => {
+    const x = tenant();
+    const alice = await x.enroll("alice@example.test");
+    for (const path of ["/v1/admin/retention", "/v1/admin/retention/put"]) {
+      expect((await post(path, { mode: "strict" }, alice.auth)).status).toBe(401);
+      expect((await post(path, { mode: "strict" })).status).toBe(401);
+    }
+    expect((await post("/v1/admin/retention/other", {}, x.admin)).status).toBe(404);
+    expect(await json(await post("/v1/admin/retention", {}, x.admin))).toMatchObject({ mode: "strict" });
+  });
+
+  it("applies per tenant", async () => {
+    const [a, b] = [tenant(), tenant()];
+    await post("/v1/admin/retention/put", { mode: "queued" }, a.admin);
+    expect((await json(await post("/v1/admin/retention", {}, b.admin))).mode).toBe("strict");
+  });
 });

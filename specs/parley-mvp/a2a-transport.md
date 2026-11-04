@@ -67,7 +67,7 @@ through the SDK's own types; the SDK client works against it. T306 runs the full
 | `taskId` is the hex of the signed 16-byte id; a new task may omit it | the signed id is the id |
 | Responses use the task id as `contextId` | the gateway stores no context; the signed one is in the envelope |
 | `SendMessage` returns at once (as if `returnImmediately`) | progress comes over the tunnel or `GetTask` |
-| No `ListTasks`, `SubscribeToTask`, `SendStreamingMessage`, push notifications, extended card | no per-device task index (T303/T304); the tunnel is the event channel; the card says so |
+| No `ListTasks`, `SubscribeToTask`, `SendStreamingMessage`, push notifications, extended card | no per-device task index (T303); the tunnel is the event channel; the card says so |
 | `CancelTask` needs the signed CANCEL envelope in `metadata.parley.parts` | a bare cancel looks the same as a gateway forgery |
 | Extra error codes -32010 to -32015 | offline, bad sequence, task exists, not permitted, too large, illegal state move |
 | `acceptedOutputModes` that exclude the sealed type get -32005 | content is only ever sealed |

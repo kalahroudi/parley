@@ -3,14 +3,13 @@
 
 import type { Env } from "./index";
 import { csrfOk, principal, type Principal } from "./session";
-import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
+import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, tenantStub } from "./tenant";
 
 const MAX_BODY_BYTES = MAX_LIST_BYTES + 1024;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
-const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 
 async function body(req: Request): Promise<Record<string, unknown> | null> {
   if (req.method !== "POST") return null;
@@ -78,6 +77,10 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
   if (admin.role !== "admin") return json(403, { error: "forbidden" });
   const stub = tenantStub(env, admin.tenant);
 
+  if (pathname === "/v1/admin/root") {
+    const r = await stub.setRoot(str(b.root_public_key) ?? "");
+    return r === "ok" ? json(200, { ok: true }) : json(r === "conflict" ? 409 : 400, { error: r === "conflict" ? "root_already_set" : "bad_request" });
+  }
   if (pathname === "/v1/admin/enrollment-tokens") {
     const ttl = b.ttl_s === undefined ? undefined : Number(b.ttl_s) * 1000;
     const t = await stub.mintToken(str(b.owner) ?? "", ttl);

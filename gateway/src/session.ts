@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Env } from "./index";
-import { SESSION_TTL_MS, type Role, type Tenant } from "./tenant";
+import { SESSION_TTL_MS, type Role, tenantStub } from "./tenant";
 
 // Over HTTPS the cookie is `__Host-` prefixed: the browser then refuses it unless it is Secure, has Path=/ and no
 // Domain, so a sibling subdomain cannot plant or overwrite it. Plain http (local development) cannot use the prefix.
@@ -15,7 +15,6 @@ const json = (status: number, body: unknown, headers: HeadersInit = {}) =>
 
 export type Principal = { role: Role; tenant: string; email: string; csrf: string; secret: string; via: "cookie" | "bearer" };
 
-const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 const token = (tenant: string, secret: string) => `ps_${tenant}.${secret}`;
 
 // ADMINS is a comma-separated list of `tenant:email` pairs. Anyone not listed

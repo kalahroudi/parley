@@ -225,3 +225,32 @@ func TestAcceptRejectsWhenStoreUnreadableUnderLock(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestTrackerVersion(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	tr, err := NewTracker(pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if v, ok := tr.Version("t", "d"); ok || v != 0 {
+		t.Fatalf("an unseen device has version %d, %v", v, ok)
+	}
+	for _, ver := range []uint64{2, 5} {
+		s, err := Sign(priv, Binding{Tenant: "t", Owner: "o", DeviceID: "d", SigningKey: pub, Version: ver, NotAfter: now.Add(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tr.Accept(s, now); err != nil {
+			t.Fatal(err)
+		}
+		if v, ok := tr.Version("t", "d"); !ok || v != ver {
+			t.Fatalf("after version %d: %d, %v", ver, v, ok)
+		}
+	}
+	for _, k := range [][2]string{{"t", "other"}, {"other", "d"}} {
+		if _, ok := tr.Version(k[0], k[1]); ok {
+			t.Fatalf("%v is reported as seen", k)
+		}
+	}
+}

@@ -1,7 +1,8 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { agentCard } from "./a2a";
+import { agentCard, handleA2A } from "./a2a";
+import { authenticate, handleConnectAuth } from "./connect";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { handleSession, issueSession } from "./session";
 import { Device } from "./device";
@@ -32,31 +33,38 @@ export interface Env extends AuthEnv {
   // for a tenant, user logins to it are refused.
   USERS?: string;
   USER_DOMAINS?: string;
+  // Per-minute limits for the connect challenge and token endpoints (src/connect.ts): per source address, and per device.
+  RATE_CONNECT_PER_MIN?: string;
+  RATE_CONNECT_DEVICE_PER_MIN?: string;
 }
 
-// Fails closed until connect tokens land: no credential opens a device connection.
+// Devices authenticate with a connect token (src/connect.ts); with none, or a bad one, nothing opens.
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Identifiers travel in the Authorization header and frames, never in the URL.
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
-    if (pathname.startsWith("/auth/") || pathname === "/v1/session" || pathname === "/v1/session/logout") {
+    if (pathname.startsWith("/auth/") || pathname === "/v1/session" || pathname === "/v1/session/logout" || pathname.startsWith("/v1/connect/")) {
       const refused = await limitAuth(request, env);
       if (refused) return refused;
     }
     if (pathname.startsWith("/auth/")) return handleAuth(request, env, undefined, issueSession.bind(null, request, env));
+    if (pathname === "/v1/connect/challenge" || pathname === "/v1/connect/token") return handleConnectAuth(request, env);
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
-    if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
+    if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {
       return request.method === "GET" ? Response.json(agentCard(new URL(request.url).origin)) : new Response("method not allowed", { status: 405 });
     }
-    // Closed like /v1/connect: the development bearer is gone and device tokens are not here yet.
-    if (pathname === "/a2a") return new Response("unauthorized", { status: 401 });
+    if (pathname === "/a2a") {
+      const who = await authenticate(request, env, "api");
+      return who ? handleA2A(request, env, who) : new Response("unauthorized", { status: 401 });
+    }
     if (pathname !== "/v1/connect") return new Response("not found", { status: 404 });
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
-    return new Response("unauthorized", { status: 401 });
+    const who = await authenticate(request, env, "connect");
+    return who ? env.DEVICE.get(env.DEVICE.idFromName(`${who.tenant}:${who.device}`)).fetch(request) : new Response("unauthorized", { status: 401 });
   },
 } satisfies ExportedHandler<Env>;

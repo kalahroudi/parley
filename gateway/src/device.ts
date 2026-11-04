@@ -3,6 +3,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index";
+import type { Task } from "./task";
 import {
   CLOSE_PROTOCOL,
   CLOSE_REPLACED,
@@ -27,6 +28,20 @@ interface Session {
   tx_seq: number; // last event seq sent to the daemon
   acked_tx: number; // highest event seq the daemon acknowledged
 }
+
+// A task that holds sealed events for this device (Queued): ids and a deadline, no content.
+export interface Held {
+  tenant: string;
+  device: string;
+  task: string;
+  until: number;
+}
+// A held event pushed on the tunnel, waiting for the daemon's acknowledgment of `seq`.
+interface Inflight extends Held {
+  id: number;
+  seq: number;
+}
+export const MAX_HELD = 256;
 
 export type DeliverResult =
   | { status: "delivered"; seq: number }
@@ -81,6 +96,71 @@ export class Device extends DurableObject<Env> {
     return { status: "delivered", seq: session.tx_seq };
   }
 
+  // Notes that a task holds sealed events for this device until `until`.
+  async hold(h: Held): Promise<"ok" | "full"> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const list = await this.liveHeld();
+      const i = list.findIndex((x) => x.tenant === h.tenant && x.task === h.task);
+      if (i >= 0) list[i] = { ...h, until: Math.max(h.until, list[i]!.until) };
+      else if (list.length >= MAX_HELD) return "full";
+      else list.push(h);
+      await this.ctx.storage.put("held", list);
+      return "ok";
+    });
+  }
+
+  private async liveHeld(): Promise<Held[]> {
+    const now = Date.now();
+    return ((await this.ctx.storage.get<Held[]>("held")) ?? []).filter((h) => h.until > now);
+  }
+
+  private taskStub(h: Held) {
+    return this.env.TASK.get(this.env.TASK.idFromName(`${h.tenant}:${h.task}`)) as DurableObjectStub<Task>;
+  }
+
+  // Deletes the held events the daemon has acknowledged (everything up to `upTo`).
+  private async ackHeld(upTo: number): Promise<void> {
+    const infl = (await this.ctx.storage.get<Inflight[]>("inflight")) ?? [];
+    const done = infl.filter((i) => i.seq <= upTo);
+    if (!done.length) return;
+    for (const i of done) await this.taskStub(i).ack(i.tenant, i.device, i.id);
+    await this.ctx.storage.put("inflight", infl.filter((i) => i.seq > upTo));
+  }
+
+  // Pushes every event held for this device, oldest first. Events stay held (and
+  // are pushed again after a later reconnect) until the daemon acknowledges them.
+  private async flush(ws: WebSocket): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const session = (await this.ctx.storage.get<Session>("session"))!; // hello stored it before calling us
+      await this.ackHeld(session.acked_tx);
+      const [prevHeld, prevInfl] = await Promise.all([this.ctx.storage.get<Held[]>("held"), this.ctx.storage.get<Inflight[]>("inflight")]);
+      const held: Held[] = [];
+      const infl = (prevInfl ?? []).filter((i) => i.until > Date.now());
+      const tx = session.tx_seq;
+      for (const h of await this.liveHeld()) {
+        const events = await this.taskStub(h).drain(h.tenant, h.device);
+        if (typeof events === "string" || !events.length) continue; // the task holds nothing for us any more
+        held.push(h);
+        const first = session.tx_seq + 1;
+        // `send` is false once the socket has closed. Those events were not sent, so they are not recorded
+        // as in flight and stay held for the next connection (the sent ones are always the leading ones).
+        const sent = events.filter((e) => {
+          session.tx_seq += 1;
+          return send(ws, { t: "event", seq: session.tx_seq, body: e.body });
+        });
+        infl.push(...sent.map((e, k) => ({ ...h, until: e.exp, id: e.id, seq: first + k })));
+      }
+      // Write only what changed: a connection with nothing held (always so in Strict) writes nothing here, which
+      // also keeps the keys out of storage altogether.
+      const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+      await Promise.all([
+        ...(session.tx_seq === tx ? [] : [this.ctx.storage.put("session", session)]),
+        ...(same(held, prevHeld ?? []) ? [] : [this.ctx.storage.put("held", held)]),
+        ...(same(infl, prevInfl ?? []) ? [] : [this.ctx.storage.put("inflight", infl)]),
+      ]);
+    });
+  }
+
   async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
     if (typeof data !== "string") return ws.close(CLOSE_PROTOCOL, "text frames only");
     if (byteLength(data) > MAX_FRAME_BYTES) return ws.close(CLOSE_TOO_LARGE, "frame too large");
@@ -109,6 +189,7 @@ export class Device extends DurableObject<Env> {
         rx_seq: session.rx_seq,
         heartbeat_ms: HEARTBEAT_MS,
       });
+      await this.flush(ws);
       return;
     }
 
@@ -122,6 +203,7 @@ export class Device extends DurableObject<Env> {
         session.acked_tx = msg.seq;
         await this.ctx.storage.put("session", session);
       }
+      await this.ctx.blockConcurrencyWhile(() => this.ackHeld(msg.seq));
       return;
     }
 

@@ -14,6 +14,7 @@ const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
 const STATUS: Record<DirectoryError, number> = {
+  bad_retention: 400,
   not_enrolled: 403,
   bad_card: 400,
   secret_detected: 422,
@@ -81,6 +82,15 @@ export async function handleDirectory(req: Request, env: Env, deviceAuth?: Devic
       return "error" in r ? fail(r) : json(200, r);
     }
     if (pathname === "/v1/admin/groups/delete") return (await stub.deleteGroup(b.name)) ? json(200, { ok: true }) : json(404, { error: "not_found" });
+    return json(404, { error: "not_found" });
+  }
+  if (pathname.startsWith("/v1/admin/retention")) {
+    if (!id.admin) return json(401, { error: "unauthorized" });
+    if (pathname === "/v1/admin/retention") return json(200, await stub.retention());
+    if (pathname === "/v1/admin/retention/put") {
+      const r = await stub.setRetention(b);
+      return "error" in r ? fail(r) : json(200, r);
+    }
     return json(404, { error: "not_found" });
   }
   if (pathname === "/v1/admin/audit") {
