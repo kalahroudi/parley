@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kalahroudi/parley/internal/keystore"
 	"github.com/zalando/go-keyring"
 )
 
@@ -18,13 +19,13 @@ import (
 // the file store and the keychain seam. The entry is removed afterwards.
 func TestRealKeychain(t *testing.T) {
 	id := "parley-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
-	t.Cleanup(func() { keyring.Delete(KeychainService, id) })
-	ks := NewKeychainStore(id)
-	key, created, err := LoadOrCreate(ks, rand.Reader)
+	t.Cleanup(func() { keyring.Delete(keystore.KeychainService, id) })
+	ks := &keystore.KeychainStore{Account: id, KR: osKeyring{}}
+	key, created, err := keystore.LoadOrCreate(ks, rand.Reader)
 	if err != nil || !created {
 		t.Fatal(created, err)
 	}
-	again, created, err := LoadOrCreate(ks, rand.Reader)
+	again, created, err := keystore.LoadOrCreate(ks, rand.Reader)
 	if err != nil || created || !key.Equal(again) {
 		t.Fatalf("keychain round trip: created=%v err=%v", created, err)
 	}

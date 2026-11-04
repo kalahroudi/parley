@@ -1,7 +1,11 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package daemon
+// Package supervisor runs the daemon's background components (the tunnel
+// client, the revocation refresh) and restarts them with jittered, growing
+// delays. It decides nothing about content: states and counts only, no error
+// text, so a failing component cannot leak through the status or the log.
+package supervisor
 
 import (
 	"context"
@@ -14,7 +18,7 @@ import (
 )
 
 // ErrShutdownTimeout means a component did not stop within the shutdown budget.
-var ErrShutdownTimeout = errors.New("daemon: a component did not stop in time")
+var ErrShutdownTimeout = errors.New("supervisor: a component did not stop in time")
 
 // Component states reported by Status.
 const (
@@ -46,6 +50,11 @@ type Supervisor struct {
 	MinBackoff time.Duration // zero means 250ms
 	// ShutdownTimeout bounds how long Run waits for components after ctx ends. Zero means 10s.
 	ShutdownTimeout time.Duration
+
+	// Test seams: the clock, the random source and the wait between restarts.
+	now   func() time.Time
+	rnd   func(n int64) int64
+	sleep func(ctx context.Context, d time.Duration) bool
 
 	mu     sync.Mutex
 	status map[string]*ComponentStatus
@@ -92,11 +101,7 @@ func (s *Supervisor) Run(ctx context.Context, comps ...Component) error {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	<-ctx.Done()
-	budget := s.ShutdownTimeout
-	if budget <= 0 {
-		budget = 10 * time.Second
-	}
-	t := time.NewTimer(budget)
+	t := time.NewTimer(s.budget())
 	defer t.Stop()
 	select {
 	case <-done:
@@ -106,39 +111,81 @@ func (s *Supervisor) Run(ctx context.Context, comps ...Component) error {
 	}
 }
 
-func (s *Supervisor) supervise(ctx context.Context, c Component) {
-	minB, maxB := s.MinBackoff, c.MaxBackoff
+const (
+	// Written as single literals (nanoseconds): a product such as 30 * time.Second
+	// has no statement for the mutation gate to cover. TestConstantsArePinned pins them.
+	defaultMinBackoff = time.Duration(250_000_000)    // 250ms
+	defaultMaxBackoff = time.Duration(30_000_000_000) // 30s
+	defaultShutdown   = time.Duration(10_000_000_000) // 10s
+)
+
+func (s *Supervisor) budget() time.Duration {
+	if s.ShutdownTimeout <= 0 {
+		return defaultShutdown
+	}
+	return s.ShutdownTimeout
+}
+
+func (s *Supervisor) bounds(c Component) (minB, maxB time.Duration) {
+	minB, maxB = s.MinBackoff, c.MaxBackoff
 	if minB <= 0 {
-		minB = 250 * time.Millisecond
+		minB = defaultMinBackoff
 	}
 	if maxB <= 0 {
-		maxB = 30 * time.Second
+		maxB = defaultMaxBackoff
 	}
+	return minB, maxB
+}
+
+func (s *Supervisor) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *Supervisor) pause(ctx context.Context, d time.Duration) bool {
+	if s.sleep != nil {
+		return s.sleep(ctx, d)
+	}
+	return sleepCtx(ctx, d)
+}
+
+// jitter returns d scaled by 0.5..1.0 so restarts across devices do not align.
+func (s *Supervisor) jitter(d time.Duration) time.Duration {
+	n := rand.Int64N
+	if s.rnd != nil {
+		n = s.rnd
+	}
+	return d/2 + time.Duration(n(int64(d/2)+1))
+}
+
+func (s *Supervisor) supervise(ctx context.Context, c Component) {
+	minB, maxB := s.bounds(c)
 	delay := minB
+	defer s.set(c.Name, func(st *ComponentStatus) { st.State = StateStopped })
 	for ctx.Err() == nil {
 		s.set(c.Name, func(st *ComponentStatus) { st.State = StateRunning })
-		start := time.Now()
+		start := s.clock()
 		err, panicked := runRecover(ctx, c.Run)
 		if ctx.Err() != nil {
-			break
+			return
 		}
 		if err == nil && !panicked {
-			s.set(c.Name, func(st *ComponentStatus) { st.State = StateStopped })
 			s.Log.Info("component finished", logx.ID("component", c.Name))
 			return
 		}
 		// Neither the error nor the panic value is logged: either can carry content.
 		s.Log.Warn("component failed, restarting", logx.ID("component", c.Name))
 		s.set(c.Name, func(st *ComponentStatus) { st.State = StateBackoff; st.Restarts++ })
-		if time.Since(start) > maxB { // it ran a good while: start the backoff over
+		if s.clock().Sub(start) > maxB { // it ran a good while: start the backoff over
 			delay = minB
 		}
-		if !sleepCtx(ctx, jitter(delay)) {
-			break
+		if !s.pause(ctx, s.jitter(delay)) {
+			return
 		}
 		delay = min(delay*2, maxB)
 	}
-	s.set(c.Name, func(st *ComponentStatus) { st.State = StateStopped })
 }
 
 func runRecover(ctx context.Context, f func(context.Context) error) (err error, panicked bool) {
@@ -149,9 +196,6 @@ func runRecover(ctx context.Context, f func(context.Context) error) (err error, 
 	}()
 	return f(ctx), false
 }
-
-// jitter returns d scaled by 0.5..1.0 so restarts across devices do not align.
-func jitter(d time.Duration) time.Duration { return d/2 + time.Duration(rand.Int64N(int64(d/2)+1)) }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)

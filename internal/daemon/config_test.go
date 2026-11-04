@@ -121,3 +121,19 @@ func TestDefaultDirs(t *testing.T) {
 		t.Errorf("PARLEY_HOME: %+v %v", d, err)
 	}
 }
+
+func TestDefaultDirsAreAbsolute(t *testing.T) {
+	d, err := DefaultDirs(func(string) string { return "@home" }, nil)
+	if err != nil || !filepath.IsAbs(d.Config) || !filepath.IsAbs(d.State) || !filepath.IsAbs(d.SocketPath()) {
+		t.Errorf("PARLEY_HOME=@home gave %+v, %v", d, err)
+	}
+}
+
+func TestRefreshIntervalHasAnUpperBound(t *testing.T) {
+	if _, err := ParseConfig([]byte(goodJSON(`,"refresh_interval":"25h"`))); !errors.Is(err, ErrConfig) {
+		t.Errorf("a refresh interval longer than 24h must be refused: %v", err)
+	}
+	if _, err := ParseConfig([]byte(goodJSON(`,"refresh_interval":"24h"`))); err != nil {
+		t.Errorf("24h is allowed: %v", err)
+	}
+}

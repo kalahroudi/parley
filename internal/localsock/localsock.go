@@ -1,7 +1,14 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package daemon
+// Package localsock is the daemon's local control socket: one JSON request per
+// connection, answered only to processes of the daemon's own user. The socket
+// lives in a private directory (see fsperm); on Linux and macOS the kernel also
+// attests the peer's uid on every connection, so a mis-set mode or a bind mount
+// cannot open the daemon to other users. On Windows the protected DACL on the
+// directory is the restriction (AF_UNIX there carries no peer credentials).
+// Requests and the number of open connections are bounded.
+package localsock
 
 import (
 	"context"
@@ -12,18 +19,21 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
+	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/logx"
 )
 
+// The limits are single literals: a product such as 64 << 10 has no statement
+// for the mutation gate to cover. TestConstantsArePinned pins them.
 const (
-	// maxSocketPath keeps the path under the smallest sun_path limit (104 on macOS).
-	maxSocketPath   = 100
-	maxRequestBytes = 64 << 10
-	connDeadline    = 30 * time.Second
+	// MaxPath keeps the path under the smallest sun_path limit (104 on macOS).
+	MaxPath         = 100
+	maxRequestBytes = 65536                         // 64 KiB
+	connDeadline    = time.Duration(30_000_000_000) // 30s
+	acceptRetry     = time.Duration(10_000_000)     // 10ms
 	maxConns        = 32
 )
 
@@ -32,7 +42,7 @@ const (
 // reported as "internal" and its text is never sent or logged.
 type RPCError struct{ Code string }
 
-func (e *RPCError) Error() string { return "daemon: rpc error " + e.Code }
+func (e *RPCError) Error() string { return "localsock: rpc error " + e.Code }
 
 // Method handles one local request. params is the raw JSON the client sent.
 type Method func(ctx context.Context, params json.RawMessage) (any, error)
@@ -49,53 +59,63 @@ type Response struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// listenSocket binds the local socket inside a private directory. The caller
-// must hold the instance lock, which is what makes removing a stale socket
-// file safe.
-func listenSocket(path string) (net.Listener, error) {
+// Seams for tests: the OS calls that cannot be made to fail on a healthy machine.
+var (
+	listenUnix = func(path string) (net.Listener, error) { return net.Listen("unix", path) }
+	removeFile = os.Remove
+	dialUnix   = func(ctx context.Context, path string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", path)
+	}
+)
+
+// Listen binds the local socket inside a private directory. The caller must
+// hold the instance lock, which is what makes removing a stale socket file
+// safe: nothing else of this user's can be listening on it.
+func Listen(path string) (net.Listener, error) {
 	// A path starting with "@" would bind a Linux abstract socket, which has no
 	// file mode and is reachable by every user; absolute paths never do.
 	if !filepath.IsAbs(path) {
-		return nil, errors.New("daemon: socket path must be absolute")
+		return nil, errors.New("localsock: socket path must be absolute")
 	}
-	if len(path) > maxSocketPath {
-		return nil, fmt.Errorf("daemon: socket path is longer than %d characters; use a shorter config directory", maxSocketPath)
+	if len(path) > MaxPath {
+		return nil, fmt.Errorf("localsock: socket path is longer than %d characters; use a shorter config directory", MaxPath)
 	}
-	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+	if err := fsperm.EnsureDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode().Type()&os.ModeSocket == 0 {
-			return nil, fmt.Errorf("daemon: %s exists and is not a socket", path)
+			return nil, fmt.Errorf("localsock: %s exists and is not a socket", path)
 		}
-		if err := os.Remove(path); err != nil {
-			return nil, fmt.Errorf("daemon: remove stale socket: %w", err)
+		if err := removeFile(path); err != nil {
+			return nil, fmt.Errorf("localsock: remove stale socket: %w", err)
 		}
 	}
-	ln, err := net.Listen("unix", path)
+	ln, err := listenUnix(path)
 	if err != nil {
-		return nil, fmt.Errorf("daemon: listen: %w", err)
+		return nil, fmt.Errorf("localsock: listen: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil && runtime.GOOS != "windows" {
+	if err := restrict(path); err != nil {
 		ln.Close()
-		return nil, fmt.Errorf("daemon: restrict socket: %w", err)
+		return nil, fmt.Errorf("localsock: restrict socket: %w", err)
 	}
 	return ln, nil
 }
 
-// server answers requests on the local socket, one request per connection.
-type server struct {
-	log     *logx.Logger
-	methods map[string]Method
-	uid     int // the only user whose processes may connect
+// Server answers requests on the local socket, one request per connection.
+type Server struct {
+	Log     *logx.Logger
+	Methods map[string]Method
+	UID     int // the only user whose processes may connect (ignored on Windows)
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
 }
 
-// serve accepts connections until ctx ends, then closes the listener and every
+// Serve accepts connections until ctx ends, then closes the listener and every
 // open connection and waits for the handlers to return.
-func (s *server) serve(ctx context.Context, ln net.Listener) {
+func (s *Server) Serve(ctx context.Context, ln net.Listener) {
 	s.conns = map[net.Conn]struct{}{}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxConns)
@@ -114,19 +134,19 @@ func (s *server) serve(ctx context.Context, ln net.Listener) {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				break
 			}
-			time.Sleep(10 * time.Millisecond) // transient accept error: do not spin
+			time.Sleep(acceptRetry) // transient accept error: do not spin
 			continue
 		}
-		if err := checkPeer(c, s.uid); err != nil {
+		if err := checkPeer(c, s.UID); err != nil {
 			c.Close()
-			s.log.Warn("local connection refused: not this user")
+			s.Log.Warn("local connection refused: not this user")
 			continue
 		}
 		select {
 		case sem <- struct{}{}:
 		default:
 			c.Close()
-			s.log.Warn("local connection refused: too many open", logx.Size("count", maxConns))
+			s.Log.Warn("local connection refused: too many open", logx.Size("count", maxConns))
 			continue
 		}
 		s.mu.Lock()
@@ -153,7 +173,7 @@ func (s *server) serve(ctx context.Context, ln net.Listener) {
 	wg.Wait()
 }
 
-func (s *server) handle(ctx context.Context, c net.Conn) {
+func (s *Server) handle(ctx context.Context, c net.Conn) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(connDeadline))
 	var req request
@@ -162,7 +182,7 @@ func (s *server) handle(ctx context.Context, c net.Conn) {
 		reply(c, Response{Error: "bad_request"})
 		return
 	}
-	m, ok := s.methods[req.Method]
+	m, ok := s.Methods[req.Method]
 	if !ok {
 		reply(c, Response{Error: "unknown_method"})
 		return
@@ -173,7 +193,7 @@ func (s *server) handle(ctx context.Context, c net.Conn) {
 		if errors.As(err, &re) {
 			reply(c, Response{Error: re.Code})
 		} else {
-			s.log.Error("local request failed")
+			s.Log.Error("local request failed")
 			reply(c, Response{Error: "internal"})
 		}
 		return
@@ -191,17 +211,15 @@ func reply(c net.Conn, r Response) { _ = json.NewEncoder(c).Encode(r) }
 // Call sends one request to the daemon's socket and returns its reply. It is
 // what parley-cli uses; it has no retries and a bounded wait.
 func Call(ctx context.Context, socketPath, method string, params any) (Response, error) {
-	var d net.Dialer
 	ctx, cancel := context.WithTimeout(ctx, connDeadline)
 	defer cancel()
-	c, err := d.DialContext(ctx, "unix", socketPath)
+	c, err := dialUnix(ctx, socketPath)
 	if err != nil {
-		return Response{}, fmt.Errorf("daemon: not running or not reachable: %w", err)
+		return Response{}, fmt.Errorf("localsock: daemon not running or not reachable: %w", err)
 	}
 	defer c.Close()
-	if dl, ok := ctx.Deadline(); ok {
-		c.SetDeadline(dl)
-	}
+	dl, _ := ctx.Deadline() // always set: the context has a timeout
+	c.SetDeadline(dl)
 	req := request{Method: method}
 	if params != nil {
 		if req.Params, err = json.Marshal(params); err != nil {
@@ -213,7 +231,7 @@ func Call(ctx context.Context, socketPath, method string, params any) (Response,
 	}
 	var r Response
 	if err := json.NewDecoder(io.LimitReader(c, maxRequestBytes)).Decode(&r); err != nil {
-		return Response{}, fmt.Errorf("daemon: bad reply: %w", err)
+		return Response{}, fmt.Errorf("localsock: bad reply: %w", err)
 	}
 	return r, nil
 }

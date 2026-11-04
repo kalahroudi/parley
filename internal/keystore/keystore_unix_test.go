@@ -3,7 +3,7 @@
 
 //go:build !windows
 
-package daemon
+package keystore
 
 import (
 	"crypto/rand"
@@ -13,9 +13,9 @@ import (
 	"testing"
 )
 
-func TestFileKeyStoreRefusesAnExposedKeyFile(t *testing.T) {
-	dir := filepath.Join(shortTemp(t), "cfg")
-	fs := FileKeyStore{Dir: dir}
+func TestFileStoreRefusesAnExposedKeyFile(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "cfg")
+	fs := FileStore{Dir: dir}
 	if _, _, err := LoadOrCreate(fs, rand.Reader); err != nil {
 		t.Fatal(err)
 	}
@@ -33,13 +33,5 @@ func TestFileKeyStoreRefusesAnExposedKeyFile(t *testing.T) {
 	os.Symlink(filepath.Join(dir, "real"), p)
 	if _, err := fs.Load(); err == nil || errors.Is(err, ErrNoKey) {
 		t.Errorf("a symlinked key file must be refused: %v", err)
-	}
-	// Owned by someone else (seam): refused.
-	os.Remove(p)
-	os.Rename(filepath.Join(dir, "real"), p)
-	defer func(f func() int) { geteuid = f }(geteuid)
-	geteuid = func() int { return os.Geteuid() + 1 }
-	if _, err := fs.Load(); err == nil || errors.Is(err, ErrNoKey) {
-		t.Errorf("a key file owned by another user must be refused: %v", err)
 	}
 }

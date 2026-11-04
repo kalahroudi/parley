@@ -22,14 +22,10 @@
 //     Sending must go through Daemon.Trust, which refuses when the binding or
 //     revocation state is missing, stale or rolled back.
 //
-// Key storage guarantees, by key_store: "keychain" keeps the seed in the macOS
-// Keychain, Windows Credential Manager or the Linux Secret Service, protected
-// by the OS login session (access by this user's processes, not by other
-// users); "file" keeps it in device.key (mode 0600, owner checked, in a 0700
-// directory, or a protected DACL on Windows) with no protection against other
-// processes of the same user or against root. A missing key is created once; a
-// corrupt, unreadable or exposed one stops startup, and the device must be
-// re-enrolled deliberately. Zeroing the key in memory is best effort.
+// The security-critical pieces live in their own tier 1 packages: keystore
+// (the device key and what each OS guarantees), fsperm (private directories and
+// files, the instance lock), localsock (the OS-user-restricted socket) and
+// supervisor (restart decisions). This package wires them to the configuration.
 package daemon
 
 import (

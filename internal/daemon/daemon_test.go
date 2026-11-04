@@ -21,9 +21,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/kalahroudi/parley/internal/fsperm"
+	"github.com/kalahroudi/parley/internal/keystore"
+	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/logx"
 	"github.com/kalahroudi/parley/internal/revocation"
 	"github.com/kalahroudi/parley/internal/root"
+	"github.com/kalahroudi/parley/internal/supervisor"
 	"github.com/kalahroudi/parley/internal/tunnel"
 )
 
@@ -99,7 +103,7 @@ func (e *env) start(t *testing.T, mod func(*Deps)) *running {
 func waitUp(t *testing.T, e *env) {
 	t.Helper()
 	waitFor(t, "daemon to answer", func() bool {
-		r, err := Call(context.Background(), e.dirs.SocketPath(), "status", nil)
+		r, err := localsock.Call(context.Background(), e.dirs.SocketPath(), "status", nil)
 		return err == nil && r.OK
 	})
 }
@@ -119,7 +123,7 @@ func (r *running) stop(t *testing.T) error {
 
 func status(t *testing.T, e *env) StatusInfo {
 	t.Helper()
-	r, err := Call(context.Background(), e.dirs.SocketPath(), "status", nil)
+	r, err := localsock.Call(context.Background(), e.dirs.SocketPath(), "status", nil)
 	if err != nil || !r.OK {
 		t.Fatalf("status: %+v %v", r, err)
 	}
@@ -219,7 +223,7 @@ func TestNewFailsClosed(t *testing.T) {
 		"no logger":      func(d *Deps) { d.Log = nil },
 		"harden fails":   func(d *Deps) { d.Harden = func() error { return errors.New("no") } },
 		"entropy":        func(d *Deps) { d.Rand = failRand{} },
-		"key store down": func(d *Deps) { d.Keys = &failSave{} },
+		"key store down": func(d *Deps) { d.Keys = failSave{} },
 	}
 	for name, mod := range cases {
 		deps := base
@@ -232,7 +236,7 @@ func TestNewFailsClosed(t *testing.T) {
 	os.MkdirAll(e.dirs.Config, 0o700)
 	kp := filepath.Join(e.dirs.Config, "device.key")
 	os.WriteFile(kp, []byte("junk"), 0o600)
-	if _, err := New(e.cfg, e.dirs, base); !errors.Is(err, ErrKeyCorrupt) {
+	if _, err := New(e.cfg, e.dirs, base); !errors.Is(err, keystore.ErrKeyCorrupt) {
 		t.Errorf("corrupt key: %v", err)
 	}
 	if b, _ := os.ReadFile(kp); string(b) != "junk" {
@@ -276,18 +280,18 @@ func TestRunFailsWhenInstanceLockCannotBeOpened(t *testing.T) {
 func TestNewUsesKeychainByDefault(t *testing.T) {
 	e := newEnv(t)
 	e.cfg.KeyStore = KeyStoreKeychain
-	if _, ok := keyStoreFor(e.cfg, e.dirs).(*KeychainStore); !ok {
+	if _, ok := keyStoreFor(e.cfg, e.dirs).(*keystore.KeychainStore); !ok {
 		t.Error("keychain is the default key store")
 	}
 	e.cfg.KeyStore = KeyStoreFile
-	if _, ok := keyStoreFor(e.cfg, e.dirs).(FileKeyStore); !ok {
+	if _, ok := keyStoreFor(e.cfg, e.dirs).(keystore.FileStore); !ok {
 		t.Error("file key store on request")
 	}
 }
 
 func TestRunFailsOnBadSocketPath(t *testing.T) {
 	e := newEnv(t)
-	e.dirs.State = filepath.Join(e.dirs.State, strings.Repeat("a", maxSocketPath))
+	e.dirs.State = filepath.Join(e.dirs.State, strings.Repeat("a", localsock.MaxPath))
 	d, err := New(e.cfg, e.dirs, e.deps())
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +313,7 @@ func TestHandleRegistersMethods(t *testing.T) {
 	go func() { done <- d.Run(ctx) }()
 	defer func() { cancel(); <-done }()
 	waitUp(t, e)
-	if r, err := Call(context.Background(), e.dirs.SocketPath(), "ping", nil); err != nil || string(r.Result) != `"pong"` {
+	if r, err := localsock.Call(context.Background(), e.dirs.SocketPath(), "ping", nil); err != nil || string(r.Result) != `"pong"` {
 		t.Errorf("%+v %v", r, err)
 	}
 }
@@ -319,13 +323,13 @@ func TestTunnelWaitsForConnectToken(t *testing.T) {
 	e.start(t, nil) // the default TunnelConfig returns ErrNoConnectToken
 	waitFor(t, "tunnel in backoff with restarts", func() bool {
 		for _, c := range status(t, e).Components {
-			if c.Name == "tunnel" && c.Restarts >= 2 && c.State == StateBackoff {
+			if c.Name == "tunnel" && c.Restarts >= 2 && c.State == supervisor.StateBackoff {
 				return true
 			}
 		}
 		return false
 	})
-	if status(t, e).Components[1].State != StateRunning {
+	if status(t, e).Components[1].State != supervisor.StateRunning {
 		t.Error("a missing connect token must not stop the other components")
 	}
 }
@@ -425,5 +429,38 @@ func TestNewLogger(t *testing.T) {
 	NewLogger(&b, "").Info("default")
 	if b.Len() == 0 {
 		t.Error("default level must log info")
+	}
+}
+
+// Two daemons starting together on a first run must not both mint a key: the
+// keychain keeps only the last write, so one would run under an identity that is
+// stored nowhere.
+func TestFirstRunKeyCreationNeedsTheInstanceLock(t *testing.T) {
+	e := newEnv(t)
+	if err := fsperm.EnsureDir(e.dirs.State); err != nil {
+		t.Fatal(err)
+	}
+	release, err := lockState(e.dirs.State) // another daemon is starting
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(e.cfg, e.dirs, e.deps()); !errors.Is(err, ErrAlreadyRunning) {
+		t.Errorf("first run under a held lock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.dirs.Config, "device.key")); err == nil {
+		t.Error("a device key was created without the lock")
+	}
+	release()
+	if _, err := New(e.cfg, e.dirs, e.deps()); err != nil {
+		t.Fatal(err)
+	}
+	// With the key in place a running daemon's lock does not block New.
+	release, err = lockState(e.dirs.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := New(e.cfg, e.dirs, e.deps()); err != nil {
+		t.Errorf("New with a key present: %v", err)
 	}
 }

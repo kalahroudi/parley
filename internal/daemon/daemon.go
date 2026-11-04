@@ -17,10 +17,14 @@ import (
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
+	"github.com/kalahroudi/parley/internal/fsperm"
+	"github.com/kalahroudi/parley/internal/keystore"
+	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/logx"
 	"github.com/kalahroudi/parley/internal/prekey"
 	"github.com/kalahroudi/parley/internal/revocation"
 	"github.com/kalahroudi/parley/internal/root"
+	"github.com/kalahroudi/parley/internal/supervisor"
 	"github.com/kalahroudi/parley/internal/trust"
 	"github.com/kalahroudi/parley/internal/tunnel"
 )
@@ -65,7 +69,7 @@ type Deps struct {
 	Log *logx.Logger // required
 	Now func() time.Time
 	// Keys overrides the key store chosen by Config.KeyStore.
-	Keys KeyStore
+	Keys keystore.KeyStore
 	Rand io.Reader
 	// Harden is called first; a failure stops startup. Default: prekey.Harden
 	// (no core dumps, no Go tracebacks).
@@ -92,8 +96,8 @@ type Daemon struct {
 	tracker *binding.Tracker
 	guard   *revocation.Guard
 	trust   *trust.Daemon
-	sup     *Supervisor
-	srv     *server
+	sup     *supervisor.Supervisor
+	srv     *localsock.Server
 	started time.Time
 }
 
@@ -124,7 +128,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: hardening failed: %w", err)
 	}
 	for _, dir := range []string{dirs.Config, dirs.State} {
-		if err := ensurePrivateDir(dir); err != nil {
+		if err := fsperm.EnsureDir(dir); err != nil {
 			return nil, err
 		}
 	}
@@ -132,7 +136,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	if ks == nil {
 		ks = keyStoreFor(cfg, dirs)
 	}
-	signer, created, err := loadOrCreateOnce(ks, deps.Rand, dirs.State)
+	signer, created, err := keystore.LoadOrCreateLocked(ks, deps.Rand, instanceLock(dirs.State))
 	if err != nil {
 		return nil, err
 	}
@@ -142,12 +146,12 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	rootPub := ed25519.PublicKey(cfg.RootPublicKey)
 	tracker, err := binding.NewTracker(rootPub, binding.NewFileStore(filepath.Join(dirs.State, "bindings.json")))
 	if err != nil {
-		zero(signer)
+		keystore.Zero(signer)
 		return nil, err
 	}
 	guard, err := revocation.NewGuard(rootPub, cfg.Tenant, revocation.NewFileStore(filepath.Join(dirs.State, "revocations.json")), deps.Now())
 	if err != nil {
-		zero(signer)
+		keystore.Zero(signer)
 		return nil, err
 	}
 	d := &Daemon{
@@ -156,9 +160,9 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 			Tracker: tracker, Guard: guard, Tenant: cfg.Tenant,
 			Client: &trust.Client{BaseURL: cfg.GatewayURL, HTTP: deps.HTTP},
 		},
-		sup: &Supervisor{Log: deps.Log, MinBackoff: deps.MinBackoff, ShutdownTimeout: deps.ShutdownTimeout},
+		sup: &supervisor.Supervisor{Log: deps.Log, MinBackoff: deps.MinBackoff, ShutdownTimeout: deps.ShutdownTimeout},
 	}
-	d.srv = &server{log: deps.Log, uid: os.Geteuid(), methods: map[string]Method{"status": d.status}}
+	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status}}
 	return d, nil
 }
 
@@ -167,15 +171,15 @@ func noConnectToken(context.Context, ed25519.PrivateKey) (tunnel.Config, error) 
 	return tunnel.Config{}, ErrNoConnectToken
 }
 
-func keyStoreFor(cfg Config, dirs Dirs) KeyStore {
+func keyStoreFor(cfg Config, dirs Dirs) keystore.KeyStore {
 	if cfg.KeyStore == KeyStoreFile {
-		return FileKeyStore{Dir: dirs.Config}
+		return keystore.FileStore{Dir: dirs.Config}
 	}
-	return NewKeychainStore(cfg.DeviceID)
+	return &keystore.KeychainStore{Account: cfg.DeviceID, KR: osKeyring{}}
 }
 
 // Handle registers a local socket method. Call it before Run.
-func (d *Daemon) Handle(name string, m Method) { d.srv.methods[name] = m }
+func (d *Daemon) Handle(name string, m localsock.Method) { d.srv.Methods[name] = m }
 
 // SigningKey is the device's Ed25519 key. It stays in this process.
 func (d *Daemon) SigningKey() ed25519.PrivateKey { return d.signer }
@@ -185,12 +189,12 @@ func (d *Daemon) Trust() *trust.Daemon { return d.trust }
 
 // StatusInfo is what the "status" method returns: metadata only.
 type StatusInfo struct {
-	Tenant      string            `json:"tenant"`
-	Device      string            `json:"device"`
-	RootPrint   string            `json:"root_fingerprint"`
-	Uptime      int64             `json:"uptime_seconds"`
-	Components  []ComponentStatus `json:"components"`
-	Revocations string            `json:"revocation_warning"` // fixed text from trust.Daemon.Warning, or ""
+	Tenant      string                       `json:"tenant"`
+	Device      string                       `json:"device"`
+	RootPrint   string                       `json:"root_fingerprint"`
+	Uptime      int64                        `json:"uptime_seconds"`
+	Components  []supervisor.ComponentStatus `json:"components"`
+	Revocations string                       `json:"revocation_warning"` // fixed text from trust.Daemon.Warning, or ""
 }
 
 func (d *Daemon) status(context.Context, json.RawMessage) (any, error) {
@@ -206,16 +210,16 @@ func (d *Daemon) status(context.Context, json.RawMessage) (any, error) {
 // Run serves the local socket and the supervised components until ctx ends,
 // then shuts down in order: stop accepting and close local connections, stop
 // the components (tunnel first closes its socket), remove the socket file, wipe
-// the key and release the instance lock. It returns ErrShutdownTimeout if a
+// the key and release the instance lock. It returns supervisor.ErrShutdownTimeout if a
 // component would not stop.
 func (d *Daemon) Run(ctx context.Context) error {
-	defer zero(d.signer)
+	defer keystore.Zero(d.signer)
 	release, err := lockState(d.dirs.State)
 	if err != nil {
 		return err
 	}
 	defer release()
-	ln, err := listenSocket(d.dirs.SocketPath())
+	ln, err := localsock.Listen(d.dirs.SocketPath())
 	if err != nil {
 		return err
 	}
@@ -226,7 +230,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	sctx, stopServing := context.WithCancel(ctx)
 	defer stopServing()
 	served := make(chan struct{})
-	go func() { d.srv.serve(sctx, ln); close(served) }()
+	go func() { d.srv.Serve(sctx, ln); close(served) }()
 
 	err = d.sup.Run(ctx, d.components()...)
 	stopServing()
@@ -235,43 +239,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
-// loadOrCreateOnce is LoadOrCreate with the instance lock held around the
-// creation. Two daemons starting together on a first run would otherwise both
-// find no key and both mint one, and the keychain keeps only the last write:
-// the loser would run under an identity that is stored nowhere. The common case
-// (key present) takes no lock, so a running daemon never blocks a second New.
-func loadOrCreateOnce(ks KeyStore, rnd io.Reader, stateDir string) (ed25519.PrivateKey, bool, error) {
-	if key, err := ks.Load(); !errors.Is(err, ErrNoKey) {
-		return key, false, err
-	}
-	release, err := lockState(stateDir)
-	if err != nil {
-		return nil, false, err
-	}
-	defer release()
-	return LoadOrCreate(ks, rnd)
+// instanceLock is lockState for a state directory, as a function value.
+func instanceLock(stateDir string) func() (func(), error) {
+	return func() (func(), error) { return lockState(stateDir) }
 }
 
 // lockState takes the per-device instance lock; the lock file lives in the
 // state directory and the kernel frees it when the process exits.
 func lockState(stateDir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(stateDir, "parleyd.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("daemon: open instance lock: %w", err)
-	}
-	ok, err := tryLockFile(f)
-	if err != nil || !ok {
-		f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("daemon: instance lock: %w", err)
-		}
+	release, err := fsperm.Lock(filepath.Join(stateDir, "parleyd.lock"))
+	if errors.Is(err, fsperm.ErrLocked) {
 		return nil, ErrAlreadyRunning
 	}
-	return func() { f.Close() }, nil
+	return release, err
 }
 
-func (d *Daemon) components() []Component {
-	return []Component{
+func (d *Daemon) components() []supervisor.Component {
+	return []supervisor.Component{
 		{Name: "tunnel", Run: d.runTunnel, MaxBackoff: 5 * time.Minute},
 		{Name: "revocations", Run: d.runRefresh},
 	}

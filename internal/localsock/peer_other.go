@@ -3,7 +3,7 @@
 
 //go:build !linux && !darwin && !windows
 
-package daemon
+package localsock
 
 import (
 	"errors"
@@ -12,4 +12,4 @@ import (
 
 // checkPeer refuses everything on platforms Parley does not support, so an
 // untested port fails closed instead of running without the peer check.
-func checkPeer(net.Conn, int) error { return errors.New("daemon: unsupported platform") }
+func checkPeer(net.Conn, int) error { return errors.New("localsock: unsupported platform") }
