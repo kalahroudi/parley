@@ -1,0 +1,268 @@
+{
+  "go": [
+    {
+      "package": "internal/binding",
+      "file": "binding.go",
+      "line": 20,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/binding",
+      "file": "store.go",
+      "line": 50,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/binding",
+      "file": "store.go",
+      "line": 51,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/binding",
+      "file": "syncdir_unix.go",
+      "line": 13,
+      "type": "CONDITIONALS_NEGATION",
+      "status": "LIVED",
+      "reason": "Equivalent: if os.Open fails the nil file's Sync returns an error too, so the failure path looks the same; only the directory fsync that makes the rename durable is skipped, which no test can observe."
+    },
+    {
+      "package": "internal/envelope",
+      "file": "envelope.go",
+      "line": 41,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/envelope",
+      "file": "envelope.go",
+      "line": 42,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/envelope",
+      "file": "envelope.go",
+      "line": 57,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/envelope",
+      "file": "file.go",
+      "line": 36,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/envelope",
+      "file": "file.go",
+      "line": 40,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/envelope",
+      "file": "pad.go",
+      "line": 17,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "mem_unix.go",
+      "line": 12,
+      "type": "ARITHMETIC_BASE",
+      "status": "LIVED",
+      "reason": "Equivalent on Linux: with MAP_ANON the kernel ignores the fd argument (-1 is only required by BSD and macOS, where the macOS CI job fails if it changes)."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "mem_unix.go",
+      "line": 12,
+      "type": "INVERT_NEGATIVES",
+      "status": "LIVED",
+      "reason": "Equivalent on Linux: with MAP_ANON the kernel ignores the fd argument (-1 is only required by BSD and macOS, where the macOS CI job fails if it changes)."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "prekey.go",
+      "line": 68,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "prekey.go",
+      "line": 70,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "prekey.go",
+      "line": 72,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "prekey.go",
+      "line": 76,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "prekey.go",
+      "line": 82,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/prekey",
+      "file": "prekey.go",
+      "line": 84,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 46,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 50,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 52,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/outbox",
+      "file": "outbox.go",
+      "line": 66,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/receive",
+      "file": "receive.go",
+      "line": 60,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/receive",
+      "file": "receive.go",
+      "line": 87,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/replay",
+      "file": "replay.go",
+      "line": 26,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/replay",
+      "file": "replay.go",
+      "line": 29,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/replay",
+      "file": "replay.go",
+      "line": 31,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/replay",
+      "file": "replay.go",
+      "line": 34,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/revocation",
+      "file": "revocation.go",
+      "line": 24,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/revocation",
+      "file": "revocation.go",
+      "line": 26,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/revocation",
+      "file": "revocation.go",
+      "line": 28,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/revocation",
+      "file": "revocation.go",
+      "line": 30,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/revocation",
+      "file": "store.go",
+      "line": 47,
+      "type": "CONDITIONALS_NEGATION",
+      "status": "LIVED",
+      "reason": "Equivalent: if os.Open fails the nil file's Sync returns an error too, so the failure path looks the same; only the directory fsync that makes the rename durable is skipped, which no test can observe."
+    }
+  ]
+}

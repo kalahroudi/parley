@@ -36,8 +36,6 @@ const MAX_HEADER = 1 << 14; // real headers are under 1 KiB (the prekey object i
 const MAX_WIRE = 4 * 4 + MAX_HEADER + KEY_SIZE + MAX_BUCKET + TAG + SIG_SIZE; // upper bound, header fields at their caps
 export const MAX_RAW_CHARS = Math.ceil(MAX_WIRE / 3) * 4;
 
-const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-
 export interface Shape {
   kind: SignedKind;
   tenant: string;
@@ -79,7 +77,8 @@ class Reader {
     return this.take(n);
   }
   str(): string {
-    return utf8.decode(this.field());
+    // Built per call, not at import: a broken decoder must fail a test, not stop the module from loading.
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(this.field());
   }
 }
 

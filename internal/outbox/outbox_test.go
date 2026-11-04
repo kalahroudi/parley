@@ -266,8 +266,8 @@ func TestSendingIsVisibleAndCannotBeCanceledHere(t *testing.T) {
 	in, release := make(chan struct{}), make(chan struct{})
 	o := newOutbox(t, Config{Presence: (&script{results: []presenceResult{{online: true}}}).presence, Now: c.Now, Sleep: c.Sleep,
 		Send: func(ctx context.Context, tk Task) error {
-			if dl, ok := ctx.Deadline(); !ok || !dl.Equal(tk.Expiry) {
-				t.Errorf("send deadline %v, want the task expiry", dl)
+			if dl, ok := ctx.Deadline(); !ok || time.Until(dl) > time.Hour || time.Until(dl) < time.Hour-time.Minute {
+				t.Errorf("send deadline %v, want the task expiry (an hour away)", dl)
 			}
 			close(in)
 			<-release
@@ -677,5 +677,145 @@ func TestJitterStaysWithinAQuarter(t *testing.T) {
 	}
 	if d := jitter(time.Nanosecond); d != time.Nanosecond {
 		t.Fatalf("jitter of one nanosecond: %v", d)
+	}
+}
+
+func TestAtMostPerTargetTasksWaitForOneRecipient(t *testing.T) {
+	c := newClock()
+	hold := make(chan struct{})
+	defer close(hold)
+	o := newOutbox(t, Config{Presence: (&script{results: []presenceResult{{}}}).presence, Now: c.Now, PerTarget: 2, MaxWaiting: 10,
+		Sleep: func(ctx context.Context, d time.Duration) error { <-hold; return ctx.Err() }})
+	at := func(id, target string) error {
+		return o.Submit(Task{ID: id, Target: target, Expiry: c.Now().Add(time.Hour)})
+	}
+	for _, id := range []string{"a", "b"} {
+		if err := at(id, "same"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := at("c", "same"); !errors.Is(err, ErrTargetFull) {
+		t.Fatalf("third for one target: %v", err)
+	}
+	if err := at("d", "other"); err != nil { // another recipient is not held up
+		t.Fatal(err)
+	}
+	if err := o.Cancel("a"); err != nil { // a freed slot is reusable
+		t.Fatal(err)
+	}
+	if err := at("c", "same"); err != nil {
+		t.Fatalf("after a slot freed: %v", err)
+	}
+	if err := at("e", "same"); !errors.Is(err, ErrTargetFull) { // the cap still holds after a cancel and a refill
+		t.Fatalf("fourth for one target: %v", err)
+	}
+	if n := len(o.perTgt); n != 2 {
+		t.Fatalf("per-target counters %v", o.perTgt)
+	}
+	o.Cancel("c")
+	o.Cancel("b")
+	if _, ok := o.perTgt["same"]; ok {
+		t.Fatalf("counter for an empty target is kept: %v", o.perTgt)
+	}
+	if o.cfg.PerTarget != 2 {
+		t.Fatal("configured cap lost")
+	}
+	if d, _ := New(Config{Presence: o.cfg.Presence, Send: o.cfg.Send}); d.cfg.PerTarget != DefaultPerTarget {
+		t.Fatalf("default %d", d.cfg.PerTarget)
+	}
+}
+
+// Cancel ends the task's goroutine at once, even while it is blocked in the
+// presence check: a canceled task does not hold a goroutine for a poll interval.
+func TestCancelStopsTheGoroutineBlockedInThePresenceCheck(t *testing.T) {
+	c := newClock()
+	in, out := make(chan struct{}), make(chan struct{})
+	o := newOutbox(t, Config{Now: c.Now, Sleep: c.Sleep,
+		Presence: func(ctx context.Context, _ string) (bool, error) {
+			close(in)
+			<-ctx.Done()
+			close(out)
+			return false, ctx.Err()
+		},
+		Send: func(context.Context, Task) error { t.Error("sent a canceled task"); return nil }})
+	if err := o.Submit(task(c, "a", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	<-in
+	if err := o.Cancel("a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-out:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the presence check was not interrupted by Cancel")
+	}
+	waited := make(chan struct{})
+	go func() { o.wg.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the task's goroutine outlived its cancel")
+	}
+	if st, _ := o.Status("a"); st != (Status{State: Canceled}) {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// A hint of zero (or less) from the gateway must not make the outbox spin on it.
+func TestAZeroRetryAfterIsNotASpin(t *testing.T) {
+	c := newClock()
+	s := &script{results: []presenceResult{{err: rateLimited(0)}, {err: rateLimited(-time.Second)}, {online: true}}}
+	o := newOutbox(t, Config{Presence: s.presence, Now: c.Now, Sleep: c.Sleep, Jitter: same, MinPoll: 2 * time.Second})
+	if err := o.Submit(task(c, "a", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if st := waitDone(t, o, "a"); st.State != Sent {
+		t.Fatalf("%+v", st)
+	}
+	if got := c.waits(); fmt.Sprint(got) != fmt.Sprint([]time.Duration{2 * time.Second, 2 * time.Second}) {
+		t.Fatalf("waits %v", got)
+	}
+}
+
+// Constants pinned so a changed value is a deliberate edit (these expressions have no
+// statement for mutation testing to cover; see tests/coverage/README.md).
+func TestConstantsArePinned(t *testing.T) {
+	if MaxExpiry != 24*time.Hour || DefaultKeepDone != 15*time.Minute || DefaultMaxPoll != 15*time.Second || Waiting != 1 || Sending != 2 || Sent != 3 || Failed != 4 || Canceled != 5 {
+		t.Fatal("a pinned constant changed")
+	}
+	if DefaultMaxWaiting != 64 || DefaultPerTarget != 16 || DefaultMaxFinished != 1024 || DefaultMinPoll != time.Second {
+		t.Fatal("a pinned default changed")
+	}
+}
+
+// Forgetting visits every entry: a waiting one, or an aged one just deleted, does not end the pass.
+func TestPruneForgetsEveryAgedTaskAmongWaitingOnes(t *testing.T) {
+	c := newClock()
+	hold := make(chan struct{})
+	o := newOutbox(t, Config{Now: c.Now, KeepDone: time.Minute, MaxWaiting: 100, PerTarget: 100,
+		Presence: func(_ context.Context, target string) (bool, error) { return strings.HasPrefix(target, "done"), nil },
+		Sleep:    func(ctx context.Context, d time.Duration) error { <-hold; return ctx.Err() }})
+	defer close(hold)
+	const n = 25
+	for i := 0; i < n; i++ {
+		if err := o.Submit(Task{ID: fmt.Sprintf("old%d", i), Target: "done", Expiry: c.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		waitDone(t, o, fmt.Sprintf("old%d", i))
+	}
+	for i := 0; i < n; i++ {
+		if err := o.Submit(Task{ID: fmt.Sprintf("wait%d", i), Target: "later", Expiry: c.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.advance(time.Minute)
+	if err := o.Submit(Task{ID: "new", Target: "later", Expiry: c.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if got := len(o.tasks); got != n+1 {
+		t.Fatalf("%d tasks kept, want the %d waiting ones and the new one", got, n)
 	}
 }

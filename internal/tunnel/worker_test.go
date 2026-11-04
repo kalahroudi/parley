@@ -6,21 +6,26 @@ package tunnel
 import (
 	"context"
 	"os"
-	"strconv"
 	"testing"
-	"time"
 )
 
 // Runs the client against a real gateway Worker, to catch drift between this
 // package and gateway/src/protocol.ts. Start one with
-// `cd gateway && npx wrangler dev --var DEV_AUTH:1`, then
-// PARLEY_TEST_GATEWAY=ws://127.0.0.1:8787/v1/connect go test ./internal/tunnel.
+// `cd gateway && npx wrangler dev`, then
+// PARLEY_TEST_GATEWAY=ws://127.0.0.1:8787/v1/connect PARLEY_TEST_GATEWAY_TOKEN=<token> go test ./internal/tunnel.
+// The gateway has no development bypass, and device connect tokens are not
+// issued yet (the Worker refuses every /v1/connect), so this stays opt-in
+// until they land.
 func TestAgainstWorker(t *testing.T) {
 	url := os.Getenv("PARLEY_TEST_GATEWAY")
 	if url == "" {
 		t.Skip("PARLEY_TEST_GATEWAY not set")
 	}
-	c := New(Config{URL: url, Token: "dev:tenant-" + time.Now().Format("150405") + "-" + strconv.Itoa(os.Getpid()) + ":dev1"})
+	token := os.Getenv("PARLEY_TEST_GATEWAY_TOKEN")
+	if token == "" {
+		t.Skip("PARLEY_TEST_GATEWAY_TOKEN not set")
+	}
+	c := New(Config{URL: url, Token: token})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- c.Run(ctx) }()

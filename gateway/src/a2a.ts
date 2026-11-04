@@ -4,9 +4,8 @@
 import type { Env } from "./index";
 import { MAX_FRAME_BYTES } from "./protocol";
 import { parseSealedPart, SEALED_MEDIA_TYPE, type Shape } from "./parts";
-import type { Scope } from "./ratelimit";
+import { limitDevice, type Scope } from "./ratelimit";
 import type { Task, TaskEvent, TaskRecord, TaskState } from "./task";
-import type { Tenant } from "./tenant";
 
 export { SEALED_MEDIA_TYPE };
 
@@ -110,15 +109,14 @@ const ok = (id: unknown, result: Json) => Response.json({ jsonrpc: "2.0", id, re
 const fail = (id: unknown, [code, message]: Err) =>
   Response.json({ jsonrpc: "2.0", id, error: { code, message } }, { headers: { "cache-control": "no-store" } });
 
-// Counts one well-formed request against the caller's allowance (Tenant DO):
+// Counts one well-formed request against the caller's allowance (RateLimit DO, src/ratelimit.ts):
 // null to go on, else the 429 to return. Called before anything is written or relayed.
 async function limited(rid: unknown, env: Env, who: Identity, scope: Scope): Promise<Response | null> {
-  const stub = env.TENANT.get(env.TENANT.idFromName(who.tenant)) as DurableObjectStub<Tenant>;
-  const r = await stub.rateLimit(scope, who.device);
-  if (r.ok) return null;
+  const wait = await limitDevice(env, who.tenant, who.device, scope);
+  if (wait === null) return null;
   return Response.json(
-    { jsonrpc: "2.0", id: rid, error: { code: ERR.rateLimited[0], message: ERR.rateLimited[1], data: { retry_after_ms: r.retry_after_ms } } },
-    { status: 429, headers: { "cache-control": "no-store", "retry-after": String(Math.ceil(r.retry_after_ms / 1000)) } },
+    { jsonrpc: "2.0", id: rid, error: { code: ERR.rateLimited[0], message: ERR.rateLimited[1], data: { retry_after_ms: wait } } },
+    { status: 429, headers: { "cache-control": "no-store", "retry-after": String(Math.ceil(wait / 1000)) } },
   );
 }
 

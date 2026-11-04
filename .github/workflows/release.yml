@@ -19,6 +19,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.3" # keep in sync with the toolchain line in go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Release gate (no development auth)
+        run: node scripts/check-dev-auth.mjs
       - name: Build twice and require identical output
         run: |
           set -eu

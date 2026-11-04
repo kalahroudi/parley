@@ -7,7 +7,7 @@
 // asks it for a one-time prekey and sends (the Send hook does both). It gives up
 // at the task's expiry and the task is FAILED. Nothing is written to disk and
 // nothing is sent while waiting: a restart of the caller's daemon fails every
-// pending task (the caller resends), which is the same guarantee as for prekeys.
+// pending task: its status is then unknown, which the caller must report as FAILED and resend. At most PerTarget wait for one target and MaxWaiting in all.
 package outbox
 
 import (
@@ -32,6 +32,7 @@ var (
 	ErrClosed = errors.New("outbox: closed")
 
 	ErrFull        = errors.New("outbox: too many tasks waiting")
+	ErrTargetFull  = errors.New("outbox: too many tasks waiting for this recipient")
 	ErrDuplicate   = errors.New("outbox: task already waiting")
 	ErrInvalid     = errors.New("outbox: invalid task")
 	ErrExpired     = errors.New("outbox: task already expired")
@@ -44,6 +45,7 @@ var (
 const (
 	MaxExpiry          = 24 * time.Hour
 	DefaultMaxWaiting  = 64
+	DefaultPerTarget   = 16
 	DefaultMaxFinished = 1024
 	DefaultKeepDone    = 15 * time.Minute
 	DefaultMinPoll     = time.Second
@@ -101,7 +103,8 @@ type Config struct {
 	// never again after it returned nil or a failure.
 	Send func(ctx context.Context, t Task) error
 
-	MaxWaiting  int           // zero means DefaultMaxWaiting
+	MaxWaiting  int           // all tasks waiting at once, zero means DefaultMaxWaiting
+	PerTarget   int           // tasks waiting for one target, zero means DefaultPerTarget
 	MaxFinished int           // finished tasks remembered, zero means DefaultMaxFinished
 	KeepDone    time.Duration // how long, zero means DefaultKeepDone
 	MinPoll     time.Duration // first wait between presence checks, doubled up to MaxPoll
@@ -115,6 +118,10 @@ type Config struct {
 
 type entry struct {
 	task   Task
+	start  time.Time       // when it was submitted
+	ttl    time.Duration   // time from start to the expiry, so a wall clock that jumps cannot stretch the wait
+	ctx    context.Context // ended when the task finishes, so a canceled task's goroutine stops at once
+	stop   context.CancelFunc
 	status Status
 	done   chan struct{}
 	at     time.Time // when it reached a final state
@@ -130,6 +137,7 @@ type Outbox struct {
 	mu      sync.Mutex
 	tasks   map[string]*entry
 	waiting int
+	perTgt  map[string]int // waiting tasks by target
 	closed  bool
 }
 
@@ -140,6 +148,9 @@ func New(cfg Config) (*Outbox, error) {
 	}
 	if cfg.MaxWaiting <= 0 {
 		cfg.MaxWaiting = DefaultMaxWaiting
+	}
+	if cfg.PerTarget <= 0 {
+		cfg.PerTarget = DefaultPerTarget
 	}
 	if cfg.MaxFinished <= 0 {
 		cfg.MaxFinished = DefaultMaxFinished
@@ -163,7 +174,7 @@ func New(cfg Config) (*Outbox, error) {
 		cfg.Jitter = jitter
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Outbox{cfg: cfg, ctx: ctx, cancel: cancel, tasks: map[string]*entry{}}, nil
+	return &Outbox{cfg: cfg, ctx: ctx, cancel: cancel, tasks: map[string]*entry{}, perTgt: map[string]int{}}, nil
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -203,8 +214,13 @@ func (o *Outbox) Submit(t Task) error {
 	if o.waiting >= o.cfg.MaxWaiting {
 		return ErrFull
 	}
+	if o.perTgt[t.Target] >= o.cfg.PerTarget {
+		return ErrTargetFull
+	}
 	o.prune(now)
-	e := &entry{task: t, status: Status{State: Waiting}, done: make(chan struct{})}
+	ectx, stop := context.WithCancel(o.ctx)
+	e := &entry{task: t, start: now, ttl: t.Expiry.Sub(now), ctx: ectx, stop: stop, status: Status{State: Waiting}, done: make(chan struct{})}
+	o.perTgt[t.Target]++
 	o.tasks[t.ID] = e
 	o.waiting++
 	o.wg.Add(1)
@@ -292,6 +308,10 @@ func (o *Outbox) finish(e *entry, s Status) {
 	e.status = s
 	e.at = o.cfg.Now()
 	o.waiting--
+	if o.perTgt[e.task.Target]--; o.perTgt[e.task.Target] == 0 {
+		delete(o.perTgt, e.task.Target)
+	}
+	e.stop()
 	close(e.done)
 }
 
@@ -338,13 +358,13 @@ func (o *Outbox) run(e *entry) {
 		if o.canceled(e) {
 			return
 		}
-		left := t.Expiry.Sub(o.cfg.Now())
+		left := e.ttl - o.cfg.Now().Sub(e.start)
 		if left <= 0 {
 			o.settle(e, Status{State: Failed, Err: ErrRecipientOffline})
 			return
 		}
 		wait := o.cfg.Jitter(poll)
-		online, err := o.cfg.Presence(o.ctx, t.Target)
+		online, err := o.cfg.Presence(e.ctx, t.Target)
 		if o.ctx.Err() != nil {
 			o.settle(e, Status{State: Failed, Err: ErrClosed})
 			return
@@ -355,13 +375,13 @@ func (o *Outbox) run(e *entry) {
 		}
 		if err != nil {
 			if d, ok := retryAfter(err); ok {
-				wait = d
+				wait = max(d, o.cfg.MinPoll) // a zero or negative hint must not turn the wait into a spin
 			}
 		} else if online {
 			if !o.begin(e) {
 				return
 			}
-			sctx, cancel := context.WithDeadline(o.ctx, t.Expiry)
+			sctx, cancel := context.WithTimeout(e.ctx, left)
 			err := o.cfg.Send(sctx, t)
 			cancel()
 			if err == nil {
@@ -378,7 +398,7 @@ func (o *Outbox) run(e *entry) {
 			}
 			o.reopen(e)
 		}
-		if err := o.cfg.Sleep(o.ctx, min(wait, left)); err != nil {
+		if err := o.cfg.Sleep(e.ctx, min(wait, left)); err != nil {
 			o.settle(e, Status{State: Failed, Err: ErrClosed})
 			return
 		}

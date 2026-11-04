@@ -131,7 +131,7 @@ export class Device extends DurableObject<Env> {
       await this.ctx.storage.put("session", session);
       // Routing to the Task DO arrives with the task state machine (Phase 2). Frames
       // relayed to another device (prekey requests, T412) must be counted against the
-      // sender's allowance (Tenant.rateLimit, src/ratelimit.ts) before they are delivered.
+      // sender's allowance (limitDevice, src/ratelimit.ts) before they are delivered.
     }
     send(ws, { t: "ack", seq: msg.seq });
   }

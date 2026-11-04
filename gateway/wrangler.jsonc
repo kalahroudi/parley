@@ -2,10 +2,11 @@
   "name": "parley-gateway",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "durable_objects": { "bindings": [{ "name": "DEVICE", "class_name": "Device" }, { "name": "TENANT", "class_name": "Tenant" }, { "name": "TASK", "class_name": "Task" }] },
+  "durable_objects": { "bindings": [{ "name": "DEVICE", "class_name": "Device" }, { "name": "TENANT", "class_name": "Tenant" }, { "name": "TASK", "class_name": "Task" }, { "name": "RATE", "class_name": "RateLimit" }] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Device"] },
     { "tag": "v2", "new_sqlite_classes": ["Tenant"] },
-    { "tag": "v3", "new_sqlite_classes": ["Task"] }
+    { "tag": "v3", "new_sqlite_classes": ["Task"] },
+    { "tag": "v4", "new_sqlite_classes": ["RateLimit"] }
   ]
 }

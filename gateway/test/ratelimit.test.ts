@@ -1,265 +1,384 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { SEALED_MEDIA_TYPE } from "../src/a2a";
-import { POLICIES, take, type Bucket, type Policy } from "../src/ratelimit";
-import { BUCKET_FULL_RETRY_MS, MAX_BUCKETS } from "../src/tenant";
-import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
+import { handleA2A, SEALED_MEDIA_TYPE } from "../src/a2a";
+import { handleDirectory, type DeviceAuth } from "../src/directory";
+import type { Env } from "../src/index";
+import { advance, limitDevice, limitFor, reArm, TENANT_FACTOR } from "../src/ratelimit";
+import { b64, encodeWire, gw, header, taskBytes, taskHex } from "./wire";
 
-const P: Policy = { capacity: 3, refillPerSec: 0.5 };
+describe("rate limits", () => {
+  const limited = (init: Record<string, string> = {}) => ({ ...env, ...init }) as Env;
+  const get = async (e: Env, path: string, ip = "198.51.100.1", method = "POST") => {
+    const { default: worker } = await import("../src/index");
+    return worker.fetch(new Request(`https://gw${path}`, { method, headers: { "CF-Connecting-IP": ip } }), e);
+  };
 
-describe("token bucket arithmetic", () => {
-  it("starts full, spends one token a request and says when it is full again", () => {
-    const d = take(undefined, 1000, P);
-    expect(d).toEqual({ ok: true, bucket: { tokens: 2, at: 1000 }, full_at: 1000 + 2000 });
+  it("session endpoints refuse past the limit with 429 and Retry-After, per source", async () => {
+    const e = limited({ RATE_SESSION_PER_MIN: "3" });
+    for (let i = 0; i < 3; i++) expect((await get(e, "/v1/session")).status).toBe(401);
+    const r = await get(e, "/v1/session");
+    expect(r.status).toBe(429);
+    expect(await r.json()).toEqual({ error: "rate_limited" });
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect((await get(e, "/v1/session/logout")).status).toBe(429); // same source, same budget
+    expect((await get(e, "/v1/session", "198.51.100.2")).status).toBe(401); // another source is not affected
   });
 
-  it("refuses when empty, says how long until one token, and changes nothing", () => {
-    let b: Bucket | undefined;
-    for (let i = 0; i < 3; i++) {
-      const d = take(b, 0, P);
-      expect(d.ok).toBe(true);
-      b = d.ok ? d.bucket : b;
-    }
-    expect(b).toEqual({ tokens: 0, at: 0 });
-    expect(take(b, 0, P)).toEqual({ ok: false, retry_after_ms: 2000 });
-    expect(take(b, 500, P)).toEqual({ ok: false, retry_after_ms: 1500 }); // 0.25 token back, 0.75 to go
-    expect(b).toEqual({ tokens: 0, at: 0 });
+  it("login and callback share a per-source budget", async () => {
+    const e = limited({ RATE_AUTH_PER_MIN: "2" });
+    expect((await get(e, "/auth/google/login", "198.51.100.3", "GET")).status).toBe(404);
+    expect((await get(e, "/auth/google/callback", "198.51.100.3", "GET")).status).toBe(404);
+    expect((await get(e, "/auth/google/login", "198.51.100.3", "GET")).status).toBe(429);
   });
 
-  it("refills with time and spends exactly one token at the boundary", () => {
-    expect(take({ tokens: 0, at: 0 }, 2000, P)).toEqual({ ok: true, bucket: { tokens: 0, at: 2000 }, full_at: 2000 + 6000 });
-    expect(take({ tokens: 0, at: 0 }, 1999, P).ok).toBe(false);
-    expect(take({ tokens: 1, at: 5 }, 5, P).ok).toBe(true);
+  it("a tenant's logins are limited across sources", async () => {
+    const e = limited({ RATE_TENANT_LOGIN_PER_MIN: "2" });
+    const q = "/auth/google/login?tenant=acme&role=user";
+    expect((await get(e, q, "198.51.100.4", "GET")).status).not.toBe(429);
+    expect((await get(e, q, "198.51.100.5", "GET")).status).not.toBe(429);
+    expect((await get(e, q, "198.51.100.6", "GET")).status).toBe(429);
+    expect((await get(e, "/auth/google/login?tenant=other&role=user", "198.51.100.6", "GET")).status).not.toBe(429);
   });
 
-  it("never holds more than its capacity, however long it sat idle", () => {
-    expect(take({ tokens: 0, at: 0 }, 10 ** 9, P)).toEqual({ ok: true, bucket: { tokens: 2, at: 10 ** 9 }, full_at: 10 ** 9 + 2000 });
+  it("fails closed when the limiter is unavailable", async () => {
+    const broken = { ...env, RATE: { get: () => { throw new Error("down"); }, idFromName: () => ({}) } } as unknown as Env;
+    expect((await get(broken, "/v1/session")).status).toBe(429);
   });
 
-  it("a clock that went backwards refills nothing and does not drain the bucket", () => {
-    expect(take({ tokens: 1.25, at: 1000 }, 0, { capacity: 3, refillPerSec: 5 })).toEqual({ ok: true, bucket: { tokens: 0.25, at: 0 }, full_at: 0 + 550 });
-  });
-
-  it("pins the limits", () => {
-    expect(POLICIES).toEqual({
-      task: { capacity: 20, refillPerSec: 0.5 },
-      message: { capacity: 100, refillPerSec: 5 },
-      find: { capacity: 30, refillPerSec: 1 },
-    });
+  it("the counter resets after its window, a refusal does not extend it, and storage stays one row that the alarm deletes", async () => {
+    const id = env.RATE.idFromName("unit");
+    const rl = env.RATE.get(id);
+    expect((await rl.hit(2, 1500)).ok).toBe(true);
+    expect((await rl.hit(2, 1500)).ok).toBe(true);
+    for (let i = 0; i < 20; i++) expect((await rl.hit(2, 1500)).ok).toBe(false);
+    const rows = () => runInDurableObject(rl, async (_i, ctx) => (await ctx.storage.list()).size);
+    expect(await rows()).toBe(1);
+    await new Promise((r) => setTimeout(r, 1600));
+    expect((await rl.hit(2, 1500)).ok).toBe(true); // a new window, though refusals kept coming before it ended
+    await runDurableObjectAlarm(rl); // early: the window is still open, so the counter stays
+    expect(await rows()).toBe(1);
+    expect((await rl.hit(2, 1500)).ok).toBe(true);
+    expect((await rl.hit(2, 1500)).ok).toBe(false);
+    await new Promise((r) => setTimeout(r, 1600));
+    await runDurableObjectAlarm(rl); // (it may already have fired by itself)
+    expect(await rows()).toBe(0);
   });
 });
 
-let n = 0;
-const tenant = () => {
-  const T = `rl${++n}`;
-  return { T, stub: env.TENANT.get(env.TENANT.idFromName(T)), bearer: (d: string) => ({ Authorization: `Bearer dev:${T}:${d}` }) };
-};
-const call = (x: { stub: DurableObjectStub }, method: string, ...args: unknown[]): Promise<any> => runInDurableObject(x.stub, async (i) => (i as any)[method](...args));
-// An empty bucket whose clock is an hour ahead: nothing refills while a test runs.
-const empty = (x: { stub: DurableObjectStub }, scope: string, subject: string) =>
-  runInDurableObject(x.stub, async (_i, s) => void (await s.storage.put(`rl:${scope}:${subject}`, { tokens: 0, at: Date.now() + 3_600_000, full_at: Date.now() + 7_200_000 } satisfies Bucket & { full_at: number })));
-const drain = async (x: { stub: DurableObjectStub }, scope: string, subject: string, times: number) => {
-  for (let i = 0; i < times; i++) expect(await call(x, "rateLimit", scope, subject)).toEqual({ ok: true });
-};
+// The per-device and per-tenant budgets of the same RateLimit DO (the test environment raises the defaults so other
+// suites are not limited; these tests lower them per call).
+describe("device and tenant budgets", () => {
+  let n = 0;
+  const T = () => `rl${++n}`;
+  const small = (over: Record<string, string> = {}) => ({ ...env, RATE_TASK_PER_MIN: "3", RATE_MESSAGE_PER_MIN: "3", RATE_FIND_PER_MIN: "3", ...over }) as Env;
+  const lim = (e: Env, t: string, d: string, scope: "task" | "message" | "find" = "task") => limitDevice(e, t, d, scope);
 
-describe("the Tenant DO's counters", () => {
-  it("allows the burst, then refuses with a wait time, per scope and per subject", async () => {
-    const x = tenant();
-    await drain(x, "task", "alice", POLICIES.task.capacity);
-    const r = await call(x, "rateLimit", "task", "alice");
-    expect(r.ok).toBe(false);
-    expect(r.retry_after_ms).toBeGreaterThan(1500);
-    expect(r.retry_after_ms).toBeLessThanOrEqual(2000);
-    expect(await call(x, "rateLimit", "task", "bob")).toEqual({ ok: true }); // another device
-    expect(await call(x, "rateLimit", "message", "alice")).toEqual({ ok: true }); // another scope
+  it("allows the budget, then refuses with a wait of at most one window, per device and per scope", async () => {
+    const e = small();
+    const t = T();
+    for (let i = 0; i < 3; i++) expect(await lim(e, t, "alice")).toBeNull();
+    const w = await lim(e, t, "alice");
+    expect(w).toBeGreaterThan(0);
+    expect(w).toBeLessThanOrEqual(60_000);
+    expect(w! % 1000).toBe(0);
+    expect(await lim(e, t, "bob")).toBeNull(); // another device
+    expect(await lim(e, t, "alice", "message")).toBeNull(); // another scope
+    expect(await lim(e, t, "alice", "find")).toBeNull();
   });
 
-  it("counters are per tenant", async () => {
-    const a = tenant();
-    const b = tenant();
-    await drain(a, "task", "alice", POLICIES.task.capacity);
-    expect((await call(a, "rateLimit", "task", "alice")).ok).toBe(false);
-    expect(await call(b, "rateLimit", "task", "alice")).toEqual({ ok: true });
+  it("budgets never cross tenants, even for the same device id", async () => {
+    const e = small();
+    const a = T();
+    const b = T();
+    for (let i = 0; i < 3; i++) await lim(e, a, "alice");
+    expect(await lim(e, a, "alice")).not.toBeNull();
+    expect(await lim(e, b, "alice")).toBeNull();
+    // A tenant whose name ends the way another's begins does not share a bucket either.
+    expect(await lim(e, "x", "yz")).toBeNull();
+    for (let i = 0; i < 2; i++) await lim(e, "x", "yz");
+    expect(await lim(e, "x", "yz")).not.toBeNull();
+    expect(await lim(e, "xy", "z")).toBeNull();
   });
 
-  it("forgets a bucket once it has refilled, and keeps (and re-arms for) one that has not", async () => {
-    const x = tenant();
-    await drain(x, "task", "spent", 1);
-    await drain(x, "task", "old", 1);
-    const keys = () => runInDurableObject(x.stub, async (_i, s) => [...(await s.storage.list({ prefix: "rl:" })).keys()].sort());
-    expect(await keys()).toEqual(["rl:task:old", "rl:task:spent"]);
-    const full = Date.now() + 3_600_000;
-    await runInDurableObject(x.stub, async (_i, s) => {
-      await s.storage.put("rl:task:old", { tokens: 0, at: 0, full_at: Date.now() - 1 });
-      await s.storage.put("rl:task:spent", { tokens: 0, at: 0, full_at: full });
-      await s.storage.setAlarm(Date.now() + 10);
-    });
-    expect(await runDurableObjectAlarm(x.stub)).toBe(true);
-    expect(await keys()).toEqual(["rl:task:spent"]);
-    expect(await runInDurableObject(x.stub, (_i, s) => s.storage.getAlarm())).toBe(full);
+  it("one flooding device cannot lock out the tenant's honest devices; the tenant budget caps all of them together", async () => {
+    const e = small();
+    const t = T();
+    for (let i = 0; i < 500; i++) await lim(e, t, "mallory"); // refused after 3, and the refusals cost the tenant nothing
+    for (const d of ["a", "b", "c"]) expect(await lim(e, t, d)).toBeNull();
+    // Enough devices together do exhaust the tenant's budget (TENANT_FACTOR times the device's): that is the cap.
+    let served = 3 + 3; // mallory's 3 and a, b, c
+    for (let i = 0; served < 3 * TENANT_FACTOR; i++, served++) expect(await lim(e, t, `d${i}`)).toBeNull();
+    const over = await lim(e, t, "fresh");
+    expect(over).not.toBeNull();
+    expect(await lim(e, T(), "fresh")).toBeNull(); // other tenants are untouched
   });
 
-  it("at the cap a caller with no bucket is refused, one with a bucket is served, and a freed slot is reusable", async () => {
-    const x = tenant();
-    await drain(x, "task", "known", 1);
-    await runInDurableObject(x.stub, async (_i, s) => {
-      const fill: Record<string, unknown> = {};
-      for (let i = 0; i < MAX_BUCKETS - 1; i++) {
-        fill[`rl:find:filler${i}`] = { tokens: 0, at: 0, full_at: Date.now() + 3_600_000 };
-        if (Object.keys(fill).length === 128) {
-          await s.storage.put(fill);
-          for (const k of Object.keys(fill)) delete fill[k];
-        }
-      }
-      await s.storage.put(fill);
-    });
-    expect(await call(x, "rateLimit", "task", "new")).toEqual({ ok: false, retry_after_ms: BUCKET_FULL_RETRY_MS });
-    expect(await call(x, "rateLimit", "task", "known")).toEqual({ ok: true });
-    await runInDurableObject(x.stub, (_i, s) => s.storage.delete("rl:find:filler0"));
-    expect(await call(x, "rateLimit", "task", "new")).toEqual({ ok: true });
+  it("uses the defaults when nothing overrides them, and ignores nonsense overrides", async () => {
+    const plain = { ...env, RATE_TASK_PER_MIN: undefined, RATE_MESSAGE_PER_MIN: "x", RATE_FIND_PER_MIN: "0" } as Env;
+    const t = T();
+    for (let i = 0; i < 30; i++) expect(await lim(plain, t, "alice")).toBeNull();
+    expect(await lim(plain, t, "alice")).not.toBeNull();
+    for (let i = 0; i < 300; i++) expect(await lim(plain, t, "alice", "message")).toBeNull();
+    expect(await lim(plain, t, "alice", "message")).not.toBeNull();
+    for (let i = 0; i < 60; i++) expect(await lim(plain, t, "alice", "find")).toBeNull();
+    expect(await lim(plain, t, "alice", "find")).not.toBeNull();
+  });
+
+  it("fails closed when the limiter is unavailable", async () => {
+    const broken = { ...env, RATE: { get: () => { throw new Error("down"); }, idFromName: () => ({}) } } as unknown as Env;
+    expect(await lim(broken, T(), "alice")).toBe(60_000);
+  });
+
+  it("names hold no tenant or device id and storage holds two numbers and an alarm", async () => {
+    const e = small();
+    const t = T();
+    await lim(e, t, "alice-device");
+    const names: string[] = [];
+    const ns = new Proxy(env.RATE, { get: (o, k) => (k === "idFromName" ? (s: string) => (names.push(s), o.idFromName(s)) : (o as any)[k].bind(o)) });
+    await lim({ ...e, RATE: ns } as Env, t, "alice-device");
+    expect(names).toHaveLength(2); // the device's budget, then the tenant's
+    expect(names[0]).toMatch(/^dev-task:[0-9a-f]{32}$/);
+    expect(names[1]).toMatch(/^ten-task:[0-9a-f]{32}$/);
+    expect(names.join()).not.toContain(t);
+    expect(names.join()).not.toContain("alice-device");
+    const rl = env.RATE.get(env.RATE.idFromName(names[0]!));
+    expect(await runInDurableObject(rl, async (_i, s) => [(await s.storage.list()).size, (await s.storage.getAlarm()) !== null])).toEqual([1, true]);
   });
 });
 
 describe("limits on the A2A endpoint", () => {
-  const T0 = () => ({ ...tenant() });
-  const send = (x: ReturnType<typeof T0>, device: string, kind: "TASK" | "REPLY", task: string, to: string) =>
-    SELF.fetch("https://gw/a2a", {
-      method: "POST",
-      headers: x.bearer(device),
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 7,
-        method: "SendMessage",
-        params: {
-          message: {
-            messageId: `m${++n}`,
-            role: "ROLE_USER",
-            parts: [{ raw: b64(encodeWire({ header: header(kind, { tenant: x.T, sender: device, target: to, task: taskBytes(task), seq: kind === "TASK" ? 0 : 1 }), bucket: 4096 })), mediaType: SEALED_MEDIA_TYPE }],
-          },
-        },
-      }),
+  let n = 0;
+  const x = () => {
+    const T = `rla${++n}`;
+    return { T, bearer: (d: string) => ({ Authorization: `Bearer dev:${T}:${d}` }) };
+  };
+  const e = (over: Record<string, string> = {}) => ({ ...env, RATE_TASK_PER_MIN: "3", RATE_MESSAGE_PER_MIN: "3", ...over }) as Env;
+  const rpc = (en: Env, w: ReturnType<typeof x>, device: string, method: string, params: unknown) =>
+    handleA2A(new Request("https://gw/a2a", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 7, method, params }) }), en, { tenant: w.T, device });
+  const send = (en: Env, w: ReturnType<typeof x>, device: string, kind: "TASK" | "REPLY", task: string, to: string) =>
+    rpc(en, w, device, "SendMessage", {
+      message: {
+        messageId: `m${++n}`,
+        role: "ROLE_USER",
+        parts: [{ raw: b64(encodeWire({ header: header(kind, { tenant: w.T, sender: device, target: to, task: taskBytes(task), seq: kind === "TASK" ? 0 : 1 }), bucket: 4096 })), mediaType: SEALED_MEDIA_TYPE }],
+      },
     });
-  const expectLimited = async (r: Response, minMs: number, maxMs: number) => {
+  const expectLimited = async (r: Response) => {
     expect(r.status).toBe(429);
     const body: any = await r.json();
     expect(body).toEqual({ jsonrpc: "2.0", id: 7, error: { code: -32016, message: "rate limited", data: { retry_after_ms: expect.any(Number) } } });
-    expect(body.error.data.retry_after_ms).toBeGreaterThan(minMs);
-    expect(body.error.data.retry_after_ms).toBeLessThanOrEqual(maxMs);
+    expect(body.error.data.retry_after_ms).toBeGreaterThan(0);
+    expect(body.error.data.retry_after_ms).toBeLessThanOrEqual(60_000);
     expect(r.headers.get("retry-after")).toBe(String(Math.ceil(body.error.data.retry_after_ms / 1000)));
     expect(r.headers.get("cache-control")).toBe("no-store");
   };
 
-  it("refuses new tasks past the burst, before creating anything, and only for that device", async () => {
-    const x = T0();
-    for (let i = 0; i < POLICIES.task.capacity; i++) {
-      const r = await send(x, "alice", "TASK", `t${i}`, "bob");
-      expect(r.status).toBe(200); // bob is offline: the task is refused as such, but it was counted
+  it("refuses new tasks past the budget, before creating anything, and only for that device", async () => {
+    const w = x();
+    const en = e();
+    for (let i = 0; i < 3; i++) {
+      const r = await send(en, w, "alice", "TASK", `t${i}`, "bob");
+      expect(r.status).toBe(200); // bob is offline: refused as such, but counted
       expect(((await r.json()) as any).error.code).toBe(-32010);
     }
-    await expectLimited(await send(x, "alice", "TASK", "over", "bob"), 0, 2000); // the bucket may have refilled a little while we sent
-    const tasks = await SELF.fetch("https://gw/a2a", { method: "POST", headers: x.bearer("alice"), body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "GetTask", params: { id: taskHex("over") } }) });
-    expect(((await tasks.json()) as any).error.code).toBe(-32001); // never created
-    expect((await send(x, "carol", "TASK", "c1", "bob")).status).toBe(200);
+    await expectLimited(await send(en, w, "alice", "TASK", "over", "bob"));
+    const got = await rpc(env as Env, w, "alice", "GetTask", { id: taskHex("over") });
+    expect(((await got.json()) as any).error.code).toBe(-32001); // never created
+    expect((await send(en, w, "carol", "TASK", "c1", "bob")).status).toBe(200);
   });
 
-  it("a flood aimed at one connected target is refused at the gateway before it reaches the target", async () => {
-    const x = T0();
-    const res = await SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", ...x.bearer("bob") } });
+  it("a flood aimed at one connected target is refused at the gateway before it reaches the target, and the honest caller is still served", async () => {
+    const w = x();
+    const res = await gw("https://gw/v1/connect", { headers: { Upgrade: "websocket", ...w.bearer("bob") } });
     const ws = res.webSocket!;
     ws.accept();
     const events: any[] = [];
     let welcomed: () => void;
     const ready = new Promise<void>((r) => (welcomed = r));
-    ws.addEventListener("message", (e) => {
-      const m = JSON.parse(e.data as string);
+    ws.addEventListener("message", (ev) => {
+      const m = JSON.parse(ev.data as string);
       if (m.t === "welcome") welcomed();
       else events.push(m);
     });
     ws.send(JSON.stringify({ t: "hello", v: 1, last_rx: 0 }));
     await ready;
 
-    const flood = POLICIES.task.capacity * 3;
-    const started = Date.now();
+    const en = e();
     let delivered = 0;
     let refused = 0;
-    for (let i = 0; i < flood; i++) {
-      const r = await send(x, "mallory", "TASK", `f${i}`, "bob");
+    for (let i = 0; i < 12; i++) {
+      const r = await send(en, w, "mallory", "TASK", `f${i}`, "bob");
       if (r.status === 429) refused++;
-      else if (r.status === 200 && ((await r.json()) as any).result) delivered++;
+      else if (((await r.json()) as any).result) delivered++;
     }
-    const allowed = POLICIES.task.capacity + Math.floor(((Date.now() - started) / 1000) * POLICIES.task.refillPerSec) + 1; // the burst plus what refilled meanwhile
-    expect(delivered).toBeGreaterThanOrEqual(POLICIES.task.capacity);
-    expect(delivered).toBeLessThanOrEqual(allowed);
-    expect(refused).toBe(flood - delivered);
-    // Wait for the events already in flight to arrive, then count: the target saw exactly what was delivered.
-    await new Promise((r) => setTimeout(r, 100));
-    expect(events).toHaveLength(delivered);
-    // The target's own replies are not held up by the caller's flood.
-    expect((await send(x, "bob", "REPLY", "r1", "mallory")).status).toBe(200);
+    expect([delivered, refused]).toEqual([3, 9]);
+    await new Promise((r) => setTimeout(r, 100)); // let what is in flight arrive
+    expect(events).toHaveLength(delivered); // the target saw exactly what was let through
+    // An honest caller to the same target is served, and the target's own replies are not held up.
+    expect(((await (await send(en, w, "alice", "TASK", "honest", "bob")).json()) as any).result).toBeDefined();
+    expect((await send(en, w, "bob", "REPLY", "r1", "mallory")).status).toBe(200);
     ws.close();
   });
 
-  it("limits the other messages, GetTask and CancelTask on their own allowance", async () => {
-    const x = T0();
-    await empty(x, "message", "alice");
-    await expectLimited(await send(x, "alice", "REPLY", "r1", "bob"), 0, 200);
-    const rpc = (method: string, params: unknown) => SELF.fetch("https://gw/a2a", { method: "POST", headers: x.bearer("alice"), body: JSON.stringify({ jsonrpc: "2.0", id: 7, method, params }) });
-    await expectLimited(await rpc("GetTask", { id: taskHex("r1") }), 0, 200);
+  it("limits the other messages, GetTask and CancelTask on their own budget", async () => {
+    const w = x();
+    const en = e();
+    for (let i = 0; i < 3; i++) await send(en, w, "alice", "REPLY", `r${i}`, "bob");
+    await expectLimited(await send(en, w, "alice", "REPLY", "r1", "bob"));
+    await expectLimited(await rpc(en, w, "alice", "GetTask", { id: taskHex("r1") }));
     const cancel = {
       id: taskHex("r1"),
-      metadata: { parley: { messageId: "c1", parts: [{ raw: b64(encodeWire({ header: header("CANCEL", { tenant: x.T, sender: "alice", target: "bob", task: taskBytes("r1"), seq: 1 }), bucket: 4096 })), mediaType: SEALED_MEDIA_TYPE }] } },
+      metadata: { parley: { messageId: "c1", parts: [{ raw: b64(encodeWire({ header: header("CANCEL", { tenant: w.T, sender: "alice", target: "bob", task: taskBytes("r1"), seq: 1 }), bucket: 4096 })), mediaType: SEALED_MEDIA_TYPE }] } },
     };
-    await expectLimited(await rpc("CancelTask", cancel), 0, 200);
-    expect((await send(x, "alice", "TASK", "t1", "bob")).status).toBe(200); // the task allowance is separate
+    await expectLimited(await rpc(en, w, "alice", "CancelTask", cancel));
+    expect((await send(en, w, "alice", "TASK", "t1", "bob")).status).toBe(200); // the task budget is separate
   });
 
-  it("does not spend allowance on a request that is malformed", async () => {
-    const x = T0();
-    for (let i = 0; i < POLICIES.message.capacity + 5; i++) {
-      const r = await SELF.fetch("https://gw/a2a", { method: "POST", headers: x.bearer("alice"), body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "GetTask", params: { id: "nope" } }) });
-      expect(r.status).toBe(200);
-    }
-    expect(await call(x, "rateLimit", "message", "alice")).toEqual({ ok: true });
+  it("does not spend budget on a request that is malformed", async () => {
+    const w = x();
+    const en = e();
+    for (let i = 0; i < 10; i++) expect((await rpc(en, w, "alice", "GetTask", { id: "nope" })).status).toBe(200);
+    expect(await limitDevice(en, w.T, "alice", "message")).toBeNull();
+  });
+
+  it("fails closed: with the limiter down a send is refused and nothing is created", async () => {
+    const w = x();
+    const broken = { ...env, RATE: { get: () => { throw new Error("down"); }, idFromName: () => ({}) } } as unknown as Env;
+    await expectLimited(await send(broken, w, "alice", "TASK", "t1", "bob"));
+    expect(((await (await rpc(env as Env, w, "alice", "GetTask", { id: taskHex("t1") })).json()) as any).error.code).toBe(-32001);
   });
 });
 
 describe("limits on the directory", () => {
-  const post = (x: ReturnType<typeof tenant>, path: string, body: unknown, auth: string) =>
-    SELF.fetch(`https://gw${path}`, { method: "POST", headers: { "content-type": "application/json", Authorization: auth }, body: JSON.stringify(body) });
-  const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
-  const admin = (x: { T: string }) => `Bearer dev-admin:${x.T}`;
-  async function enroll(x: ReturnType<typeof tenant>, email: string) {
-    const sk = key();
-    const { id } = (await (await post(x, "/v1/enroll/request", { name: "laptop", signing_key: sk }, `Bearer dev-user:${x.T}:${email}`)).json()) as any;
-    await post(x, "/v1/admin/enrollments/decide", { id, decision: "approved" }, admin(x));
-    await post(x, "/v1/admin/bindings", { id, binding: { device_id: id, signing_key: sk, version: 1 } }, admin(x));
-    return { id, auth: `Bearer dev:${x.T}:${id}` };
-  }
-  async function online(x: ReturnType<typeof tenant>, auth: string) {
-    const res = await SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: auth } });
-    const ws = res.webSocket!;
-    ws.accept();
-    const welcome = new Promise<void>((r) => ws.addEventListener("message", () => r(), { once: true }));
-    ws.send(JSON.stringify({ t: "hello", v: 1, last_rx: 0 }));
-    await welcome;
-    return ws;
-  }
-  const publish = async (d: { auth: string }, x: ReturnType<typeof tenant>, visibility?: string) =>
-    ((await (await post(x, "/v1/cards/publish", { card: { name: "Reviewer", description: "d", tags: [], examples: [], ...(visibility ? { visibility } : {}) } }, d.auth)).json()) as any).id as string;
+  const testDevice: DeviceAuth = async (req) => {
+    const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(req.headers.get("Authorization") ?? "");
+    return m ? { tenant: m[1]!, device: m[2]! } : null;
+  };
+  const find = (en: Env, t: string, d: string, body: unknown = {}) =>
+    handleDirectory(new Request("https://gw/v1/directory/find", { method: "POST", headers: { Authorization: `Bearer dev:${t}:${d}` }, body: JSON.stringify(body) }), en, testDevice);
 
-  it("find is limited per device with a Retry-After", async () => {
-    const x = tenant();
-    const a = await enroll(x, "a@example.test");
-    expect((await post(x, "/v1/directory/find", {}, a.auth)).status).toBe(200);
-    await empty(x, "find", a.id);
-    const r = await post(x, "/v1/directory/find", {}, a.auth);
+  it("find is limited per device with a Retry-After, and a bad query is refused before it costs anything", async () => {
+    const en = { ...env, RATE_FIND_PER_MIN: "2" } as Env;
+    const t = "rld1";
+    const [a, b] = ["a".repeat(32), "b".repeat(32)];
+    expect((await find(en, t, a, { limit: 0 })).status).toBe(400);
+    expect((await find(en, t, a)).status).not.toBe(429);
+    expect((await find(en, t, a)).status).not.toBe(429);
+    const r = await find(en, t, a);
     expect(r.status).toBe(429);
-    expect(r.headers.get("retry-after")).toBe("1");
-    expect(await r.json()).toEqual({ error: "rate_limited", retry_after_ms: expect.any(Number) });
-    const b = await enroll(x, "b@example.test");
-    expect((await post(x, "/v1/directory/find", {}, b.auth)).status).toBe(200);
+    const wait = Number(r.headers.get("retry-after"));
+    expect(wait).toBeGreaterThan(0);
+    expect(wait).toBeLessThanOrEqual(60);
+    expect(await r.json()).toEqual({ error: "rate_limited", retry_after_ms: wait * 1000 });
+    expect((await find(en, t, b)).status).not.toBe(429);
+    expect((await find(en, "rld2", a)).status).not.toBe(429);
+  });
+});
+
+describe("the window arithmetic", () => {
+  const W = 1500;
+  it("starts a window, counts to the limit, then refuses without counting", () => {
+    let r = advance(undefined, 2, W, 1000);
+    expect(r).toEqual({ w: { start: 1000, n: 1, windowMs: W }, ok: true, retryAfterS: 2 });
+    r = advance(r.w, 2, W, 1100);
+    expect(r).toEqual({ w: { start: 1000, n: 2, windowMs: W }, ok: true, retryAfterS: 2 });
+    const refused = advance(r.w, 2, W, 1200);
+    expect(refused).toEqual({ w: { start: 1000, n: 2, windowMs: W }, ok: false, retryAfterS: 2 }); // n did not grow
+    expect(r.w.n).toBe(2); // the input is not changed
+  });
+
+  it("is exact at the boundary: the last millisecond is in the window, the end is a new one", () => {
+    const w = { start: 1000, n: 2, windowMs: W };
+    expect(advance(w, 2, W, 2499).ok).toBe(false);
+    expect(advance(w, 2, W, 2500)).toEqual({ w: { start: 2500, n: 1, windowMs: W }, ok: true, retryAfterS: 2 });
+  });
+
+  it("rounds the wait up to whole seconds, at least 1 and at most one window", () => {
+    const w = { start: 0, n: 5, windowMs: 60_000 };
+    expect(advance(w, 5, 60_000, 59_999).retryAfterS).toBe(1); // 1 ms left
+    expect(advance(w, 5, 60_000, 59_000).retryAfterS).toBe(1); // exactly 1 s left
+    expect(advance(w, 5, 60_000, 58_999).retryAfterS).toBe(2); // 1.001 s left
+    expect(advance(w, 5, 60_000, 1).retryAfterS).toBe(60);
+    expect(advance({ start: 10 ** 9, n: 5, windowMs: 60_000 }, 5, 60_000, 0).retryAfterS).toBe(60); // a clock set far back
+    expect(advance({ start: 100, n: 5, windowMs: 1500 }, 5, 1500, 99).retryAfterS).toBe(2);
+  });
+
+  it("re-arms for a window that is still open and deletes otherwise", () => {
+    expect(reArm(undefined, 0)).toBeNull();
+    const w = { start: 1000, n: 1, windowMs: 500 };
+    expect(reArm(w, 1499)).toBe(1500);
+    expect(reArm(w, 1500)).toBeNull();
+  });
+
+  it("limitFor takes whole numbers above zero and nothing else", () => {
+    expect(limitFor("7", 3)).toBe(7);
+    for (const v of [undefined, "", "0", "-1", "2.5", "x", "NaN", "Infinity"]) expect(limitFor(v, 3), String(v)).toBe(3);
+  });
+});
+
+describe("the DO keeps one row and one alarm at the window's end", () => {
+  it("sets the alarm at the end of the window, not before it", async () => {
+    const id = env.RATE.idFromName("alarm-unit");
+    await env.RATE.get(id).hit(5, 40_000);
+    const stub: DurableObjectStub = env.RATE.get(id);
+    const row = await runInDurableObject(stub, async (_i, s) => ({ start: ((await s.storage.get("w")) as { start: number }).start, alarm: await s.storage.getAlarm() }));
+    expect(row.alarm).toBe(row.start + 40_000);
+    const after = await runInDurableObject(stub, async (i, s) => {
+      await (i as unknown as { alarm(): Promise<void> }).alarm(); // fired early: the row stays and the alarm is set again for the same end
+      return { row: (await s.storage.get("w")) !== undefined, alarm: await s.storage.getAlarm() };
+    });
+    expect(after).toEqual({ row: true, alarm: row.start + 40_000 });
+  });
+});
+
+describe("login and session budgets", () => {
+  const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))).slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const run = async (e: Env, path: string, headers: Record<string, string> = {}, method = "GET") => {
+    const { default: worker } = await import("../src/index");
+    return worker.fetch(new Request(`https://gw${path}`, { method, headers }), e);
+  };
+  const spy = (names: string[]) => ({ ...env, RATE: new Proxy(env.RATE, { get: (o, k) => (k === "idFromName" ? (s: string) => (names.push(s), o.idFromName(s)) : (o as any)[k].bind(o)) }) }) as Env;
+
+  it("a refusal is JSON, uncached, with Retry-After", async () => {
+    const e = { ...env, RATE_SESSION_PER_MIN: "1" } as Env;
+    await run(e, "/v1/session", { "CF-Connecting-IP": "203.0.113.9" }, "POST");
+    const r = await run(e, "/v1/session", { "CF-Connecting-IP": "203.0.113.9" }, "POST");
+    expect(r.status).toBe(429);
+    expect(r.headers.get("content-type")).toBe("application/json");
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(r.headers.get("retry-after")).toMatch(/^([1-9]|[1-5][0-9]|60)$/);
+  });
+
+  it("auth, tenant and session budgets are separate, even when the key is the same string", async () => {
+    const e = { ...env, RATE_AUTH_PER_MIN: "2", RATE_TENANT_LOGIN_PER_MIN: "1", RATE_SESSION_PER_MIN: "1" } as Env;
+    const ip = { "CF-Connecting-IP": "sharedkey" };
+    // the login counts once against auth[ip] and once against tenant[sharedkey]: both fit
+    expect((await run(e, "/auth/google/login?tenant=sharedkey&role=user", ip)).status).not.toBe(429);
+    expect((await run(e, "/v1/session", ip, "POST")).status).toBe(401); // the session budget is its own
+    expect((await run(e, "/v1/session", ip, "POST")).status).toBe(429);
+  });
+
+  it("only a login counts against the tenant, and only a well-formed tenant name", async () => {
+    const e = { ...env, RATE_TENANT_LOGIN_PER_MIN: "1" } as Env;
+    const n = (i: number) => ({ "CF-Connecting-IP": `198.51.100.${i}` });
+    for (let i = 1; i <= 3; i++) expect((await run(e, "/auth/google/callback?tenant=acme", n(i))).status).not.toBe(429);
+    for (const [i, bad] of ["bad tenant", "a".repeat(65), "x!", "!x"].entries()) {
+      for (let k = 0; k < 2; k++) expect((await run(e, `/auth/google/login?tenant=${encodeURIComponent(bad)}&role=user`, n(10 + i * 2 + k))).status, bad).not.toBe(429);
+    }
+    expect((await run(e, `/auth/google/login?tenant=${"a".repeat(64)}`, n(40))).status).not.toBe(429);
+    expect((await run(e, `/auth/google/login?tenant=${"a".repeat(64)}`, n(41))).status).toBe(429);
+  });
+
+  it("names are scope plus a hash: the source or tenant is not in them, the tenant is case-folded, and no header means one shared 'unknown'", async () => {
+    const names: string[] = [];
+    const e = spy(names);
+    await run(e, "/auth/google/login?tenant=AcMe&role=user", { "CF-Connecting-IP": "203.0.113.7" });
+    await run(e, "/v1/session", {}, "POST");
+    await run(e, "/auth/google/callback", {});
+    expect(names).toEqual([`auth:${await hex("203.0.113.7")}`, `tenant:${await hex("acme")}`, `session:${await hex("unknown")}`, `auth:${await hex("unknown")}`]);
+    expect(names.join()).not.toContain("203.0.113.7");
   });
 });

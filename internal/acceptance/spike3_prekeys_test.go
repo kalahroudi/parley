@@ -1179,7 +1179,7 @@ func TestLateReplyAfterCancelIsRejected(t *testing.T) {
 	})
 }
 
-// (e, gateway side) The per-caller limit is also enforced in the Tenant DO, which
+// (e, gateway side) The per-caller limit is also enforced by the gateway (RateLimit DO), which
 // refuses a flood aimed at one target before it is delivered. Fails if the
 // gateway's tests are renamed or removed.
 func TestGatewayRateLimitsFloodToTarget(t *testing.T) {
@@ -1188,9 +1188,12 @@ func TestGatewayRateLimitsFloodToTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"a flood aimed at one connected target is refused at the gateway before it reaches the target",
-		"allows the burst, then refuses with a wait time, per scope and per subject",
-		"refuses new tasks past the burst, before creating anything, and only for that device",
+		"a flood aimed at one connected target is refused at the gateway before it reaches the target, and the honest caller is still served",
+		"allows the budget, then refuses with a wait of at most one window, per device and per scope",
+		"budgets never cross tenants, even for the same device id",
+		"one flooding device cannot lock out the tenant's honest devices; the tenant budget caps all of them together",
+		"refuses new tasks past the budget, before creating anything, and only for that device",
+		"fails closed when the limiter is unavailable",
 	} {
 		if !strings.Contains(string(src), name) {
 			t.Errorf("gateway/test/ratelimit.test.ts lost the test %q", name)
@@ -1200,7 +1203,7 @@ func TestGatewayRateLimitsFloodToTarget(t *testing.T) {
 
 // (e, gateway side, prekey requests) The gateway does not relay prekey requests
 // yet: the daemon send path (T412) adds the relay, and every frame it relays must
-// be counted in the Tenant DO (src/ratelimit.ts) before delivery.
+// be counted by limitDevice (gateway/src/ratelimit.ts) before delivery.
 func TestPending_GatewayRelaysPrekeyRequestsThroughTheLimiter(t *testing.T) {
-	pending(t, "T412", "the relay of prekey requests exists; assert a flood of them is refused by the Tenant DO before it reaches the target")
+	pending(t, "T412", "the relay of prekey requests exists; assert a flood of them is refused by the limiter before it reaches the target")
 }

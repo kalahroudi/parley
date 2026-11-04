@@ -3,6 +3,8 @@
 
 import { isCardId, isDeviceId, validatePage } from "./acl";
 import type { Env } from "./index";
+import { limitDevice } from "./ratelimit";
+import { csrfOk, principal } from "./session";
 import type { DirectoryError, Tenant } from "./tenant";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -28,17 +30,19 @@ const limitedResponse = (retryAfterMs: number) =>
   });
 const fail = (r: { error: DirectoryError; field?: string }) => json(STATUS[r.error], r.field ? { error: r.error, field: r.field } : { error: r.error });
 
-// Placeholders until sessions and connect tokens land; both fail closed without
-// DEV_AUTH. `Bearer dev:<tenant>:<device>` is an enrolled device (the same
-// bearer as /v1/connect); `Bearer dev-admin:<tenant>` is a tenant admin.
-function identity(req: Request, env: Env): { admin: boolean; tenant: string; device?: string } | null {
-  if (env.DEV_AUTH !== "1") return null;
-  const h = req.headers.get("Authorization") ?? "";
-  let m = /^Bearer dev-admin:([^:]+)$/.exec(h);
-  if (m && ID.test(m[1]!)) return { admin: true, tenant: m[1]! };
-  m = /^Bearer dev:([^:]+):([^:]+)$/.exec(h);
-  if (m && ID.test(m[1]!) && isDeviceId(m[2])) return { admin: false, tenant: m[1]!, device: m[2]! };
-  return null;
+// An admin is a session. A device has no credential until connect tokens land,
+// so device routes fail closed unless a resolver is injected (tests do).
+export type DeviceAuth = (req: Request) => Promise<{ tenant: string; device: string } | null>;
+type Identity = { admin: boolean; tenant: string; device?: string };
+
+async function identity(req: Request, env: Env, device?: DeviceAuth): Promise<Identity | { forbidden: true } | null> {
+  const p = await principal(req, env);
+  if (p) {
+    if (p.role !== "admin") return null;
+    return csrfOk(req, p) ? { admin: true, tenant: p.tenant } : { forbidden: true };
+  }
+  const d = device && (await device(req));
+  return d && ID.test(d.tenant) && isDeviceId(d.device) ? { admin: false, tenant: d.tenant, device: d.device } : null;
 }
 
 async function body(req: Request, max: number): Promise<Record<string, unknown> | null> {
@@ -55,12 +59,13 @@ async function body(req: Request, max: number): Promise<Record<string, unknown> 
 
 // Every route is a POST with a JSON body (no identifier in a URL). Devices
 // publish, remove and find cards; the admin manages groups.
-export async function handleDirectory(req: Request, env: Env): Promise<Response> {
+export async function handleDirectory(req: Request, env: Env, deviceAuth?: DeviceAuth): Promise<Response> {
   const { pathname } = new URL(req.url);
   const b = await body(req, pathname === "/v1/admin/groups/put" ? MAX_GROUP_BODY_BYTES : MAX_BODY_BYTES);
   if (!b) return json(req.method === "POST" ? 400 : 405, { error: req.method === "POST" ? "bad_request" : "method_not_allowed" });
-  const id = identity(req, env);
+  const id = await identity(req, env, deviceAuth);
   if (!id) return json(401, { error: "unauthorized" });
+  if ("forbidden" in id) return json(403, { error: "csrf" });
   const stub = env.TENANT.get(env.TENANT.idFromName(id.tenant)) as DurableObjectStub<Tenant>;
   const page = validatePage(b);
 
@@ -91,8 +96,8 @@ export async function handleDirectory(req: Request, env: Env): Promise<Response>
   if (pathname === "/v1/cards/remove") return (await stub.removeCard(id.device, isCardId(b.id) ? b.id : "")) ? json(200, { ok: true }) : json(404, { error: "not_found" });
   if (pathname === "/v1/directory/find") {
     if (!page) return fail({ error: "bad_query" });
-    const rl = await stub.rateLimit("find", id.device);
-    if (!rl.ok) return limitedResponse(rl.retry_after_ms);
+    const wait = await limitDevice(env, id.tenant, id.device, "find");
+    if (wait !== null) return limitedResponse(wait);
     const r = await stub.find(id.device, b.query, page);
     return "error" in r ? fail(r) : json(200, r);
   }
