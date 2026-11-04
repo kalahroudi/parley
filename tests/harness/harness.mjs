@@ -4,7 +4,8 @@
 // Local harness: boots the gateway, a mock OIDC server and N daemons.
 // Run with `make dev` (see CONTRIBUTING.md); tests import start() directly.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,6 +149,22 @@ export async function start({ daemons = 2, quiet = false, onUnexpectedExit } = {
     for (let i = 1; i <= daemons; i++) {
       const name = `daemon-${i}`;
       const home = join(dir, name);
+      // parleyd refuses to start without a config. Each harness daemon gets its own
+      // private home, the file key store (never the developer's keychain) and a
+      // throwaway root key: the harness has no admin to enroll them yet.
+      mkdirSync(home, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(home, "config.json"),
+        JSON.stringify({
+          format: 1,
+          tenant: "harness",
+          device_id: name,
+          gateway_url: gatewayUrl,
+          root_public_key: randomBytes(32).toString("base64"),
+          key_store: "file",
+        }),
+        { mode: 0o600 },
+      );
       const child = spawn(bin, [], {
         stdio,
         env: {

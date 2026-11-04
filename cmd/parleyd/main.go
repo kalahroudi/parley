@@ -11,15 +11,33 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/kalahroudi/parley/internal/daemon"
 )
 
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-// run blocks until ctx is canceled. The daemon's real work lands in later tasks.
-func run(ctx context.Context) error {
-	<-ctx.Done()
-	return nil
+// run blocks until ctx is canceled.
+func run(ctx context.Context) error { return runIn(ctx, os.Getenv, os.UserConfigDir, os.Stderr) }
+
+// runIn loads the configuration from $PARLEY_HOME or <user config dir>/parley, builds the daemon
+// and serves until ctx ends. Startup failures are returned, never logged with
+// detail: the operator's terminal gets them through execute.
+func runIn(ctx context.Context, getenv func(string) string, userConfigDir func() (string, error), logw io.Writer) error {
+	dirs, err := daemon.DefaultDirs(getenv, userConfigDir)
+	if err != nil {
+		return err
+	}
+	cfg, err := daemon.LoadConfig(dirs.Config)
+	if err != nil {
+		return err
+	}
+	d, err := daemon.New(cfg, dirs, daemon.Deps{Log: daemon.NewLogger(logw, cfg.LogLevel)})
+	if err != nil {
+		return err
+	}
+	return d.Run(ctx)
 }
 
 //cover:ignore main only wires the process (arguments, signals, os.Exit) to execute, which is tested

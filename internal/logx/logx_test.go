@@ -116,3 +116,14 @@ func TestBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestParseLevel(t *testing.T) {
+	for name, want := range map[string]slog.Level{
+		"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn,
+		"error": slog.LevelError, "": slog.LevelInfo, "trace": slog.LevelInfo,
+	} {
+		if got := ParseLevel(name); got != want {
+			t.Errorf("ParseLevel(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

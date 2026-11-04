@@ -27,7 +27,7 @@ var Keys = map[string]bool{
 	"tenant": true, "device": true, "bot": true, "task": true, "context": true,
 	"prekey": true, "request": true, "seq": true,
 	"state": true, "type": true, "retention": true,
-	"size": true, "bucket": true, "count": true,
+	"size": true, "bucket": true, "count": true, "component": true,
 	"at": true, "issued_at": true, "expires_at": true, "deadline": true,
 }
 
@@ -96,6 +96,20 @@ func safeID(s string) string {
 		}
 	}
 	return s
+}
+
+// ParseLevel maps a configured level name (debug, info, warn, error) to a
+// level; anything else, including "", is Info.
+func ParseLevel(name string) slog.Level {
+	switch name {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	}
+	return slog.LevelInfo
 }
 
 // Logger writes redacted structured logs. A nil *Logger discards everything.
