@@ -21,7 +21,10 @@ export type Provider = {
   requireVerifiedEmail: boolean;
 };
 
-export type Identity = { provider: string; issuer: string; sub: string; email: string; tenantId?: string };
+// `session` is what the login was started for (tenant and role). It is read back only from the sealed flow, so
+// nothing the browser sends at the callback can change it.
+export type LoginFor = { tenant: string; role: "admin" | "user" };
+export type Identity = { provider: string; issuer: string; sub: string; email: string; tenantId?: string; session?: LoginFor };
 
 export class OidcError extends Error {
   code: string;
@@ -121,6 +124,7 @@ export async function startLogin(
   p: Provider,
   redirectUri: string,
   loginHint?: string,
+  session?: LoginFor,
 ): Promise<{ url: string; flow: string }> {
   const f = ctx.fetch ?? fetch;
   const now = (ctx.now ?? Date.now)();
@@ -143,7 +147,7 @@ export async function startLogin(
   if (loginHint) q.login_hint = loginHint;
   if (p.hostedDomain) q.hd = p.hostedDomain;
   for (const [k, v] of Object.entries(q)) url.searchParams.set(k, v);
-  const flow = await seal(ctx.flowSecret, { p: p.name, state, nonce, verifier, redirectUri, exp: now + FLOW_TTL_MS });
+  const flow = await seal(ctx.flowSecret, { p: p.name, state, nonce, verifier, redirectUri, exp: now + FLOW_TTL_MS, ...(session && { s: session }) });
   return { url: url.toString(), flow };
 }
 
@@ -191,6 +195,8 @@ export async function completeLogin(
   if (!flow) throw new OidcError("bad_flow");
   const fl = await unseal(ctx.flowSecret, flow);
   if (fl.p !== p.name || typeof fl.exp !== "number" || fl.exp < nowMs) throw new OidcError("bad_flow");
+  const s = fl.s as Partial<LoginFor> | undefined;
+  if (s !== undefined && (typeof s !== "object" || s === null || typeof s.tenant !== "string" || (s.role !== "admin" && s.role !== "user"))) throw new OidcError("bad_flow");
   const state = query.get("state");
   if (!state || state !== fl.state) throw new OidcError("state_mismatch");
   // Error responses carry the state too, so check it first. Only the code is
@@ -221,5 +227,5 @@ export async function completeLogin(
   const email = String(claims.email ?? claims.preferred_username ?? "").toLowerCase();
   if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new OidcError("no_email");
   if (p.requireVerifiedEmail && claims.email_verified !== true) throw new OidcError("email_unverified");
-  return { provider: p.name, issuer: p.issuer, sub: claims.sub, email, tenantId: p.tenantId };
+  return { provider: p.name, issuer: p.issuer, sub: claims.sub, email, tenantId: p.tenantId, ...(s && { session: { tenant: s.tenant!, role: s.role! } }) };
 }

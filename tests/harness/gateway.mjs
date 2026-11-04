@@ -31,12 +31,13 @@ function kill(child) {
   } catch {}
 }
 
-// `admins` is the gateway's ADMINS setting (`tenant:email,...`).
-// `users` is USERS (`tenant:email` or `tenant:@domain`, comma-separated).
-export async function startGateway({ admins = "", users = "" } = {}) {
+// `admins` is the gateway's ADMINS setting (`tenant:email,...`); `users` and `userDomains` are USERS and
+// USER_DOMAINS (`tenant:email` / `tenant:domain`), without which no user can sign in. The login rate limits are
+// raised out of the way (tests sign in dozens of times from one address); `extra` overrides any variable.
+export async function startGateway({ admins = "", users = "", userDomains = "", extra = {} } = {}) {
   const idp = await startMockOidc();
   const port = await freePort();
-  const vars = { FLOW_SECRET: "test-flow-secret", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users };
+  const vars = { FLOW_SECRET: "test-flow-secret", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users, USER_DOMAINS: userDomains, RATE_AUTH_PER_MIN: "100000", RATE_TENANT_LOGIN_PER_MIN: "100000", RATE_SESSION_PER_MIN: "100000", ...extra };
   // Own state directory and inspector port, so several gateways can run side by side (node --test runs files in parallel).
   const args = ["wrangler", "dev", "--port", String(port), "--inspector-port", String(await freePort()), "--persist-to", mkdtempSync(join(tmpdir(), "parley-gw-"))];
   for (const [k, v] of Object.entries(vars)) if (v) args.push("--var", `${k}:${v}`);

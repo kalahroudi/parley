@@ -15,9 +15,14 @@ import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SKIP = new Set(["node_modules", ".git", ".wrangler", "dist"]);
-const CONFIG = /^(wrangler\.(jsonc?|toml)|\.dev\.vars.*|.*\.env)$/;
-const SOURCE_DIRS = ["gateway/src", "dashboard/src", "dashboard/worker"];
+const CONFIG = /^(wrangler\.(jsonc?|toml)|\.dev\.vars.*|\.env(\..*)?|.*\.env|package\.json|dockerfile.*|.*\.ya?ml)$/i;
+const SOURCE_DIRS = ["gateway/src", "dashboard/src", "dashboard/worker", "tests/harness"];
 const RELEASE_FILES = [".github/workflows/release.yml", "scripts/release.sh"];
+// Case, quotes, `+` concatenation, backslash continuations and line breaks are removed before matching, so
+// `"DEV_" +\n "AUTH"` and `dev_auth` are seen as the name they spell.
+const flat = (text) => text.toLowerCase().replace(/["'`+\\\s]/g, "");
+const NAME = /dev_?auth(?![a-z])/;
+const BEARER = /dev-?(admin|user)|bearerdev:/;
 const OFF = new Set(["", "0", "false"]);
 
 function walk(dir, keep) {
@@ -35,23 +40,24 @@ function walk(dir, keep) {
 // Every value DEV_AUTH is given in a config file: `"DEV_AUTH": "1"`, `DEV_AUTH = "1"`, `DEV_AUTH=1`, `DEV_AUTH:1`.
 function assigned(text) {
   const vals = [];
-  for (const m of text.matchAll(/DEV_AUTH["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s,}]*))/g)) vals.push((m[1] ?? m[2] ?? m[3] ?? "").trim());
+  for (const m of text.matchAll(/DEV_AUTH["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s,}]*))/gi)) vals.push((m[1] ?? m[2] ?? m[3] ?? "").trim());
   return vals;
 }
 
 export function check(root) {
   const problems = [];
-  const configs = [...walk(root, (n) => CONFIG.test(n)), ...RELEASE_FILES.map((f) => join(root, f)).filter(existsSync)];
+  const configs = [...new Set([...walk(root, (n) => CONFIG.test(n)), ...RELEASE_FILES.map((f) => join(root, f)).filter(existsSync)])];
   for (const f of configs) {
     const text = readFileSync(f, "utf8");
-    if (!text.includes("DEV_AUTH")) continue;
+    if (!NAME.test(flat(text))) continue;
     const vals = assigned(text);
     // A mention with no readable value (for example a wrangler `secrets` list) counts as enabled.
     if (vals.length === 0 || vals.some((v) => !OFF.has(v.toLowerCase()))) problems.push(`${relative(root, f)}: DEV_AUTH is enabled`);
   }
   for (const d of SOURCE_DIRS) {
     for (const f of walk(join(root, d), () => true)) {
-      if (/DEV_AUTH|dev-admin|dev-user/.test(readFileSync(f, "utf8"))) problems.push(`${relative(root, f)}: development auth path present`);
+      const t = flat(readFileSync(f, "utf8"));
+      if (NAME.test(t) || BEARER.test(t)) problems.push(`${relative(root, f)}: development auth path present`);
     }
   }
   return problems;
