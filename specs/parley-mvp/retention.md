@@ -15,7 +15,7 @@ A held event is the exact event body the daemon would have received: the sealed 
 
 ## Setting
 
-Unset, a tenant is Strict.
+Unset, a tenant is Strict. This change holds no R2 objects (none exist yet): T307 proves deletion of encrypted files and T308 documents what Cloudflare retains. Limits are per task (16 events, 4 MiB) and per caller device (256 tasks), which bounds a tenant by its enrolled devices.
 
 `POST /v1/admin/retention` (admin, body `{}`) returns `{mode, queue_ttl_ms}`. `POST /v1/admin/retention/put` with `{mode: "strict"|"queued", queue_ttl_ms?}` sets it (TTL 15 min to 24 h, default 1 h, kept when omitted) and writes a `retention.put` audit event. A task keeps the mode it was created under; a TTL change applies to events held from then on.
 
