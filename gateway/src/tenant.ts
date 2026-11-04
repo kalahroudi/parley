@@ -88,6 +88,19 @@ interface StoredEnrollment extends Enrollment {
   poll_hash: string;
 }
 
+export const LOGIN_TTL_MS = 10 * 60_000;
+export const MAX_PENDING_LOGINS = 100;
+
+interface StoredLogin {
+  session_hash: string;
+  poll_hash: string;
+  code: string;
+  exp: number;
+  state: "pending" | "authed" | "done";
+  email?: string;
+  confirm_hash?: string;
+}
+
 interface StoredToken {
   owner: string;
   exp: number;
@@ -133,7 +146,7 @@ export interface RetentionSettings {
 
 export type DirectoryError = "bad_retention" | "not_enrolled" | "bad_card" | "secret_detected" | "too_many_cards" | "bad_query" | "bad_group" | "bad_members" | "too_many_groups";
 
-export type EnrollError = "bad_token" | "queue_full" | "owner_full" | "bad_request";
+export type EnrollError = "bad_token" | "queue_full" | "owner_full" | "bad_request" | "conflict";
 
 const enc = new TextEncoder();
 const hex = (b: ArrayBuffer | Uint8Array) =>
@@ -164,9 +177,21 @@ export class Tenant extends DurableObject<Env> {
   // Starts a session for a verified login. Only the hash of the returned secret
   // is kept; the oldest sessions of the same user and role beyond the cap go.
   async createSession(email: string, role: Role): Promise<{ secret: string; csrf: string; expires_at: number }> {
-    const now = Date.now();
     const secret = random(32);
-    const key = `ses:${await sha256(secret)}`; // hashed first: no await between the cap check and the write
+    return { secret, ...(await this.storeSession(email, role, await sha256(secret))) };
+  }
+
+  // A device login (src/login.ts): the caller holds the secret and only its hash arrives, so no plaintext is stored
+  // or relayed. The hash must be new, or an existing session could be overwritten.
+  private async createDeviceSession(email: string, secretHash: string): Promise<boolean> {
+    if ((await this.ctx.storage.get(`ses:${secretHash}`)) !== undefined) return false;
+    await this.storeSession(email, "user", secretHash);
+    return true;
+  }
+
+  private async storeSession(email: string, role: Role, secretHash: string): Promise<{ csrf: string; expires_at: number }> {
+    const now = Date.now();
+    const key = `ses:${secretHash}`;
     const rec: Session = { email, role, csrf: random(16), created: now, exp: now + SESSION_TTL_MS };
     const all = [...(await this.ctx.storage.list<Session>({ prefix: "ses:" }))].sort((a, b) => a[1].created - b[1].created);
     const mine = all.filter(([, s]) => s.email === email && s.role === role);
@@ -176,7 +201,58 @@ export class Tenant extends DurableObject<Env> {
     await Promise.all(this.deleteAll([...evict]));
     await this.ctx.storage.put(key, rec);
     await this.schedule(rec.exp);
-    return { secret, csrf: rec.csrf, expires_at: rec.exp };
+    return { csrf: rec.csrf, expires_at: rec.exp };
+  }
+
+  // Device logins (`parley-cli login`). The CLI makes the session secret and the poll secret and sends only their
+  // hashes. The browser proves who the user is (OIDC) and the user confirms the code the terminal shows, which is what
+  // stops someone else's terminal from receiving your session. The session is created at confirmation with the CLI's
+  // hash, so the gateway never holds a usable session secret.
+  async loginStart(sessionHash: string, pollHash: string): Promise<{ id: string; code: string; expires_at: number } | { error: "bad_request" | "too_many" }> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const hex64 = /^[0-9a-f]{64}$/;
+      if (!hex64.test(sessionHash) || !hex64.test(pollHash)) return { error: "bad_request" as const };
+      const now = Date.now();
+      const live = [...(await this.ctx.storage.list<StoredLogin>({ prefix: "lgn:" })).values()].filter((l) => l.exp > now);
+      if (live.length >= MAX_PENDING_LOGINS) return { error: "too_many" as const };
+      const id = random(16);
+      const code = random(4).toUpperCase().replace(/(.{4})(.{4})/, "$1-$2");
+      const exp = now + LOGIN_TTL_MS;
+      await this.ctx.storage.put(`lgn:${id}`, { session_hash: sessionHash, poll_hash: pollHash, code, exp, state: "pending" } satisfies StoredLogin);
+      await this.schedule(exp);
+      return { id, code, expires_at: exp };
+    });
+  }
+
+  // The browser's OIDC login succeeded for `email`: hands back the code to show and a one-time confirm secret for the
+  // page's form (kept as a hash). Once per login.
+  async loginAuth(id: string, email: string): Promise<{ code: string; confirm: string } | null> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const l = await this.ctx.storage.get<StoredLogin>(`lgn:${id}`);
+      if (!l || l.exp <= Date.now() || l.state !== "pending") return null;
+      const confirm = random(16);
+      await this.ctx.storage.put(`lgn:${id}`, { ...l, state: "authed", email, confirm_hash: await sha256(confirm) });
+      return { code: l.code, confirm };
+    });
+  }
+
+  async loginConfirm(id: string, confirm: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const l = await this.ctx.storage.get<StoredLogin>(`lgn:${id}`);
+      if (!l || l.exp <= Date.now() || l.state !== "authed" || !l.email || !l.confirm_hash || !timingSafeEqual(l.confirm_hash, await sha256(confirm))) return false;
+      if (!(await this.createDeviceSession(l.email, l.session_hash))) return false;
+      await this.ctx.storage.put(`lgn:${id}`, { ...l, state: "done", confirm_hash: undefined });
+      return true;
+    });
+  }
+
+  // The CLI asks whether the user confirmed. The answer "done" is given once, and the record goes with it.
+  async loginPoll(id: string, poll: string): Promise<"pending" | "done" | null> {
+    const l = await this.ctx.storage.get<StoredLogin>(`lgn:${id}`);
+    if (!l || l.exp <= Date.now() || !timingSafeEqual(l.poll_hash, await sha256(poll))) return null;
+    if (l.state !== "done") return "pending";
+    await this.ctx.storage.delete(`lgn:${id}`);
+    return "done";
   }
 
   // Null for an unknown, signed-out or expired session.
@@ -197,19 +273,31 @@ export class Tenant extends DurableObject<Env> {
 
   // `user` is the verified identity of an SSO login (interactive enrollment);
   // `token` is a pod token. Exactly one of them applies.
-  request(input: { user?: string; token?: string; name: string; signing_key: string }) {
+  // A device may choose the request id and poll secret itself (both random, made before it sends anything). Then the
+  // request is idempotent: repeating it after a lost reply or a crash returns the same request instead of queueing a
+  // second one, and a different key or poll secret under a taken id is a conflict.
+  request(input: { user?: string; token?: string; name: string; signing_key: string; id?: string; poll?: string }) {
     // Serialized: the token check and its consumption must not interleave with
     // another request using the same token (crypto awaits would let them).
     return this.ctx.blockConcurrencyWhile(() => this.enroll(input));
   }
 
   private async enroll(
-    input: { user?: string; token?: string; name: string; signing_key: string },
+    input: { user?: string; token?: string; name: string; signing_key: string; id?: string; poll?: string },
   ): Promise<{ id: string; poll: string } | { error: EnrollError }> {
     // Enrollment tolerates pasted whitespace; the stored key is the canonical spelling.
     const key = b64bytes(input.signing_key.replace(/\s/g, ""), 32);
     const name = cleanText(input.name, 100);
     if (!key || !name) return { error: "bad_request" };
+    const chosen = input.id !== undefined || input.poll !== undefined;
+    if (chosen) {
+      if (!/^[0-9a-f]{32}$/.test(input.id ?? "") || !/^[0-9a-f]{48,64}$/.test(input.poll ?? "")) return { error: "bad_request" };
+      const prior = await this.ctx.storage.get<StoredEnrollment>(`enr:${input.id}`);
+      if (prior) {
+        const same = timingSafeEqual(prior.poll_hash, await sha256(input.poll!)) && prior.signing_key === btoa(String.fromCharCode(...key));
+        return same ? { id: prior.id, poll: input.poll! } : { error: "conflict" };
+      }
+    }
     let owner = input.user === undefined ? undefined : cleanText(input.user, 254)?.toLowerCase();
     if (input.user !== undefined && !owner) return { error: "bad_request" };
     let kind: Enrollment["kind"] = "user";
@@ -226,8 +314,8 @@ export class Tenant extends DurableObject<Env> {
     if (queue.length >= MAX_PENDING) return { error: "queue_full" };
     if (queue.filter((e) => e.owner === owner).length >= MAX_PENDING_PER_OWNER) return { error: "owner_full" };
 
-    const id = random(16);
-    const poll = random(24);
+    const id = chosen ? input.id! : random(16);
+    const poll = chosen ? input.poll! : random(24);
     const rec: StoredEnrollment = {
       id,
       owner,
@@ -341,6 +429,12 @@ export class Tenant extends DurableObject<Env> {
     if (cur !== undefined) return cur === canonical ? "ok" : "conflict";
     await this.ctx.storage.put("root", canonical);
     return "ok";
+  }
+
+  // The registered root public key (base64), or null. Public by design: a daemon compares its fingerprint with the
+  // one the admin shared out of band, so a gateway that serves a different key is caught there.
+  async rootKey(): Promise<string | null> {
+    return (await this.ctx.storage.get<string>("root")) ?? null;
   }
 
   // The device's signing key and binding version if it may connect now: not revoked, an approved enrollment whose
@@ -595,6 +689,7 @@ export class Tenant extends DurableObject<Env> {
       await due(k, r.status === "pending" ? r.created + REQUEST_TTL_MS : (r.decided ?? r.created) + DECIDED_RETENTION_MS);
     }
     for (const [k, t] of await this.ctx.storage.list<StoredToken>({ prefix: "tok:" })) await due(k, t.exp);
+    for (const [k, l] of await this.ctx.storage.list<StoredLogin>({ prefix: "lgn:" })) await due(k, l.exp);
     const live = await this.enrolledOwners();
     const orphans = [...(await this.ctx.storage.list({ prefix: "card:", limit: MAX_CARDS_PER_TENANT })).keys()].filter((k) => !live.has(k.slice(5).split(":")[0]!));
     await Promise.all(this.deleteAll(orphans));

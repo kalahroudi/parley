@@ -7,6 +7,8 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+
+	"github.com/kalahroudi/parley/internal/keystore"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,5 +137,22 @@ func TestRefreshIntervalHasAnUpperBound(t *testing.T) {
 	}
 	if _, err := ParseConfig([]byte(goodJSON(`,"refresh_interval":"24h"`))); err != nil {
 		t.Errorf("24h is allowed: %v", err)
+	}
+}
+
+func TestKeyAccount(t *testing.T) {
+	c, err := ParseConfig([]byte(goodJSON("")))
+	if err != nil || c.KeyAccount != "dev-1" {
+		t.Fatalf("the account defaults to the device id: %+v %v", c, err)
+	}
+	if c, err = ParseConfig([]byte(goodJSON(`,"key_account":"k-1"`))); err != nil || c.KeyAccount != "k-1" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err := ParseConfig([]byte(goodJSON(`,"key_account":"a b"`))); !errors.Is(err, ErrConfig) {
+		t.Errorf("a bad account: %v", err)
+	}
+	kc, ok := KeyStoreFor(Config{KeyStore: KeyStoreKeychain, KeyAccount: "k-9"}, Dirs{}).(*keystore.KeychainStore)
+	if !ok || kc.Account != "k-9" {
+		t.Errorf("the keychain entry is filed under key_account: %+v", kc)
 	}
 }

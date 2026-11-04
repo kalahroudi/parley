@@ -50,8 +50,8 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
       user = id.email;
     }
     if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
-    const r = await tenantStub(env, tenant).request({ user, token, name: str(b.name) ?? "", signing_key: str(b.signing_key) ?? "" });
-    if ("error" in r) return json(r.error === "bad_token" ? 401 : r.error === "queue_full" || r.error === "owner_full" ? 429 : 400, { error: r.error });
+    const r = await tenantStub(env, tenant).request({ user, token, name: str(b.name) ?? "", signing_key: str(b.signing_key) ?? "", id: str(b.id), poll: str(b.poll) });
+    if ("error" in r) return json(r.error === "bad_token" ? 401 : r.error === "queue_full" || r.error === "owner_full" ? 429 : r.error === "conflict" ? 409 : 400, { error: r.error });
     return json(202, r);
   }
 
@@ -69,6 +69,14 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
     if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
     const l = await tenantStub(env, tenant).revocations();
     return l ? json(200, l) : json(404, { error: "not_found" });
+  }
+
+  // The root public key, for a daemon that pins its fingerprint (`parley-cli login --root`). Not a secret.
+  if (pathname === "/v1/root") {
+    const tenant = str(b.tenant);
+    if (!tenant || !ID.test(tenant)) return json(400, { error: "bad_request" });
+    const k = await tenantStub(env, tenant).rootKey();
+    return k ? json(200, { root_public_key: k }) : json(404, { error: "not_found" });
   }
 
   const admin: Principal | null = await principal(req, env);

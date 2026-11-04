@@ -8,6 +8,7 @@ import { handleSession, issueSession } from "./session";
 import { Device } from "./device";
 import { handleDirectory } from "./directory";
 import { handleEnroll } from "./enroll";
+import { handleLogin } from "./login";
 import { Task } from "./task";
 import { limitAuth, RateLimit } from "./ratelimit";
 import { Tenant } from "./tenant";
@@ -44,15 +45,16 @@ export default {
     // Identifiers travel in the Authorization header and frames, never in the URL.
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
-    if (pathname.startsWith("/auth/") || pathname === "/v1/session" || pathname === "/v1/session/logout" || pathname.startsWith("/v1/connect/")) {
+    if (pathname.startsWith("/auth/") || pathname === "/v1/session" || pathname === "/v1/session/logout" || pathname.startsWith("/v1/connect/") || pathname.startsWith("/v1/login/")) {
       const refused = await limitAuth(request, env);
       if (refused) return refused;
     }
     if (pathname.startsWith("/auth/")) return handleAuth(request, env, undefined, issueSession.bind(null, request, env));
     if (pathname === "/v1/connect/challenge" || pathname === "/v1/connect/token") return handleConnectAuth(request, env);
+    if (pathname.startsWith("/v1/login/")) return handleLogin(request, env);
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
-    if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations") return handleEnroll(request, env);
+    if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations" || pathname === "/v1/root") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {
       return request.method === "GET" ? Response.json(agentCard(new URL(request.url).origin)) : new Response("method not allowed", { status: 405 });
     }

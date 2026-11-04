@@ -113,6 +113,49 @@ func (c *Client) RequestEnrollment(ctx context.Context, name string, key ed25519
 	return r.ID, r.Poll, err
 }
 
+// EnrollRequest is a full enrollment request. With ID and Poll chosen by the
+// device (32 and 48..64 lowercase hex characters, from a CSPRNG, saved before
+// sending) the request is idempotent at the gateway: repeating it after a lost
+// reply or a crash returns the same request. Token (a pod's single-use token)
+// and Tenant replace the user identity from Client.Auth.
+type EnrollRequest struct {
+	Tenant, Token, Name string
+	Key                 ed25519.PublicKey
+	ID, Poll            string
+}
+
+// Request sends r and returns the request id and the secret for polling it.
+func (c *Client) Request(ctx context.Context, r EnrollRequest) (id, poll string, err error) {
+	body := map[string]any{"name": r.Name, "signing_key": r.Key}
+	for k, v := range map[string]string{"tenant": r.Tenant, "token": r.Token, "id": r.ID, "poll": r.Poll} {
+		if v != "" {
+			body[k] = v
+		}
+	}
+	var out struct{ ID, Poll string }
+	err = c.post(ctx, "/v1/enroll/request", body, &out)
+	return out.ID, out.Poll, err
+}
+
+// ErrBadRoot means the gateway's root key reply is not a 32-byte key.
+var ErrBadRoot = errors.New("trust: the gateway returned no valid root public key")
+
+// FetchRoot reads the tenant's root public key from the gateway. The gateway is
+// not trusted for it: the caller must compare its fingerprint with the one the
+// admin shared out of band before pinning it.
+func (c *Client) FetchRoot(ctx context.Context, tenant string) (ed25519.PublicKey, error) {
+	var r struct {
+		Key []byte `json:"root_public_key"`
+	}
+	if err := c.post(ctx, "/v1/root", map[string]string{"tenant": tenant}, &r); err != nil {
+		return nil, err
+	}
+	if len(r.Key) != ed25519.PublicKeySize {
+		return nil, ErrBadRoot
+	}
+	return ed25519.PublicKey(r.Key), nil
+}
+
 // EnrollmentStatus polls a request with the secret from RequestEnrollment.
 func (c *Client) EnrollmentStatus(ctx context.Context, tenant, id, poll string) (*Status, error) {
 	var s Status

@@ -67,8 +67,11 @@ func (d *Daemon) Warning(now time.Time) string {
 // cannot turn a loop into a busy loop against the gateway (or panic a Ticker).
 const defaultPoll = 5 * time.Second
 
-// maxEnrollWait bounds how long Enroll waits for a decision and its binding.
+// maxEnrollWait bounds how long Await waits for a decision and its binding.
 const maxEnrollWait = 24 * time.Hour
+
+// maxPoll caps the backoff between status polls: an admin may take hours, and every poll costs the gateway a request.
+const maxPoll = 30 * time.Second
 
 // RunRefresh refreshes every interval until ctx ends, reporting failures to onErr.
 func (d *Daemon) RunRefresh(ctx context.Context, every time.Duration, clock func() time.Time, onErr func(error)) {
@@ -96,15 +99,23 @@ func (d *Daemon) RunRefresh(ctx context.Context, every time.Duration, clock func
 // returns the root-signed binding. The binding is verified against the pinned
 // root and recorded in the tracker, so a gateway cannot substitute another.
 func (d *Daemon) Enroll(ctx context.Context, name string, key ed25519.PublicKey, poll time.Duration, clock func() time.Time) (*binding.Signed, error) {
+	id, secret, err := d.Client.RequestEnrollment(ctx, name, key)
+	if err != nil {
+		return nil, err
+	}
+	return d.Await(ctx, id, secret, key, poll, clock)
+}
+
+// Await waits for the decision on a request already made (id and secret from
+// RequestEnrollment), so a device that restarted can pick the wait up again.
+// It returns ErrNotFound when the gateway no longer knows the request (it
+// expired), ErrRejected, or the verified and recorded binding.
+func (d *Daemon) Await(ctx context.Context, id, secret string, key ed25519.PublicKey, poll time.Duration, clock func() time.Time) (*binding.Signed, error) {
 	if poll <= 0 {
 		poll = defaultPoll
 	}
 	ctx, cancel := context.WithTimeout(ctx, maxEnrollWait)
 	defer cancel()
-	id, secret, err := d.Client.RequestEnrollment(ctx, name, key)
-	if err != nil {
-		return nil, err
-	}
 	for {
 		st, err := d.Client.EnrollmentStatus(ctx, d.Tenant, id, secret)
 		if err != nil {
@@ -128,6 +139,8 @@ func (d *Daemon) Enroll(ctx context.Context, name string, key ed25519.PublicKey,
 			return nil, ctx.Err()
 		case <-time.After(poll):
 		}
+		// Back off by half each time, up to maxPoll.
+		poll = min(poll+poll/2+1, maxPoll)
 	}
 }
 
