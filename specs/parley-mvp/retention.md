@@ -4,7 +4,7 @@ Gateway: `gateway/src/task.ts` (held events, TTL, deletion), `gateway/src/device
 
 ## What is stored
 
-| | Strict | Queued (default) |
+| | Strict (default) | Queued |
 |---|---|---|
 | Task frames to the target | relayed, never stored | relayed, never stored |
 | Results and status to the caller | relayed only while the caller is connected; otherwise the task fails ("disconnected") | relayed if connected; otherwise the sealed event is held in the Task DO |
@@ -14,6 +14,8 @@ Gateway: `gateway/src/task.ts` (held events, TTL, deletion), `gateway/src/device
 A held event is the exact event body the daemon would have received: the sealed envelope and routing hints, nothing readable. Only target-to-caller messages are held; the Task DO refuses to hold anything else.
 
 ## Setting
+
+Unset, a tenant is Strict.
 
 `POST /v1/admin/retention` (admin, body `{}`) returns `{mode, queue_ttl_ms}`. `POST /v1/admin/retention/put` with `{mode: "strict"|"queued", queue_ttl_ms?}` sets it (TTL 15 min to 24 h, default 1 h, kept when omitted) and writes a `retention.put` audit event. A task keeps the mode it was created under; a TTL change applies to events held from then on.
 
@@ -26,7 +28,7 @@ A held event is the exact event body the daemon would have received: the sealed 
    - **TTL.** The Task DO alarm deletes events whose `exp` has passed. Reads never return an expired event, even before the alarm runs.
 4. When the last held event is gone, the record gets `ciphertext_deleted_at` (shown in the task's `metadata.parley`). Holding a new event clears it.
 
-The 90-day metadata purge deletes everything in the Task DO, held events included.
+Cancel, expiry and a dropped Strict socket delete every held event at once. The 90-day metadata purge deletes everything in the Task DO, held events included.
 
 ## Claims
 

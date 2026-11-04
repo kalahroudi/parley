@@ -83,6 +83,8 @@ export interface QueuedEvent {
   exp: number;
 }
 const QP = "q:";
+// Cancel, expiry and a dropped Strict socket end the task without a result to deliver.
+const released = (rec: TaskRecord) => rec.state === "CANCELED" || rec.reason === "expired" || rec.reason === "disconnected";
 const qkey = (id: number) => `${QP}${String(id).padStart(12, "0")}`;
 
 export type CreateError = "bad_request" | "exists";
@@ -172,7 +174,7 @@ export class Task extends DurableObject<Env> {
       const rec = await this.open(tenant);
       if (!rec) return "not_found";
       if (device !== rec.target) return "forbidden";
-      if (rec.retention !== "queued") return "not_queued";
+      if (rec.retention !== "queued" || released(rec)) return "not_queued";
       const held = await this.settle(rec);
       if (held.length >= MAX_QUEUED || held.reduce((n, [, e]) => n + byteLength(e.body), byteLength(body)) > MAX_QUEUED_BYTES) return "full";
       const id = ++rec.qseq;
@@ -261,8 +263,19 @@ export class Task extends DurableObject<Env> {
     rec.state = to;
     rec.updated = Math.max(rec.updated, at);
     if (reason) rec.reason = reason;
+    if (released(rec)) await this.release(rec);
     await this.save(rec, this.deadline(rec));
     return rec;
+  }
+
+  // A canceled, expired or abandoned task has no one left to deliver to: delete
+  // every held event now instead of waiting for its TTL.
+  private async release(rec: TaskRecord): Promise<void> {
+    const keys = [...(await this.ctx.storage.list({ prefix: QP })).keys()];
+    if (!keys.length) return;
+    await this.ctx.storage.delete(keys);
+    delete rec.queue_until;
+    rec.ciphertext_deleted_at = Date.now();
   }
 
   // The record and its alarm are written with no await between them, so storage

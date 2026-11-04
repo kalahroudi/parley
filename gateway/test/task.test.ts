@@ -622,7 +622,8 @@ describe("retention", () => {
   });
 
   it("deletes a held event at its TTL, from the alarm, and keeps the task's other deadline", async () => {
-    const s = await queued();
+    const s = stub();
+    await s.create({ tenant: T, id: "abc", caller: "alice", target: "bob", retention: "queued", ttl_ms: TASK_TTL_MAX_MS });
     const t0 = Date.now();
     await hold(s, "short", QUEUE_TTL_MIN_MS);
     await hold(s, "long", HOUR);
@@ -633,7 +634,7 @@ describe("retention", () => {
     await deliverAlarm(s);
     expect(await heldKeys(s)).toEqual(["q:000000000002"]);
     const r = await rec(s);
-    expect(r.state).toBe("FAILED"); // the task expired at 15 minutes, as before
+    expect(r.state).toBe("SUBMITTED"); // the task itself is still alive
     expect(r.queue_until).toBe(t0 + HOUR);
     expect(r.ciphertext_deleted_at).toBeUndefined();
     expect(await alarmOf(s)).toBe(t0 + HOUR); // the next held event, ahead of the 90-day purge
@@ -641,8 +642,42 @@ describe("retention", () => {
     await deliverAlarm(s);
     expect(await heldKeys(s)).toEqual([]);
     expect((await rec(s)).ciphertext_deleted_at).toBe(t0 + HOUR);
-    expect(await alarmOf(s)).toBe(r.updated + TASK_METADATA_RETENTION_MS);
+    expect(await alarmOf(s)).toBe(r.expires_at);
     expect(await s.drain(T, "alice")).toEqual([]);
+  });
+
+  it("canceling the task deletes every held event at once", async () => {
+    const s = await queued();
+    await hold(s, "one");
+    await hold(s, "two");
+    await s.apply(T, "alice", "CANCEL", 1);
+    expect(await heldKeys(s)).toEqual([]);
+    const r = await rec(s);
+    expect(r.ciphertext_deleted_at).toBe(Date.now());
+    expect(r.queue_until).toBeUndefined();
+    expect(await hold(s, "late")).toBe("not_queued"); // a message racing the cancel is not kept
+    expect(await heldKeys(s)).toEqual([]);
+  });
+
+  it("expiry deletes every held event, at the alarm and on a read, long before its TTL", async () => {
+    for (const via of ["alarm", "read"] as const) {
+      const s = stub();
+      await s.create({ tenant: T, id: `e${via}`, caller: "alice", target: "bob", retention: "queued", ttl_ms: QUEUE_TTL_MIN_MS });
+      await hold(s, "x", QUEUE_TTL_MAX_MS);
+      vi.setSystemTime(Date.now() + QUEUE_TTL_MIN_MS);
+      if (via === "alarm") await deliverAlarm(s);
+      else expect(await s.drain(T, "alice")).toEqual([]);
+      expect(await heldKeys(s)).toEqual([]);
+      expect(await hold(s, "late")).toBe("not_queued");
+      expect((await rec(s)).ciphertext_deleted_at).toBeGreaterThan(0);
+    }
+  });
+
+  it("a dropped caller socket deletes held events", async () => {
+    const s = await queued();
+    await hold(s, "x");
+    await s.callerDisconnected(T, "alice");
+    expect(await heldKeys(s)).toEqual([]);
   });
 
   it("never returns an event past its TTL, even before the alarm has run", async () => {
@@ -688,4 +723,10 @@ describe("retention", () => {
     await evictDurableObject(s);
     expect(await s.drain(T, "alice")).toHaveLength(1);
   });
+});
+
+// Parts of the retention acceptance that need the whole system (daemon, R2 file store) come with T307.
+describe("T307 retention deletion acceptance", () => {
+  it.todo("T307: a daemon-acknowledged result is gone from Task DO storage and the encrypted-file R2 objects are deleted and verified absent");
+  it.todo("T307: Queued TTL deletion with a real daemon reconnect after the TTL receives nothing");
 });
