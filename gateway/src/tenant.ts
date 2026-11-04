@@ -19,7 +19,7 @@ import {
   type Card,
   type Page,
 } from "./acl";
-import { CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type Scope } from "./connect";
+import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type Scope } from "./connect";
 import type { Env } from "./index";
 import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, type Retention } from "./task";
 import { cleanText } from "./text";
@@ -366,18 +366,21 @@ export class Tenant extends DurableObject<Env> {
 
   // A challenge for the device. Only a device that may connect gets one stored (by hash, 60 s, a few at a time);
   // for any other the answer is the same shape and nothing is stored.
-  async issueChallenge(tenant: string, device: string): Promise<{ challenge: string; expires_at: number }> {
-    const challenge = randomChallenge();
-    const now = Date.now();
-    const out = { challenge, expires_at: now + CHALLENGE_TTL_MS };
-    if (!(await this.connectable(tenant, device))) return out;
-    const mine = [...(await this.ctx.storage.list<StoredConnect>({ prefix: `chal:${device}:` }))].sort((a, b) => a[1].created - b[1].created);
-    await Promise.all([
-      this.ctx.storage.put(`chal:${device}:${await sha256(challenge)}`, { created: now, exp: out.expires_at } satisfies StoredConnect),
-      ...this.deleteAll(mine.slice(0, Math.max(0, mine.length - MAX_CHALLENGES_PER_DEVICE + 1)).map(([k]) => k)),
-    ]);
-    await this.schedule(out.expires_at);
-    return out;
+  issueChallenge(tenant: string, device: string): Promise<{ challenge: string; expires_at: number }> {
+    // Serialized, so concurrent requests cannot each count the same outstanding challenges and exceed the cap.
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const challenge = randomChallenge();
+      const now = Date.now();
+      const out = { challenge, expires_at: now + CHALLENGE_TTL_MS };
+      if (!(await this.connectable(tenant, device))) return out;
+      const mine = [...(await this.ctx.storage.list<StoredConnect>({ prefix: `chal:${device}:` }))].sort((a, b) => a[1].created - b[1].created);
+      await Promise.all([
+        this.ctx.storage.put(`chal:${device}:${await sha256(challenge)}`, { created: now, exp: out.expires_at } satisfies StoredConnect),
+        ...this.deleteAll(mine.slice(0, Math.max(0, mine.length - MAX_CHALLENGES_PER_DEVICE + 1)).map(([k]) => k)),
+      ]);
+      await this.schedule(out.expires_at);
+      return out;
+    });
   }
 
   // Issues a connect token. The challenge is consumed first, so it is single use whatever else is wrong. Null, for
@@ -393,7 +396,7 @@ export class Tenant extends DurableObject<Env> {
       await this.ctx.storage.delete(k);
       const now = Date.now();
       const bound = await this.connectable(tenant, device);
-      const sig = decodeBytes(signature, 64);
+      const sig = b64bytes(signature, 64);
       if (rec.exp <= now || !bound || bound.version !== version || !sig) return null;
       if (!(await verifyEd25519(bound.key, sig, connectMessage(tenant, device, challenge, rec.exp, version, scope)))) return null;
       const secret = random(32);

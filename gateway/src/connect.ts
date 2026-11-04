@@ -72,15 +72,22 @@ export function b64bytes(v: unknown, length: number): Uint8Array | null {
   if (typeof v !== "string") return null;
   try {
     const bin = atob(v);
-    return bin.length === length ? Uint8Array.from(bin, (c) => c.charCodeAt(0)) : null;
+    // atob also takes whitespace, missing padding and stray trailing bits: only the one canonical spelling is accepted.
+    return bin.length === length && btoa(bin) === v ? Uint8Array.from(bin, (c) => c.charCodeAt(0)) : null;
   } catch {
     return null;
   }
 }
 
-// The key is imported not extractable, for this one check.
-export const verifyEd25519 = async (key: Uint8Array, sig: Uint8Array, msg: Uint8Array) =>
-  crypto.subtle.verify({ name: "Ed25519" }, await crypto.subtle.importKey("raw", key, { name: "Ed25519" }, false, ["verify"]), sig, msg);
+// The key is imported not extractable, for this one check. A key the runtime cannot import is a failed check, not a
+// throw (a throw inside the Tenant DO's blockConcurrencyWhile would reset the whole object).
+export async function verifyEd25519(key: Uint8Array, sig: Uint8Array, msg: Uint8Array): Promise<boolean> {
+  try {
+    return await crypto.subtle.verify({ name: "Ed25519" }, await crypto.subtle.importKey("raw", key, { name: "Ed25519" }, false, ["verify"]), sig, msg);
+  } catch {
+    return false;
+  }
+}
 
 // A binding is good for `tenant` at `now` when every field is present and well formed, the root's signature over
 // internal/binding's encoding verifies, and not_after is still ahead. Returns the device's signing key and the
