@@ -19,7 +19,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +126,17 @@ jobs:
         env:
           MUTATION_SCOPE: changed
           BASE: origin/${{ github.base_ref }}
+        run: scripts/mutation.sh
+      # Each OS judges the Go files only it builds (lock_windows.go on Windows, and so on): gremlins
+      # parses every file, so on the wrong OS they only show as "not covered". The gate keeps failing
+      # on any not-covered or surviving mutant there (scripts/mutation-gate.mjs). TypeScript is Linux's.
+      - name: Mutation testing (tier 1, this OS's Go files)
+        if: runner.os != 'Linux' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          MUTATION_SCOPE: changed
+          BASE: origin/${{ github.base_ref }}
+          MUTATION_TS: "0"
         run: scripts/mutation.sh
       # Slow and Linux-only: each defence the malicious-gateway and prekey crash
       # tests exercise is removed in turn and the acceptance suite must go red.

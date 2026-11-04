@@ -10,7 +10,7 @@
 # negatives and also assignments, bitwise, logical, loop control, self-assignment).
 # Gremlins only counts killed / (killed + lived) and leaves mutants that no test
 # reaches out of the score, so the score is not used: scripts/mutation-gate.mjs
-# fails on every mutant that lived, timed out or was not covered, unless
+# fails on every mutant that lived or was not covered (a timed-out one is detected), unless
 # tests/coverage/mutation-allowlist.json names it with a reason. Nothing is
 # silent, and a stale entry fails a full run. TypeScript: stryker.config.json
 # breaks below 100 with no mutant excluded, and a runner error (a mutant whose
@@ -46,8 +46,11 @@ for p in $pkgs; do
 	node scripts/mutation-gate.mjs "$p" "$json" $stale || status=1
 done
 
-# Tier 1 TypeScript. Needs `npm ci` in gateway first.
-if [ -z "$mutate" ]; then
+# Tier 1 TypeScript. Needs `npm ci` in gateway first. Linux only: it is platform independent, so the
+# other OSes (which run this for their own Go files) set MUTATION_TS=0.
+if [ "${MUTATION_TS:-1}" = 0 ]; then
+	echo "== mutation: gateway tier 1 files (skipped on this OS)"
+elif [ -z "$mutate" ]; then
 	echo "== mutation: gateway tier 1 files (none affected by this change)"
 else
 	echo "== mutation: gateway tier 1 files:$mutate"

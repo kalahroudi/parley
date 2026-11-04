@@ -3,10 +3,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { check } from "../scripts/mutation-gate.mjs";
+import { RUNNERS, built, check, owned } from "../scripts/mutation-gate.mjs";
 import { check as checkStryker } from "../scripts/stryker-gate.mjs";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..");
@@ -20,8 +20,12 @@ test("mutation gate: only killed and not-viable mutants pass", () => {
   assert.deepEqual(check("internal/x", result(mut("KILLED"), mut("NOT VIABLE", 11)), []), []);
 });
 
-test("mutation gate: lived, timed-out and not-covered mutants fail unless allowlisted", () => {
-  for (const status of ["LIVED", "TIMED OUT", "NOT COVERED"]) {
+test("mutation gate: a timed-out mutant is detected (the tests hung on it), so it passes", () => {
+  assert.deepEqual(check("internal/x", result(mut("TIMED OUT")), []), []);
+});
+
+test("mutation gate: lived and not-covered mutants fail unless allowlisted", () => {
+  for (const status of ["LIVED", "NOT COVERED"]) {
     assert.equal(check("internal/x", result(mut(status)), []).length, 1, status);
     assert.deepEqual(check("internal/x", result(mut(status)), [entry({ status })]), [], `${status} allowlisted`);
   }
@@ -76,4 +80,42 @@ test("CI runs mutation on changed tier 1 code per pull request and in full on ma
   assert.match(nightly, /schedule:/);
   assert.match(nightly, /scripts\/mutation\.sh/);
   assert.ok(!/MUTATION_SCOPE/.test(nightly), "the nightly run must be the full one");
+});
+
+const [linux, darwin, windows] = RUNNERS;
+
+test("mutation gate: each Go file is judged on the runner that builds it, OS-specific code on its own OS", () => {
+  assert.deepEqual([...owned("internal/binding", linux)].sort(), ["binding.go", "lock_unix.go", "store.go", "syncdir_unix.go"]);
+  assert.deepEqual([...owned("internal/binding", windows)].sort(), ["lock_windows.go", "syncdir_windows.go"]);
+  assert.deepEqual([...owned("internal/prekey", windows)].sort(), ["harden_windows.go", "mem_windows.go"]);
+  assert.ok(owned("internal/prekey", darwin).has("harden_other.go"));
+  for (const f of owned("internal/binding", windows)) assert.ok(!owned("internal/binding", linux).has(f));
+});
+
+// Files that no runner builds have nothing for a runner to mutate. Each is listed with why.
+const UNBUILT = { "internal/prekey/scrub_other.go": "a function with an empty body (for architectures other than amd64 and arm64): no statement to cover or mutate" };
+
+test("mutation gate: every tier 1 Go file is owned by exactly one runner, bar the reviewed exceptions", () => {
+  const tiers = JSON.parse(read("tests/coverage/tiers.json")).tiers["1"].packages;
+  for (const pkg of tiers) {
+    const files = readdirSync(join(root, pkg)).filter((f) => f.endsWith(".go") && !f.endsWith("_test.go"));
+    for (const f of files) {
+      const owners = RUNNERS.filter((r) => owned(pkg, r, root).has(f));
+      if (UNBUILT[`${pkg}/${f}`]) {
+        assert.equal(owners.length, 0, `${pkg}/${f} is built somewhere now: drop it from UNBUILT`);
+        assert.ok(!RUNNERS.some((r) => built(pkg, r, root).has(f)));
+      } else assert.equal(owners.length, 1, `${pkg}/${f} is owned by ${owners.length} runners`);
+    }
+  }
+});
+
+test("mutation gate: on a runner, other OSes' files are skipped but every owned mutant must still be killed", () => {
+  const res = { files: [{ file_name: "lock_windows.go", mutations: [mut("NOT COVERED")] }, { file_name: "store.go", mutations: [mut("NOT COVERED", 20)] }] };
+  const own = owned("internal/binding", linux, root);
+  assert.deepEqual(check("internal/binding", res, [], { own }), ["NOT COVERED CONDITIONALS_NEGATION at internal/binding/store.go:20:3"]);
+  const win = owned("internal/binding", windows, root);
+  assert.deepEqual(check("internal/binding", res, [], { own: win }), ["NOT COVERED CONDITIONALS_NEGATION at internal/binding/lock_windows.go:10:3"]);
+  // An allowlist entry for a file this runner does not own is neither used nor stale here.
+  const stale = [entry({ package: "internal/binding", file: "lock_windows.go", status: "NOT COVERED" })];
+  assert.deepEqual(check("internal/binding", { files: [] }, stale, { stale: true, own }), []);
 });

@@ -21,12 +21,26 @@ therefore has two checks that together stand in for "100% line and branch":
    (`CONDITIONALS_NEGATION`, `CONDITIONALS_BOUNDARY`, `INVERT_LOGICAL`); a branch
    body no test reaches shows up as a mutant that is not covered. Every one of
    those fails the gate unless `mutation-allowlist.json` names it with a reason.
+   A mutant that makes the tests hang (timeout) counts as detected, as in Stryker:
+   the tests did not pass on it, and which mutants time out varies by runner.
+
+The allowlist holds two kinds of entry, each with its reason: constant
+   expressions (`const X = 90 * 24 * time.Hour` has no statement to cover; the
+   value is pinned by `TestConstantsArePinned` in the package) and equivalent
+   mutants (the directory fsync after a rename; the ignored `fd` of an anonymous
+   Linux `mmap`). The stale check applies per OS, to the files that OS owns.
 
 Statement coverage is measured on each of the three OSes in CI, so a file
 built only for one OS (`internal/prekey/mem_windows.go`, `harden_linux.go`,
 `quiesce_linux.go`, `scrub_*.go`) is held to 100% by the runner that builds it.
-Mutation runs on Linux only, so a mutant in a Windows-only file is
-"not covered" there and is listed in the allowlist with that reason.
+Mutation runs on each OS too: gremlins parses every `.go` file whatever its build
+constraints, so `scripts/mutation-gate.mjs` judges a file only on the first runner
+(Linux, then macOS, then Windows) whose `go list` builds it, and there every
+not-covered or surviving mutant fails the gate. Nothing OS-specific is
+allowlisted. `tests/mutation-gate.test.mjs` fails if a tier 1 file is owned by no
+runner, except `prekey/scrub_other.go` (an empty function for other architectures:
+no statement to cover or mutate). TypeScript mutation and the malicious-gateway
+mutants run on Linux only.
 
 ## Assembly (`internal/prekey/scrub_*.s`)
 
@@ -61,9 +75,16 @@ held to the tier 1 bar as well.
 ## When mutation runs
 
 - Pull request: `MUTATION_SCOPE=changed` mutates only the tier 1 packages and
-  files the PR touches (or whose tests it touches). A change to the gates
-  themselves (`tests/coverage/`, the mutation scripts, Stryker or vitest
-  config, `go.mod`) runs everything.
+  files the PR touches, plus every gateway tier 1 file that a changed gateway
+  test imports (a2a.test.ts kills task.ts mutants, not only task.test.ts). A
+  changed test helper in `gateway/test/` means every gateway file. A change to
+  the gates themselves (`tests/coverage/`, the mutation and Stryker gate
+  scripts, both workflows, Stryker or vitest config, `go.mod`) runs everything.
+- The choice is made by `scripts/mutation-scope.mjs` and it fails closed: if the
+  merge base with the base branch cannot be computed (a shallow checkout, a
+  missing ref) or the diff fails, it prints why and runs everything. It never
+  skips. `tests/mutation-scope.test.mjs` runs it in a shallow-clone fixture, and
+  the CI job checks out full history (`fetch-depth: 0`).
 - Every push to main and nightly (`.github/workflows/mutation.yml`): everything,
   with `--stale`, so an allowlist entry that no longer matches a mutant fails.
 - `scripts/malgw-mutations.sh` (the defences the malicious-gateway tests exercise)
