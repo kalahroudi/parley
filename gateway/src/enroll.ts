@@ -2,15 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Env } from "./index";
-import { csrfOk, principal, type Principal } from "./session";
+import { csrfOk, principal, tenantStub, type Principal } from "./session";
 import { MAX_LIST_BYTES, MAX_SIGNED_BYTES, type SignedBinding, type SignedList, type Tenant } from "./tenant";
 
 const MAX_BODY_BYTES = MAX_LIST_BYTES + 1024;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
-
-const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 
 async function body(req: Request): Promise<Record<string, unknown> | null> {
   if (req.method !== "POST") return null;

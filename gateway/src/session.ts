@@ -12,7 +12,7 @@ const json = (status: number, body: unknown, headers: HeadersInit = {}) =>
 
 export type Principal = { role: Role; tenant: string; email: string; csrf: string; secret: string; via: "cookie" | "bearer" };
 
-const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
+export const tenantStub = (env: Env, tenant: string) => env.TENANT.get(env.TENANT.idFromName(tenant)) as DurableObjectStub<Tenant>;
 const token = (tenant: string, secret: string) => `ps_${tenant}.${secret}`;
 
 // ADMINS is a comma-separated list of `tenant:email` pairs. Anyone not listed
