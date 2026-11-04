@@ -25,8 +25,19 @@ export function isAdmin(env: Env, tenant: string, email: string): boolean {
   return (env.ADMINS ?? "").split(",").some((e) => e.trim().toLowerCase() === want);
 }
 
-export function tenantConfigured(env: Env, tenant: string): boolean {
-  return (env.ADMINS ?? "").split(",").some((e) => e.trim().toLowerCase().startsWith(`${tenant.toLowerCase()}:`));
+// A user session needs the tenant to say who may have one, or it is refused. USERS is `tenant:email` pairs and
+// USER_DOMAINS is `tenant:domain` pairs, both comma-separated like ADMINS. An email matches USERS exactly (a
+// `+tag` address is a different entry) and USER_DOMAINS by its whole domain: `acme.test` admits `a@acme.test` and
+// `a+x@acme.test` but not `a@evil.acme.test`, `a@acme.test.evil.com` or an address with a second `@`.
+// Admins are governed by ADMINS alone; an admin who also needs a user session is listed in USERS.
+export function isUser(env: Env, tenant: string, email: string): boolean {
+  const e = email.trim().toLowerCase();
+  const at = e.indexOf("@");
+  if (at < 1 || at !== e.lastIndexOf("@") || at === e.length - 1) return false;
+  const t = tenant.toLowerCase();
+  const listed = (v: string | undefined) => (v ?? "").split(",").map((x) => x.trim().toLowerCase());
+  if (listed(env.USERS).includes(`${t}:${e}`)) return true;
+  return listed(env.USER_DOMAINS).includes(`${t}:${e.slice(at + 1)}`);
 }
 
 function sessionCookie(req: Request, value: string, maxAgeS: number): string {
@@ -38,9 +49,9 @@ function sessionCookie(req: Request, value: string, maxAgeS: number): string {
 // the HttpOnly cookie; the body carries what the page needs (the CSRF token).
 export async function issueSession(req: Request, env: Env, tenant: string, role: Role, email: string): Promise<Response> {
   if (!ID.test(tenant)) return json(400, { error: "bad_request" });
-  // One answer for "no such tenant", "not an admin" and "tenant not configured", so a login cannot probe which exist.
-  // Only tenants named in ADMINS can be signed in to at all: nobody can create a tenant by asking for it.
-  if (!tenantConfigured(env, tenant) || (role === "admin" && !isAdmin(env, tenant, email))) return json(403, { error: "not_admin" });
+  // One answer for every refusal (no such tenant, not an admin, not an allowed user), so a login cannot probe which
+  // exist. Admins come from ADMINS and users from USERS or USER_DOMAINS; with none of them set nobody gets a session.
+  if (!(role === "admin" ? isAdmin(env, tenant, email) : isUser(env, tenant, email))) return json(403, { error: "not_admin" });
   // Rotation: a login never reuses a session. The one this browser already presented, if any, ends now.
   const old = await principal(req, env);
   if (old) await tenantStub(env, old.tenant).endSession(old.secret);

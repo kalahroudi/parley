@@ -18,7 +18,7 @@ const skip = !existsSync(join(root, "gateway", "node_modules", ".bin")) && "gate
 const needs = skip && !process.env.CI ? { skip } : {};
 
 test("admin sessions: sign in through OIDC, cookie, CSRF, sign-out", needs, async () => {
-  const gw = await startGateway({ admins: "acme:root@example.test" });
+  const gw = await startGateway({ admins: "acme:root@example.test", userDomains: "acme:example.test" });
   try {
     const post = (path, { cookie, bearer, origin, csrf, body = {} } = {}) =>
       fetch(`${gw.url}${path}`, {

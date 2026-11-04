@@ -8,16 +8,26 @@ import { Device } from "./device";
 import { handleDirectory } from "./directory";
 import { handleEnroll } from "./enroll";
 import { Task } from "./task";
+import { limitAuth, RateLimit } from "./ratelimit";
 import { Tenant } from "./tenant";
 
-export { Device, Task, Tenant };
+export { Device, RateLimit, Task, Tenant };
 
 export interface Env extends AuthEnv {
   DEVICE: DurableObjectNamespace<Device>;
   TENANT: DurableObjectNamespace<Tenant>;
   TASK: DurableObjectNamespace<Task>;
+  RATE: DurableObjectNamespace<RateLimit>;
+  // Per-minute limits for the login and session endpoints (see ratelimit.ts); defaults apply when unset.
+  RATE_AUTH_PER_MIN?: string;
+  RATE_TENANT_LOGIN_PER_MIN?: string;
+  RATE_SESSION_PER_MIN?: string;
   // Comma-separated `tenant:email` pairs allowed to hold an admin session.
   ADMINS?: string;
+  // Comma-separated `tenant:email` pairs and `tenant:domain` pairs allowed to hold a user session. With neither set
+  // for a tenant, user logins to it are refused.
+  USERS?: string;
+  USER_DOMAINS?: string;
 }
 
 // Fails closed until connect tokens land: no credential opens a device connection.
@@ -26,6 +36,10 @@ export default {
     // Identifiers travel in the Authorization header and frames, never in the URL.
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ ok: true, service: "gateway" });
+    if (pathname.startsWith("/auth/") || pathname === "/v1/session" || pathname === "/v1/session/logout") {
+      const refused = await limitAuth(request, env);
+      if (refused) return refused;
+    }
     if (pathname.startsWith("/auth/")) return handleAuth(request, env, undefined, issueSession.bind(null, request, env));
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);

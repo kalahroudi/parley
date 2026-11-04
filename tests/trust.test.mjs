@@ -26,8 +26,9 @@ const needs = skip && !process.env.CI ? { skip } : {};
 test("trust: enroll, approve, revoke and stale-list behavior against the real gateway", needs, async () => {
   // The Go tests name their tenants <prefix>-1, <prefix>-2, ...; the admin of each signs in through the mock IdP.
   const prefix = `trust${randomBytes(4).toString("hex")}`;
-  const admins = Array.from({ length: 20 }, (_, i) => `${prefix}-${i + 1}:admin@example.test`).join(",");
-  const gw = await startGateway({ admins });
+  const tenants = Array.from({ length: 20 }, (_, i) => `${prefix}-${i + 1}`);
+  const admins = tenants.map((t) => `${t}:admin@example.test`).join(",");
+  const gw = await startGateway({ admins, userDomains: tenants.map((t) => `${t}:acme.test`).join(",") });
   try {
     const url = gw.url;
     // Async: the Go tests sign in through the mock IdP, which lives in this process.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { test } from "node:test";
+import { createHmac } from "node:crypto";
 import assert from "node:assert/strict";
 import { startMockOidc } from "./harness/oidc.mjs";
 import { completeLogin, entra, google, OidcError, startLogin } from "../gateway/src/oidc.ts";
@@ -313,12 +314,23 @@ test("callback over https sets a Secure cookie; unknown paths are 404", () =>
     assert.equal(cb.status, 401);
   }));
 
-test("session logins: tenant and role ride a cookie to the callback, which hands the identity to the issuer", () =>
+const sealWith = (secret, payload) => {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${body}.${createHmac("sha256", secret).update(body).digest("base64url")}`;
+};
+const unsealBody = (flow) => JSON.parse(Buffer.from(flow.split(".")[0], "base64url").toString());
+
+test("session logins: tenant and role live in the sealed flow, and the callback hands the identity to the issuer", () =>
   withIdp(async (idp) => {
     const env = { FLOW_SECRET: "s", GOOGLE_CLIENT_ID: "cid", GOOGLE_ISSUER: idp.issuer };
     const seen = [];
     const issue = async (tenant, role, email) => (seen.push([tenant, role, email]), Response.json({ role }, { status: 200, headers: { "set-cookie": "parley_session=x; Path=/" } }));
     const start = (qs) => handle(new Request(`http://gw.test/auth/google/login?${qs}`), env, undefined, issue);
+    const finish = async (login, { cookies, query = "" } = {}) => {
+      const q = await browse(login.headers.get("location"));
+      const jar = cookies ?? login.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+      return handle(new Request(`http://gw.test/auth/google/callback?${q}${query}`, { headers: { cookie: jar } }), env, undefined, issue);
+    };
 
     // Bad or half-given parameters are refused before anything is sent to the IdP.
     for (const qs of ["tenant=t1", "role=admin", "tenant=t1&role=root", "tenant=bad%20id&role=user", "tenant=&role=user"]) {
@@ -330,23 +342,66 @@ test("session logins: tenant and role ride a cookie to the callback, which hands
     assert.equal(login.status, 302);
     assert.equal(new URL(login.headers.get("location")).searchParams.get("login_hint"), "Root@example.test");
     const cookies = login.headers.getSetCookie();
-    assert.equal(cookies.length, 2);
-    assert.match(cookies[1], /^parley_ctx=t1\.admin; Path=\/auth\/google\/callback; HttpOnly/);
-    const q = await browse(login.headers.get("location"));
-    const jar = cookies.map((c) => c.split(";")[0]).join("; ");
-    const cb = await handle(new Request(`http://gw.test/auth/google/callback?${q}`, { headers: { cookie: jar } }), env, undefined, issue);
+    assert.equal(cookies.length, 1, "only the sealed flow cookie; no separate tenant/role cookie");
+    assert.match(cookies[0], /^parley_flow=/);
+    assert.doesNotMatch(cookies.join(), /parley_ctx/);
+    assert.deepEqual((({ s }) => s)(unsealBody(cookies[0].split(";")[0].split("=")[1])), { tenant: "t1", role: "admin" });
+    const cb = await finish(login);
     assert.equal(cb.status, 200);
     assert.deepEqual(seen, [["t1", "admin", "root@example.test"]]);
     const set = cb.headers.getSetCookie();
     assert.ok(set.some((c) => c.startsWith("parley_session=x")));
-    for (const name of ["parley_flow", "parley_ctx"]) assert.ok(set.some((c) => c.startsWith(`${name}=;`) && /Max-Age=0/.test(c)), name);
+    assert.ok(set.some((c) => c.startsWith("parley_flow=;") && /Max-Age=0/.test(c)));
     assert.equal(cb.headers.get("cache-control"), "no-store");
+    seen.length = 0;
 
-    // A login without tenant and role is the plain identity flow, and a callback without the ctx cookie is too.
+    // A forged cookie or query parameter at the callback changes nothing: the verified flow decides.
+    const forged = await finish(await start("tenant=t1&role=user"), { query: "&tenant=t2&role=admin" });
+    assert.equal(forged.status, 200);
+    const l2 = await start("tenant=t1&role=user");
+    const forged2 = await finish(l2, { cookies: `${l2.headers.getSetCookie()[0].split(";")[0]}; parley_ctx=t2.admin; parley_session=y` });
+    assert.equal(forged2.status, 200);
+    assert.deepEqual(seen, [["t1", "user", "alice@example.test"], ["t1", "user", "alice@example.test"]]);
+    seen.length = 0;
+
+    // Editing the sealed payload (tenant or role) breaks its signature; a re-sealed one under another secret fails too.
+    const l3 = await start("tenant=t1&role=user");
+    const flow = l3.headers.getSetCookie()[0].split(";")[0].split("=")[1];
+    for (const edit of [{ tenant: "t2", role: "user" }, { tenant: "t1", role: "admin" }]) {
+      const body = Buffer.from(JSON.stringify({ ...unsealBody(flow), s: edit })).toString("base64url");
+      const bad = await finish(l3, { cookies: `parley_flow=${body}.${flow.split(".")[1]}` });
+      assert.equal(bad.status, 401);
+      assert.deepEqual(await bad.json(), { error: "bad_flow" });
+    }
+    const resealed = sealWith("not-the-secret", { ...unsealBody(flow), s: { tenant: "t2", role: "admin" } });
+    assert.equal((await finish(l3, { cookies: `parley_flow=${resealed}` })).status, 401);
+    // Malformed session data inside a correctly sealed flow is refused as well.
+    for (const bad of [{ tenant: 5, role: "user" }, { tenant: "t1", role: "root" }, { tenant: "t1" }, null, "t1.admin"]) {
+      const sealed = sealWith("s", { ...unsealBody(flow), s: bad });
+      assert.equal((await finish(l3, { cookies: `parley_flow=${sealed}` })).status, 401, JSON.stringify(bad));
+    }
+    assert.deepEqual(seen, []);
+
+    // A flow sealed for tenant A cannot complete with the code and state of a login started for tenant B.
+    const la = await start("tenant=ta&role=user");
+    const lb = await start("tenant=tb&role=user");
+    const qb = await browse(lb.headers.get("location"));
+    const swapped = await handle(new Request(`http://gw.test/auth/google/callback?${qb}`, { headers: { cookie: la.headers.getSetCookie()[0].split(";")[0] } }), env, undefined, issue);
+    assert.equal(swapped.status, 401);
+    assert.deepEqual(await swapped.json(), { error: "state_mismatch" });
+    assert.deepEqual(seen, []);
+    // ...and each flow completes only for its own tenant.
+    assert.equal((await finish(la)).status, 200);
+    assert.equal((await finish(lb)).status, 200);
+    assert.deepEqual(seen.map((x) => x[0]), ["ta", "tb"]);
+    seen.length = 0;
+
+    // A login started without tenant and role stays the plain identity flow, whatever the callback is given.
     const plain = await handle(new Request("http://gw.test/auth/google/login"), env, undefined, issue);
     assert.equal(plain.headers.getSetCookie().length, 1);
-    const q2 = await browse(plain.headers.get("location"));
-    const cb2 = await handle(new Request(`http://gw.test/auth/google/callback?${q2}`, { headers: { cookie: plain.headers.getSetCookie()[0].split(";")[0] } }), env, undefined, issue);
-    assert.equal((await cb2.json()).provider, "google");
-    assert.equal(seen.length, 1);
+    const cb2 = await finish(plain, { cookies: `${plain.headers.getSetCookie()[0].split(";")[0]}; parley_ctx=t1.admin`, query: "&tenant=t1&role=admin" });
+    const who = await cb2.json();
+    assert.equal(who.provider, "google");
+    assert.equal(who.session, undefined);
+    assert.equal(seen.length, 0);
   }));

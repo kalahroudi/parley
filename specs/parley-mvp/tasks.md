@@ -60,6 +60,7 @@ Deliverable: `send_task` and `get_task` between two machines with an API-backed 
 - [x] T303 Directory, groups and ACLs
 - [ ] T304 Retention modes (Strict and Queued), TTL deletion
 - [ ] T305 Rate limits; sender-side waiting for offline targets
+- [ ] T310 Device connect tokens: short-lived, bound to tenant and device, issued after enrollment; the Worker accepts them on `/v1/connect` and `/a2a` (both are closed until then). Restores the parked acceptance tests listed in `tests/pending-t310.test.mjs` and `internal/tunnel/pending_test.go`
 - [ ] T306 Acceptance: exhaustive state-machine tests; the official A2A SDK completes a lifecycle
 - [ ] T307 Acceptance: ACL matrix; retention deletion at acknowledgment and TTL
 - [ ] T308 Acceptance: recovery-bookmark test documents what Cloudflare retains; R2 deletion behavior verified

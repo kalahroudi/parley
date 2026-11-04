@@ -55,8 +55,6 @@ export function providers(env: AuthEnv): Record<string, Provider> {
 }
 
 const COOKIE = "parley_flow";
-// Which tenant and role a login is for; set by /login?tenant=..&role=.. and read back by the callback.
-const CTX_COOKIE = "parley_ctx";
 export type SessionIssuer = (tenant: string, role: "admin" | "user", email: string) => Promise<Response>;
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -64,7 +62,8 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 // /auth/:provider/login redirects to the IdP; /auth/:provider/callback finishes
 // the flow. A login started with `?tenant=T&role=admin|user` ends in a session
 // for that tenant (issued by `issue`); without them the callback reports the
-// verified identity. Nothing about the user goes in URLs or logs.
+// verified identity. The tenant and role live inside the sealed flow, so the
+// callback takes them from nothing the browser can edit. Nothing about the user goes in URLs or logs.
 export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch, issue?: SessionIssuer): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname === "/healthz") return json(200, { ok: true });
@@ -85,21 +84,17 @@ export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch,
         return json(400, { error: "bad_request" });
       }
       const hint = url.searchParams.get("login_hint")?.slice(0, 254) || undefined;
-      const { url: to, flow } = await startLogin(ctx, p, redirectUri, hint);
-      const headers = new Headers({ location: to });
-      headers.append("set-cookie", `${COOKIE}=${flow}; ${cookieAttrs}`);
-      if (wantSession) headers.append("set-cookie", `${CTX_COOKIE}=${tenant}.${role}; ${cookieAttrs}`);
-      return new Response(null, { status: 302, headers });
+      const { url: to, flow } = await startLogin(ctx, p, redirectUri, hint, wantSession ? { tenant: tenant!, role: role as "admin" | "user" } : undefined);
+      return new Response(null, { status: 302, headers: { location: to, "set-cookie": `${COOKIE}=${flow}; ${cookieAttrs}` } });
     }
     const cookies = req.headers.get("cookie") ?? "";
     const flow = /(?:^|;\s*)parley_flow=([^;]+)/.exec(cookies)?.[1];
     const id = await completeLogin(ctx, p, flow, url.searchParams);
     const clear = (name: string) => `${name}=; ${cookieAttrs.replace("Max-Age=600", "Max-Age=0")}`;
-    const wanted = /(?:^|;\s*)parley_ctx=([A-Za-z0-9_-]{1,64})\.(admin|user)(?:;|$)/.exec(cookies);
-    const res = wanted && issue ? await issue(wanted[1]!, wanted[2] as "admin" | "user", id.email) : json(200, id);
+    const { session, ...who } = id;
+    const res = session ? (issue ? await issue(session.tenant, session.role, id.email) : json(400, { error: "bad_request" })) : json(200, who);
     const out = new Response(res.body, res);
     out.headers.append("set-cookie", clear(COOKIE));
-    out.headers.append("set-cookie", clear(CTX_COOKIE));
     out.headers.set("cache-control", "no-store");
     return out;
   } catch (e) {

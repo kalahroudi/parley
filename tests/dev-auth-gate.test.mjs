@@ -98,6 +98,7 @@ test("every reintroduction pattern fails the gate: other casing, split strings, 
     ["gateway/src/a.ts", "const m = 'dev-' + 'user';"],
     ["gateway/src/a.ts", "const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(h);"],
     ["dashboard/src/a.ts", "// dev-\nadmin"],
+    ["tests/harness/wrangler.mjs", 'export async function startGateway(dir, { vars = ["DEV_AUTH:1"] } = {}) {}'],
   ];
   for (const [file, text] of code) {
     const problems = check(repo({ [file]: text }));

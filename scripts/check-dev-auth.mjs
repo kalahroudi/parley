@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const SKIP = new Set(["node_modules", ".git", ".wrangler", "dist"]);
 const CONFIG = /^(wrangler\.(jsonc?|toml)|\.dev\.vars.*|\.env(\..*)?|.*\.env|package\.json|dockerfile.*|.*\.ya?ml)$/i;
-const SOURCE_DIRS = ["gateway/src", "dashboard/src", "dashboard/worker"];
+const SOURCE_DIRS = ["gateway/src", "dashboard/src", "dashboard/worker", "tests/harness"];
 const RELEASE_FILES = [".github/workflows/release.yml", "scripts/release.sh"];
 // Case, quotes, `+` concatenation, backslash continuations and line breaks are removed before matching, so
 // `"DEV_" +\n "AUTH"` and `dev_auth` are seen as the name they spell.
