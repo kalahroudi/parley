@@ -6,7 +6,8 @@
 //
 //  1. cheap header checks (tenant, target, validity window, prekey id);
 //  2. the sender: revocation, root-signed binding, owner allowlist and the
-//     transcript signature, all before any ciphertext is opened;
+//     transcript signature, all before any ciphertext is opened, then the
+//     optional Admit check of the signed header against the task's state;
 //  3. the replay table (recorded here, taken back if the message never runs);
 //  4. AEAD open, with the private key only lent, never consumed;
 //  5. erase the private key (Consume);
@@ -117,8 +118,21 @@ type Config struct {
 	Revoked func(device string) bool
 	// Allow is the owner's allowlist, evaluated on the binding's owner.
 	Allow func(owner string) bool
-	Skew  time.Duration    // zero means DefaultSkew
-	Now   func() time.Time // nil means time.Now
+	// Admit, if set, judges the signed header of an authentic message against the
+	// receiver's task state (a known task, the right sender, the next sequence
+	// number and previous-message hash) before anything is recorded or opened,
+	// so a message that does not belong cannot burn the prekey it was sealed to.
+	// It must be read-only: the receiver may still refuse the message later. An
+	// error is reported as ErrRejected. Nil admits every authentic message.
+	Admit func(h envelope.Header) error
+	// Keep, if set, names messages that do not end their prekey's use: after a
+	// successful open the key stays, and only the replay table stops a second
+	// delivery. The plan's reply key (rpk) is the one such key: it serves every
+	// reply of a task and is erased with the last one. Nil means every message
+	// consumes its key.
+	Keep func(h envelope.Header) bool
+	Skew time.Duration    // zero means DefaultSkew
+	Now  func() time.Time // nil means time.Now
 	// Fault is a test seam for crash points: a non-nil return aborts the
 	// receive right after that stage, as if the process had died there (the
 	// caller then builds a fresh pool and table to model the restart). Nil in
@@ -192,6 +206,11 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 	if err != nil {
 		return err
 	}
+	if r.cfg.Admit != nil {
+		if err := r.cfg.Admit(h); err != nil {
+			return fmt.Errorf("%w: %w", ErrRejected, err)
+		}
+	}
 	if err := r.fault(StageAuthenticated); err != nil {
 		return err
 	}
@@ -236,9 +255,13 @@ func (r *Receiver) Receive(m *envelope.Message, ack func() error, execute func(D
 		return err
 	}
 
-	// Erase. Exactly one of any concurrent deliveries wins this.
-	if err := r.cfg.Pool.Consume(id); err != nil {
-		return fmt.Errorf("%w: %w", ErrDropped, err)
+	// Erase. Exactly one of any concurrent deliveries wins this. A kept key is
+	// not erased here; the replay entry recorded above is what stops a second
+	// delivery of this message.
+	if r.cfg.Keep == nil || !r.cfg.Keep(h) {
+		if err := r.cfg.Pool.Consume(id); err != nil {
+			return fmt.Errorf("%w: %w", ErrDropped, err)
+		}
 	}
 	if err := r.fault(StageErased); err != nil {
 		return err

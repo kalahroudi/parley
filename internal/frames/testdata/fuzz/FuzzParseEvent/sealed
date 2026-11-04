@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"a2a\":\"1.0\",\"task\":{\"status\":{\"message\":{\"parts\":[{\"raw\":\"c2VhbGVk\",\"mediaType\":\"application/vnd.parley.sealed\"}]}}}}")
