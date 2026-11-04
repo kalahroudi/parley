@@ -20,6 +20,7 @@ import {
   type Page,
 } from "./acl";
 import type { Env } from "./index";
+import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, type Retention } from "./task";
 import { cleanText } from "./text";
 
 export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
@@ -97,7 +98,7 @@ export interface DirectoryEntry extends Card {
 // Metadata only: what changed and who did it, never member identities or card text.
 export interface AuditEvent {
   at: number;
-  action: "group.put" | "group.delete" | "card.publish" | "card.remove" | "revocations.put";
+  action: "group.put" | "group.delete" | "card.publish" | "card.remove" | "revocations.put" | "retention.put";
   actor: "admin" | string; // "admin" or a device id
   subject: string; // group name, card id, or list version
   detail?: Record<string, number | string>;
@@ -107,7 +108,14 @@ export const MAX_AUDIT = 500;
 // The device ids a signed revocation list names; anything not a string is ignored.
 const revokedOf = (l: { revoked?: unknown } | undefined | null) => new Set(Array.isArray(l?.revoked) ? l.revoked.filter((x): x is string => typeof x === "string") : []);
 
-export type DirectoryError = "not_enrolled" | "bad_card" | "secret_detected" | "too_many_cards" | "bad_query" | "bad_group" | "bad_members" | "too_many_groups";
+// The tenant's retention mode (Queued unless the admin chooses Strict) and how
+// long Queued keeps an unacknowledged result.
+export interface RetentionSettings {
+  mode: Retention;
+  queue_ttl_ms: number;
+}
+
+export type DirectoryError = "bad_retention" | "not_enrolled" | "bad_card" | "secret_detected" | "too_many_cards" | "bad_query" | "bad_group" | "bad_members" | "too_many_groups";
 
 export type EnrollError = "bad_token" | "queue_full" | "owner_full" | "bad_request";
 
@@ -457,6 +465,22 @@ export class Tenant extends DurableObject<Env> {
     if (!g || "error" in n) return null;
     const r = paginate([...g.members].sort(), (m) => m, page);
     return { name: n.name, members: r.items, ...(r.next_cursor ? { next_cursor: r.next_cursor } : {}) };
+  }
+
+  async retention(): Promise<RetentionSettings> {
+    return (await this.ctx.storage.get<RetentionSettings>("retention")) ?? { mode: "queued", queue_ttl_ms: QUEUE_TTL_DEFAULT_MS };
+  }
+
+  // Sets the retention mode and, optionally, the Queued TTL (15 minutes to 24
+  // hours; unchanged when omitted). Applies to tasks created from now on.
+  async setRetention(raw: unknown): Promise<RetentionSettings | { error: "bad_retention" }> {
+    const r = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+    if (!r || !Object.keys(r).every((k) => k === "mode" || k === "queue_ttl_ms") || (r.mode !== "strict" && r.mode !== "queued")) return { error: "bad_retention" };
+    const ttl = r.queue_ttl_ms === undefined ? (await this.retention()).queue_ttl_ms : r.queue_ttl_ms;
+    if (typeof ttl !== "number" || !Number.isSafeInteger(ttl) || ttl < QUEUE_TTL_MIN_MS || ttl > QUEUE_TTL_MAX_MS) return { error: "bad_retention" };
+    const next: RetentionSettings = { mode: r.mode, queue_ttl_ms: ttl };
+    await this.commit({ retention: next }, [], { action: "retention.put", actor: "admin", subject: next.mode, detail: { queue_ttl_ms: ttl } });
+    return next;
   }
 
   // Keep the earliest wake-up needed to purge records.
