@@ -423,7 +423,9 @@ describe("lifecycle over the transport", () => {
     // After a terminal state nothing is accepted.
     expect((await st(3, "RESULT")).result).toBeDefined();
     expect(errCode(await st(4))).toBe(-32015);
-  });
+    // About 25 requests through the Worker and several Durable Objects: seconds on Windows CI storage (41 s on one noisy run), so it
+    // gets the same explicit limit as the other long walks in this file rather than a higher global one.
+  }, 60_000);
 
   it("a third device, another tenant and a missing task all look like no task", async () => {
     const w = world();

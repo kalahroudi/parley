@@ -164,14 +164,16 @@ func (c *Client) post(ctx context.Context, path string, in, out any) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return ErrRefused
-	case resp.StatusCode == http.StatusTooManyRequests:
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
 		return ErrRateLimited
-	case resp.StatusCode != http.StatusOK:
+	}
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("connect: gateway answered %d", resp.StatusCode)
-	case len(raw) > maxResponse:
+	}
+	if len(raw) > maxResponse {
 		return ErrReply
 	}
 	if err := json.Unmarshal(raw, out); err != nil {

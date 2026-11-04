@@ -315,3 +315,37 @@ func TestTunnelURL(t *testing.T) {
 		}
 	}
 }
+
+// The body limit is exact: a reply of maxResponse bytes is read whole, one byte more is refused (the limit is
+// maxResponse+1 bytes read, so a longer body is cut but still seen as too long).
+func TestTokenReplySizeLimitIsExact(t *testing.T) {
+	pub, priv := key(t)
+	g := newGateway(t, pub)
+	const ch = `{"challenge":"abc","expires_at":1700000000000}`
+	for size, wantErr := range map[int]bool{maxResponse: false, maxResponse + 1: true, maxResponse + 100: true} {
+		g.override = func(path string, w http.ResponseWriter) bool {
+			if path != "/v1/connect/challenge" {
+				return false
+			}
+			fmt.Fprint(w, ch+strings.Repeat(" ", size-len(ch)))
+			return true
+		}
+		_, err := (&Client{BaseURL: g.srv.URL, Tenant: "t", Device: "d"}).Token(context.Background(), priv, 1, ScopeAPI)
+		if wantErr != errors.Is(err, ErrReply) {
+			t.Fatalf("a %d byte challenge reply: err = %v, want ErrReply = %v", size, err, wantErr)
+		}
+		if !wantErr && err != nil {
+			t.Fatalf("a %d byte challenge reply is refused: %v", size, err)
+		}
+	}
+}
+
+// Constant expressions have no statement for the mutation tool to cover, so their values are pinned here.
+func TestConstantsArePinned(t *testing.T) {
+	if maxResponse != 16384 {
+		t.Fatalf("maxResponse = %d", maxResponse)
+	}
+	if requestTimeout != 30*time.Second {
+		t.Fatalf("requestTimeout = %v", requestTimeout)
+	}
+}
