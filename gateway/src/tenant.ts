@@ -147,12 +147,13 @@ export class Tenant extends DurableObject<Env> {
   async createSession(email: string, role: Role): Promise<{ secret: string; csrf: string; expires_at: number }> {
     const now = Date.now();
     const secret = random(32);
+    const key = `ses:${await sha256(secret)}`; // hashed first: no await between the cap check and the write
     const rec: Session = { email, role, csrf: random(16), created: now, exp: now + SESSION_TTL_MS };
     const mine = [...(await this.ctx.storage.list<Session>({ prefix: "ses:" }))]
       .filter(([, s]) => s.email === email && s.role === role)
       .sort((a, b) => a[1].created - b[1].created);
     for (const [k] of mine.slice(0, Math.max(0, mine.length - MAX_SESSIONS_PER_USER + 1))) await this.ctx.storage.delete(k);
-    await this.ctx.storage.put(`ses:${await sha256(secret)}`, rec);
+    await this.ctx.storage.put(key, rec);
     await this.schedule(rec.exp);
     return { secret, csrf: rec.csrf, expires_at: rec.exp };
   }

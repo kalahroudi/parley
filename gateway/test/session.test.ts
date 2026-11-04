@@ -216,3 +216,11 @@ describe("login routes", () => {
     expect((await SELF.fetch("https://gw/auth/google/login?tenant=t&role=admin")).status).toBe(404);
   });
 });
+
+describe("allowlist changes", () => {
+  it("an admin session stops working once the email leaves ADMINS", async () => {
+    const t = tenant();
+    const s = await stub(t).createSession("gone@example.test", "admin"); // not on the test allowlist
+    expect((await call("/v1/session", { bearer: `Bearer ps_${t}.${s.secret}` })).status).toBe(401);
+  });
+});

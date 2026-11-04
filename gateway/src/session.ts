@@ -51,6 +51,8 @@ export async function principal(req: Request, env: Env): Promise<Principal | nul
   const m = /^ps_([^.]+)\.(.+)$/.exec(raw ?? "");
   if (!m || !ID.test(m[1]!) || !SECRET.test(m[2]!)) return null;
   const s = await tenantStub(env, m[1]!).getSession(m[2]!);
+  // The allowlist is checked on every request, so removing someone from ADMINS ends their admin sessions now, not at expiry.
+  if (s?.role === "admin" && !isAdmin(env, m[1]!, s.email)) return null;
   return s ? { role: s.role, tenant: m[1]!, email: s.email, csrf: s.csrf, secret: m[2]!, via } : null;
 }
 

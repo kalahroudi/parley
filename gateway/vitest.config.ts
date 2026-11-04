@@ -8,6 +8,8 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
+      // Tests mint admin sessions for admin@example.test in tenants named <prefix><n>.
+      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(",") } },
     }),
   ],
   test: {
