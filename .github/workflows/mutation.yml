@@ -1,0 +1,38 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Mutation (full)
+
+# Pull requests run mutation only on the tier 1 packages and files they change
+# (ci.yml, the "changed" scope). This runs all of tier 1 on every push to main
+# and nightly, so a change whose effect shows up in another package is caught
+# within a day, and a stale allowlist entry fails here.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      - name: Mutation testing (all of tier 1)
+        run: scripts/mutation.sh
+      - name: Malicious-gateway and prekey crash-point mutants
+        run: scripts/malgw-mutations.sh
