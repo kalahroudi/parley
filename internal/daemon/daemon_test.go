@@ -291,11 +291,11 @@ func TestRunFailsWhenInstanceLockCannotBeOpened(t *testing.T) {
 func TestNewUsesKeychainByDefault(t *testing.T) {
 	e := newEnv(t)
 	e.cfg.KeyStore = KeyStoreKeychain
-	if _, ok := keyStoreFor(e.cfg, e.dirs).(*keystore.KeychainStore); !ok {
+	if _, ok := KeyStoreFor(e.cfg, e.dirs).(*keystore.KeychainStore); !ok {
 		t.Error("keychain is the default key store")
 	}
 	e.cfg.KeyStore = KeyStoreFile
-	if _, ok := keyStoreFor(e.cfg, e.dirs).(keystore.FileStore); !ok {
+	if _, ok := KeyStoreFor(e.cfg, e.dirs).(keystore.FileStore); !ok {
 		t.Error("file key store on request")
 	}
 }
@@ -523,7 +523,7 @@ func TestFirstRunKeyCreationNeedsTheInstanceLock(t *testing.T) {
 	if err := fsperm.EnsureDir(e.dirs.State); err != nil {
 		t.Fatal(err)
 	}
-	release, err := lockState(e.dirs.State) // another daemon is starting
+	release, err := LockState(e.dirs.State) // another daemon is starting
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestFirstRunKeyCreationNeedsTheInstanceLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	// With the key in place a running daemon's lock does not block New.
-	release, err = lockState(e.dirs.State)
+	release, err = LockState(e.dirs.State)
 	if err != nil {
 		t.Fatal(err)
 	}

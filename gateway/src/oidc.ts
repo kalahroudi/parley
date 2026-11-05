@@ -23,7 +23,7 @@ export type Provider = {
 
 // `session` is what the login was started for (tenant and role). It is read back only from the sealed flow, so
 // nothing the browser sends at the callback can change it.
-export type LoginFor = { tenant: string; role: "admin" | "user" };
+export type LoginFor = { tenant: string; role: "admin" | "user"; device?: string };
 export type Identity = { provider: string; issuer: string; sub: string; email: string; tenantId?: string; session?: LoginFor };
 
 export class OidcError extends Error {
@@ -196,7 +196,7 @@ export async function completeLogin(
   const fl = await unseal(ctx.flowSecret, flow);
   if (fl.p !== p.name || typeof fl.exp !== "number" || fl.exp < nowMs) throw new OidcError("bad_flow");
   const s = fl.s as Partial<LoginFor> | undefined;
-  if (s !== undefined && (typeof s !== "object" || s === null || typeof s.tenant !== "string" || (s.role !== "admin" && s.role !== "user"))) throw new OidcError("bad_flow");
+  if (s !== undefined && (typeof s !== "object" || s === null || typeof s.tenant !== "string" || (s.role !== "admin" && s.role !== "user") || (s.device !== undefined && typeof s.device !== "string"))) throw new OidcError("bad_flow");
   const state = query.get("state");
   if (!state || state !== fl.state) throw new OidcError("state_mismatch");
   // Error responses carry the state too, so check it first. Only the code is
@@ -227,5 +227,5 @@ export async function completeLogin(
   const email = String(claims.email ?? claims.preferred_username ?? "").toLowerCase();
   if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new OidcError("no_email");
   if (p.requireVerifiedEmail && claims.email_verified !== true) throw new OidcError("email_unverified");
-  return { provider: p.name, issuer: p.issuer, sub: claims.sub, email, tenantId: p.tenantId, ...(s && { session: { tenant: s.tenant!, role: s.role! } }) };
+  return { provider: p.name, issuer: p.issuer, sub: claims.sub, email, tenantId: p.tenantId, ...(s && { session: { tenant: s.tenant!, role: s.role!, ...(s.device !== undefined && { device: s.device }) } }) };
 }

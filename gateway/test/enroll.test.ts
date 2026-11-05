@@ -310,6 +310,73 @@ describe("root-signed bindings and the revocation list (relayed, never trusted)"
     expect(await code({ id: e.id, binding: binding(e.sk, 3) }, fresh().admin)).toBe(404);
   });
 
+  it("makes a request idempotent when the device chose its id and poll secret", async () => {
+    const x = fresh();
+    const id = "a".repeat(32);
+    const poll = "b".repeat(48);
+    const sk = key();
+    const req = (extra: object = {}, auth: Promise<string> | string = x.user()) => post("/v1/enroll/request", { name: "laptop", signing_key: sk, id, poll, ...extra }, auth);
+    const first = await req();
+    expect(first.status).toBe(202);
+    expect(await json(first)).toEqual({ id, poll });
+    // The reply was lost: the same request again is the same request, not a second one in the queue.
+    expect(await json(await req())).toEqual({ id, poll });
+    expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending).toHaveLength(1);
+    expect((await json(await post("/v1/enroll/status", { tenant: x.t, id, poll }))).status).toBe("pending");
+    // Another key, or another poll secret, under a taken id is a conflict and changes nothing.
+    expect((await req({ signing_key: key() })).status).toBe(409);
+    expect((await req({ poll: "c".repeat(48) })).status).toBe(409);
+    // Malformed choices are refused, and an id needs its poll secret.
+    for (const bad of [{ id: "short" }, { poll: "short" }, { id: undefined }, { poll: undefined }, { id: "A".repeat(32) }]) {
+      expect((await req(bad)).status).toBe(400);
+    }
+    // A pod token is spent by the first request; the retry still succeeds because the request already exists.
+    const mint = await json(await post("/v1/admin/enrollment-tokens", { owner: "svc" }, x.admin));
+    const podId = "d".repeat(32);
+    const podPoll = "e".repeat(48);
+    const pod = () => post("/v1/enroll/request", { tenant: x.t, token: mint.token, name: "pod", signing_key: sk, id: podId, poll: podPoll });
+    expect((await pod()).status).toBe(202);
+    expect((await pod()).status).toBe(202);
+    expect((await post("/v1/enroll/request", { tenant: x.t, token: mint.token, name: "pod", signing_key: key(), id: "f".repeat(32), poll: podPoll })).status).toBe(401); // spent
+  });
+
+  it("treats concurrent duplicates as one request, and a replay never spends the per-owner cap", async () => {
+    const x = fresh();
+    const id = "1".repeat(32);
+    const poll = "2".repeat(48);
+    const sk = key();
+    const auth = await x.user(); // one session: minting one per call would race the session cap, not the enrollment
+    const dup = () => post("/v1/enroll/request", { name: "laptop", signing_key: sk, id, poll }, auth);
+    const rs = await Promise.all(Array.from({ length: 12 }, dup));
+    expect(rs.map((r) => r.status)).toEqual(rs.map(() => 202));
+    for (const r of rs) expect(await json(r)).toEqual({ id, poll });
+    expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending).toHaveLength(1);
+    // Fill the owner's room; the replay is still answered, a new request is not.
+    for (let i = 1; i < MAX_PENDING_PER_OWNER; i++) expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, auth)).status).toBe(202);
+    expect((await post("/v1/enroll/request", { name: "d", signing_key: key() }, auth)).status).toBe(429);
+    expect((await dup()).status).toBe(202);
+    expect((await json(await post("/v1/admin/enrollments", {}, x.admin))).pending).toHaveLength(MAX_PENDING_PER_OWNER);
+    // The same key under a new id is a new request (the device chose to start over) and the cap applies to it.
+    expect((await post("/v1/enroll/request", { name: "laptop", signing_key: sk, id: "3".repeat(32), poll }, auth)).status).toBe(429);
+    // A pod's retry with another key under the same id is refused too.
+    const mint = await json(await post("/v1/admin/enrollment-tokens", { owner: "svc" }, x.admin));
+    const pod = (k: string) => post("/v1/enroll/request", { tenant: x.t, token: mint.token, name: "pod", signing_key: k, id: "4".repeat(32), poll });
+    expect((await pod(sk)).status).toBe(202);
+    expect((await pod(key())).status).toBe(409);
+    // A name with control or bidi characters is refused whether or not the id was chosen.
+    for (const name of ["a\u0000b", "a\u202eb", "a\nb"]) expect((await post("/v1/enroll/request", { name, signing_key: key(), id: "5".repeat(32), poll }, auth)).status).toBe(400);
+  });
+
+  it("serves the registered root public key without an identity, and only for a tenant that has one", async () => {
+    const x = fresh();
+    expect((await post("/v1/root", { tenant: x.t })).status).toBe(404);
+    const rk = key();
+    expect((await post("/v1/admin/root", { root_public_key: rk }, x.admin)).status).toBe(200);
+    expect(await json(await post("/v1/root", { tenant: x.t }))).toEqual({ root_public_key: rk });
+    expect((await post("/v1/root", { tenant: fresh().t })).status).toBe(404); // another tenant has none
+    for (const bad of [{}, { tenant: "a/b" }, { tenant: 5 }]) expect((await post("/v1/root", bad)).status).toBe(400);
+  });
+
   it("stores the newest signed revocation list and serves it without an identity", async () => {
     const x = fresh();
     const l = (version: number, extra: object = {}) => ({ tenant: x.t, version, issued_at: "2026-01-01T00:00:00Z", revoked: [], signature: b64(64), ...extra });

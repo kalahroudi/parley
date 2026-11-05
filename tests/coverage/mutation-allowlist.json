@@ -295,6 +295,14 @@
       "type": "INVERT_BITWISE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/fsperm",
+      "file": "syncdir_unix.go",
+      "line": 13,
+      "type": "CONDITIONALS_NEGATION",
+      "status": "LIVED",
+      "reason": "Equivalent: if os.Open fails the nil file's Sync returns an error too, so the failure path looks the same; only the directory fsync that makes the rename durable is skipped, which no test can observe."
     }
   ]
 }
