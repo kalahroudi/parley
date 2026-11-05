@@ -92,6 +92,7 @@ var (
 	ErrRefused  = errors.New("pipeline: the target refused to issue a prekey")
 	ErrTimeout  = errors.New("pipeline: no prekey answer in time")
 	ErrInner    = errors.New("pipeline: sealed payload is malformed")
+	ErrCallback = errors.New("pipeline: the bot or update callback panicked")
 )
 
 // KeyID names a signing key in headers and prekeys: the first 8 bytes, in hex.
@@ -568,7 +569,20 @@ func (n *Node) executeIn(d receive.Delivered) error {
 		n.mu.Unlock()
 	}
 	in.Content = content
-	n.cfg.OnInbound(in)
+	return guard(func() { n.cfg.OnInbound(in) })
+}
+
+// guard runs a callback into the bot or the caller. The key is already erased
+// and the receiver clears the plaintext when we return, whichever way; a panic
+// is turned into a fixed error so it neither takes the daemon down nor carries
+// the message into a crash report (the panic value is dropped, never printed).
+func guard(f func()) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrCallback
+		}
+	}()
+	f()
 	return nil
 }
 
@@ -599,8 +613,7 @@ func (n *Node) executeOut(d receive.Delivered) error {
 		c.done, c.hasOwn = true, false // the reply key was erased with the last reply
 	}
 	n.mu.Unlock()
-	n.cfg.OnUpdate(Update{Type: h.Type, TaskID: h.TaskID, Content: content})
-	return nil
+	return guard(func() { n.cfg.OnUpdate(Update{Type: h.Type, TaskID: h.TaskID, Content: content}) })
 }
 
 // Sweep ends what has run out of time: a task past its expiry without a final
@@ -628,7 +641,7 @@ func (n *Node) Sweep() {
 	}
 	n.mu.Unlock()
 	for _, u := range expired {
-		n.cfg.OnUpdate(u)
+		_ = guard(func() { n.cfg.OnUpdate(u) })
 	}
 }
 

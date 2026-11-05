@@ -6,6 +6,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -630,3 +631,87 @@ func TestServingPrekeyRequests(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// A caller whose pool already holds the most reply keys it may for one target
+// (replies still outstanding) waits for the target's answers instead of failing
+// the task: the ninth task is sent once a result frees a key.
+func TestOutstandingReplyKeysLimitWaitsInsteadOfFailing(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.devs["alice"], w.devs["bob"]
+	var first [16]byte
+	for i := 0; i < prekey.DefaultPerCaller; i++ {
+		id := w.run("alice", "bob", fmt.Sprintf("task %d", i))
+		if i == 0 {
+			first = id
+		}
+	}
+	id, err := alice.node.Submit(Request{Target: "bob", Content: []byte("ninth"), Expiry: w.clock().Add(15 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // many retries at the test's poll interval
+	select {
+	case <-alice.node.Done(id):
+		st, _ := alice.node.Status(id)
+		t.Fatalf("the ninth task finished while the limit held: %+v", st)
+	default:
+	}
+	if err := bob.node.Respond(bg, first, envelope.TypeResult, []byte("done")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-alice.node.Done(id):
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ninth task was never sent after a key was freed")
+	}
+	w.settle()
+	if st, _ := alice.node.Status(id); st.State != outbox.Sent {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// A bot that panics (here with the message in the panic value) does not take
+// the pipeline down: the key was erased and the task acknowledged before the bot
+// ran, the error is a fixed one, and the panic value goes nowhere.
+func TestPanickingBotCallbackIsContained(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	bob := w.devs["bob"]
+	bob.onTask = func(in Inbound) { panic("CANARY-" + string(in.Content)) }
+	_, st := w.send("alice", "bob", "hello")
+	if st.State != outbox.Sent {
+		t.Fatalf("status %+v", st)
+	}
+	eventually(t, "the task to be handled", func() bool { return bob.errCount() >= 2 })
+	var got error
+	for i := 0; i < bob.errCount(); i++ {
+		if errors.Is(bob.errAt(i), ErrCallback) {
+			got = bob.errAt(i)
+		}
+	}
+	if got == nil || strings.Contains(got.Error(), "CANARY") {
+		t.Fatalf("error %v", got)
+	}
+	if n := bob.pool.Outstanding(); n != 0 {
+		t.Fatalf("%d keys still held after the panic", n)
+	}
+	// The pipeline still serves the next task.
+	bob.onTask = nil
+	w.run("alice", "bob", "again")
+}
+
+// A panicking update callback is contained the same way, including from Sweep.
+func TestPanickingUpdateCallbackIsContained(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice := w.devs["alice"]
+	id := w.run("alice", "bob", "hello")
+	alice.node.cfg.OnUpdate = func(Update) { panic("CANARY") }
+	w.devs["bob"].node.Respond(bg, id, envelope.TypeResult, []byte("r"))
+	w.settle()
+	if err := alice.lastErr(); !errors.Is(err, ErrCallback) {
+		t.Fatalf("error %v", err)
+	}
+	id2 := w.run("alice", "bob", "second")
+	_ = id2
+	w.advance(time.Hour)
+	alice.node.Sweep() // must not panic
+}

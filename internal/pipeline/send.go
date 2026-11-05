@@ -117,6 +117,11 @@ func (n *Node) sendTask(ctx context.Context, t outbox.Task) error {
 	n.rand(nonce[:])
 	rpk, err := n.cfg.Pool.Issue(prekey.Request{Caller: t.Target, Nonce: nonce[:], TaskExpiry: t.Expiry})
 	if err != nil {
+		if errors.Is(err, prekey.ErrRateLimited) || errors.Is(err, prekey.ErrPoolFull) {
+			// Too many replies still outstanding from this target (or no free slot): that
+			// clears as they arrive, so wait for the task's deadline rather than fail it.
+			return fmt.Errorf("%w: %w", outbox.ErrOffline, err)
+		}
 		return err
 	}
 	registered := false
