@@ -52,17 +52,18 @@ function tenant() {
     expect(r.status).toBe(200);
     return root;
   })();
-  const enroll = async (opts: { bind?: boolean; decide?: "approved" | "rejected" | false; not_after?: number; version?: number; signer?: CryptoKeyPair; tenantField?: string; skip?: string } = {}): Promise<Dev> => {
+  const enroll = async (opts: { bind?: boolean; decide?: "approved" | "rejected" | false; not_after?: number; version?: number; signer?: CryptoKeyPair; tenantField?: string; skip?: string; owner?: string } = {}): Promise<Dev> => {
+    const owner = opts.owner ?? "alice@example.test";
     const { bind = true, decide = "approved", not_after = Math.floor((Date.now() + YEAR) / 1000), version = 1 } = opts;
     const root = opts.signer ?? (await rootReady);
     const key = await edKeys();
     const pub = await rawPub(key.publicKey);
     const sk = bytesB64(pub);
-    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, { Authorization: await session(t, "user", "alice@example.test") }));
+    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, { Authorization: await session(t, "user", owner) }));
     if (decide) await post("/v1/admin/enrollments/decide", { id, decision: decide }, { Authorization: await admin });
     if (bind) {
-      const fields = { tenant: opts.tenantField ?? t, owner: "alice@example.test", device_id: id, key: pub, version, not_after };
-      const binding = { tenant: fields.tenant, owner: fields.owner, device_id: id, signing_key: sk, version, not_after: new Date(not_after * 1000).toISOString().replace(".000Z", "Z"), signature: await edSign(root.privateKey, bindingBytes(fields)) };
+      const fields = { tenant: opts.tenantField ?? t, owner, device_id: id, key: pub, version, not_after };
+      const binding = { tenant: fields.tenant, owner, device_id: id, signing_key: sk, version, not_after: new Date(not_after * 1000).toISOString().replace(".000Z", "Z"), signature: await edSign(root.privateKey, bindingBytes(fields)) };
       expect((await post("/v1/admin/bindings", { id, binding }, { Authorization: await admin })).status).toBe(200);
     }
     return { id, key, sk };
@@ -735,6 +736,376 @@ describe("a token stops working when its device does", () => {
     expect(statuses.slice(0, 2)).toEqual([401, 401]);
     expect(statuses.slice(2).every((s) => s === 200)).toBe(true);
   }, SLOW);
+});
+
+// T412: the prekey relay. A caller asks a target for a one-time prekey, and the target answers, through the
+// gateway, which forwards the frame, names the sender it authenticated, counts every frame against the
+// sender's allowance before delivering it, and creates and stores nothing. Everything below goes through the
+// real Worker with real connect tokens. (The same frames are built by internal/frames, in Go.)
+describe("the prekey relay", () => {
+  const NONCE = btoa("0123456789abcdef");
+  const BLOB = btoa("a signed prekey, opaque to the gateway");
+  const request = (id: string, to: string) => ({ t: "prekey_request", id, to, nonce: NONCE, expires_at: Date.now() + 900_000 });
+  const reply = (id: string, to: string) => ({ t: "prekey_reply", id, to, prekey: BLOB });
+
+  // An enrolled device with a card the whole tenant may see: what a daemon that takes requests has.
+  const enr = async (x: ReturnType<typeof tenant>, card: Record<string, unknown> = {}, owner?: string) => {
+    const d = await x.enroll({ owner });
+    expect(await x.call((i) => i.publishCard(d.id, { name: "bot", description: "a bot", visibility: "tenant", ...card }))).toEqual({ id: expect.any(String) });
+    return d;
+  };
+
+  // A daemon on the tunnel: frames out (numbered), events in.
+  async function daemon(x: ReturnType<typeof tenant>, d: Dev, headers: Record<string, string> = {}) {
+    const res = await SELF.fetch("https://gw/v1/connect", { headers: { Upgrade: "websocket", ...bearer(await x.token(d, "connect")), ...headers } });
+    const ws = res.webSocket!;
+    ws.accept();
+    const inbox: any[] = [];
+    ws.addEventListener("message", (e) => {
+      if (e.data !== "pong") inbox.push(JSON.parse(e.data as string));
+    });
+    ws.send(JSON.stringify({ t: "hello", v: 1, last_rx: 0 }));
+    let seq = 0;
+    const events = () => inbox.filter((m) => m.t === "event").map((m) => JSON.parse(m.body));
+    const acks = () => inbox.filter((m) => m.t === "ack").length;
+    const settle = async (n: number) => {
+      for (let i = 0; i < 200 && acks() < n; i++) await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 30)); // anything the relay delivers after the ack
+    };
+    for (let i = 0; i < 200 && !inbox.length; i++) await new Promise((r) => setTimeout(r, 5));
+    return {
+      ws,
+      events,
+      // Sends a frame and waits for the gateway's acknowledgment of it (and a moment for what it relays).
+      send: async (body: unknown, again = false) => {
+        if (!again) seq++;
+        ws.send(JSON.stringify({ t: "frame", seq, body: typeof body === "string" ? body : JSON.stringify(body) }));
+        await settle(seq);
+      },
+    };
+  }
+
+  // The Device DO reads its limits from its own env; a test lowers this device's prekey budget there.
+  async function lowerBudget(t: string, device: string, perMin: string) {
+    const stub: DurableObjectStub = env.DEVICE.get(env.DEVICE.idFromName(`${t}:${device}`));
+    await runInDurableObject(stub, async (inst) => {
+      const holder = inst as unknown as { env: Record<string, unknown> };
+      holder.env = { ...holder.env, RATE_PREKEY_PER_MIN: perMin };
+    });
+  }
+
+  async function pair() {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    return { x, a, b, A: await daemon(x, a), B: await daemon(x, b) };
+  }
+
+  it("forwards a request to the target as an event naming the authenticated sender, and the answer back", async () => {
+    const { a, b, A, B } = await pair();
+    await A.send(request("r1", b.id));
+    expect(B.events()).toEqual([{ t: "prekey_request", id: "r1", nonce: NONCE, expires_at: expect.any(Number), from: a.id }]);
+    await B.send(reply("r1", a.id));
+    expect(A.events()).toEqual([{ t: "prekey_reply", id: "r1", prekey: BLOB, from: b.id }]);
+    await B.send({ t: "prekey_refused", id: "r2", to: a.id });
+    expect(A.events().at(-1)).toEqual({ t: "prekey_refused", id: "r2", from: b.id, reason: "refused" });
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("answers the requester with a refusal when the target is not connected", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const off = await enr(x);
+    const A = await daemon(x, a);
+    await A.send(request("r1", off.id));
+    expect(A.events()).toEqual([{ t: "prekey_refused", id: "r1", from: off.id, reason: "offline" }]);
+    await A.send(request("r2", "nobody-by-that-name"));
+    expect(A.events().at(-1)).toMatchObject({ id: "r2", reason: "offline" });
+    A.ws.close();
+  });
+
+  it("never lets a sender claim to be someone else, and ignores identity headers from the client", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const evil = await enr(x);
+    const B = await daemon(x, b);
+    // The client sends the headers the Worker uses to tell the Device DO who it is; the Worker overwrites them.
+    const E = await daemon(x, evil, { "x-parley-tenant": x.t, "x-parley-device": a.id });
+    await E.send({ ...request("r1", b.id), from: a.id }); // a claimed sender is not a field of the frame
+    expect(B.events()).toEqual([]);
+    await E.send(request("r2", b.id));
+    expect(B.events()).toEqual([{ t: "prekey_request", id: "r2", nonce: NONCE, expires_at: expect.any(Number), from: evil.id }]);
+    B.ws.close();
+    E.ws.close();
+  });
+
+  it("relays only to devices of the sender's own tenant", async () => {
+    const x = tenant();
+    const y = tenant();
+    const a = await enr(x);
+    const other = await enr(y);
+    const A = await daemon(x, a);
+    const O = await daemon(y, other);
+    await A.send(request("r1", other.id));
+    expect(O.events()).toEqual([]);
+    expect(A.events()).toEqual([{ t: "prekey_refused", id: "r1", from: other.id, reason: "offline" }]);
+    A.ws.close();
+    O.ws.close();
+  });
+
+  it("relays a frame once, however often the daemon retransmits it, and ignores frames it does not understand", async () => {
+    const { b, A, B } = await pair();
+    const body = JSON.stringify(request("r1", b.id));
+    await A.send(body);
+    await A.send(body, true); // the same frame seq again, as after a reconnect
+    expect(B.events()).toHaveLength(1);
+    for (const junk of ["a", "{}", '{"t":"prekey_request"}', '{"t":"prekey_other","id":"r","to":"x"}', '{"t":"prekey_', "[]", JSON.stringify({ ...request("r9", b.id), extra: 1 })]) await A.send(junk);
+    await A.send(request("r3", "a".repeat(65)));
+    expect(B.events()).toHaveLength(1);
+    expect(A.events()).toEqual([]); // nothing came back for them either
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("does not relay a frame addressed to the sender itself, and not from a socket the Worker did not open", async () => {
+    const { a, A } = await pair();
+    await A.send(request("r1", a.id));
+    expect(A.events()).toEqual([]);
+    A.ws.close();
+    // A socket opened on the Device DO directly has no identity: its frames are acknowledged and ignored.
+    const stub = env.DEVICE.get(env.DEVICE.idFromName("nowhere:dev")) as any;
+    const raw = (await stub.fetch("https://do/", { headers: { Upgrade: "websocket" } })).webSocket!;
+    raw.accept();
+    const got: any[] = [];
+    raw.addEventListener("message", (e: MessageEvent) => got.push(JSON.parse(e.data as string)));
+    raw.send(JSON.stringify({ t: "hello", v: 1, last_rx: 0 }));
+    for (let i = 0; i < 100 && !got.length; i++) await new Promise((r) => setTimeout(r, 5));
+    raw.send(JSON.stringify({ t: "frame", seq: 1, body: JSON.stringify(request("r1", "someone")) }));
+    for (let i = 0; i < 100 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(got.map((m) => m.t)).toEqual(["welcome", "ack"]);
+    // Headers that are not valid ids are not an identity either.
+    const bad = (await stub.fetch("https://do/", { headers: { Upgrade: "websocket", "x-parley-tenant": "a b", "x-parley-device": "d" } })).webSocket!;
+    expect(bad).toBeDefined();
+    bad.accept();
+    bad.close();
+    raw.close();
+  });
+
+  it("counts every frame against the sender's allowance before delivering it: a flood is refused at the gateway and never reaches the target", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const honest = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    const H = await daemon(x, honest);
+    await lowerBudget(x.t, a.id, "3");
+    await lowerBudget(x.t, honest.id, "3");
+    for (let i = 0; i < 12; i++) await A.send(request(`f${i}`, b.id));
+    expect(B.events()).toHaveLength(3); // the budget, and not one more
+    const refusals = A.events().filter((e) => e.t === "prekey_refused");
+    expect(refusals).toHaveLength(9);
+    expect(refusals[0]).toMatchObject({ from: b.id, reason: "rate_limited", retry_after_ms: expect.any(Number) });
+    expect(refusals[0].retry_after_ms).toBeGreaterThan(0);
+    // The answers a device sends count too: a flood of replies is cut off the same way.
+    for (let i = 0; i < 6; i++) await A.send(reply(`g${i}`, b.id));
+    expect(B.events().filter((e) => e.t === "prekey_reply")).toHaveLength(0); // A is already out of budget
+    expect(A.events().filter((e) => e.t === "prekey_refused")).toHaveLength(9); // and a refused answer is not "refused" back to anyone
+    // Another device of the same tenant is served.
+    await H.send(request("h1", b.id));
+    expect(B.events().at(-1)).toMatchObject({ id: "h1", from: honest.id });
+    A.ws.close();
+    B.ws.close();
+    H.ws.close();
+  });
+
+  it("tells nobody when an answer cannot be delivered, only the requester when a request cannot", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const off = await enr(x);
+    const A = await daemon(x, a);
+    await A.send(reply("r1", off.id));
+    await A.send({ t: "prekey_refused", id: "r2", to: off.id });
+    expect(A.events()).toEqual([]);
+    await A.send(request("r3", off.id));
+    expect(A.events()).toEqual([{ t: "prekey_refused", id: "r3", from: off.id, reason: "offline" }]);
+    A.ws.close();
+  });
+
+  it("relays only for a socket the Worker opened with a complete, valid identity", async () => {
+    const x = tenant();
+    const b = await enr(x);
+    const d1 = await enr(x);
+    const B = await daemon(x, b);
+    const open = async (headers: Record<string, string>) => {
+      const stub = env.DEVICE.get(env.DEVICE.idFromName(`${x.t}:direct${Object.keys(headers).join("")}${Object.values(headers).join("")}`)) as any;
+      const ws = (await stub.fetch("https://do/", { headers: { Upgrade: "websocket", ...headers } })).webSocket!;
+      ws.accept();
+      const got: any[] = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        got.push(JSON.parse(e.data as string));
+      });
+      ws.send(JSON.stringify({ t: "hello", v: 1, last_rx: 0 }));
+      for (let i = 0; i < 100 && !got.length; i++) await new Promise((r) => setTimeout(r, 5));
+      ws.send(JSON.stringify({ t: "frame", seq: 1, body: JSON.stringify(request("r1", b.id)) }));
+      for (let i = 0; i < 100 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 30));
+      ws.close();
+      return got.map((m) => m.t);
+    };
+    const T = "x-parley-tenant";
+    const D = "x-parley-device";
+    const incomplete: Record<string, string>[] = [{}, { [T]: x.t }, { [D]: "d1" }, { [T]: "bad tenant", [D]: "d1" }, { [T]: x.t, [D]: "bad device" }, { [T]: "", [D]: "d1" }, { [T]: x.t, [D]: "" }];
+    for (const headers of incomplete) expect(await open(headers), JSON.stringify(headers)).toEqual(["welcome", "ack"]); // nothing relayed, nothing refused back
+    expect(B.events()).toEqual([]);
+    await open({ [T]: x.t, [D]: d1.id });
+    expect(B.events()).toEqual([{ t: "prekey_request", id: "r1", nonce: NONCE, expires_at: expect.any(Number), from: d1.id }]);
+    B.ws.close();
+  });
+
+  it("stores nothing: the Device DOs hold no frame body, key or nonce afterwards", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    await A.send(request("r1", b.id));
+    await B.send(reply("r1", a.id));
+    for (const d of [a, b]) {
+      const stub = env.DEVICE.get(env.DEVICE.idFromName(`${x.t}:${d.id}`)) as any;
+      const dump = await runInDurableObject(stub, async (_i, ctx) => JSON.stringify([...(await ctx.storage.list()).entries()]));
+      expect(dump).not.toContain(NONCE);
+      expect(dump).not.toContain(BLOB);
+      expect(dump).not.toContain("prekey");
+    }
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("refuses a request for a target none of whose cards the sender may see, or that is not enrolled, and allows one with no card", async () => {
+    const x = tenant();
+    expect(await x.call((i) => i.putGroup("ops", ["bob@example.test"]))).toMatchObject({ name: "ops" });
+    const a = await enr(x);
+    const hidden = await enr(x, { visibility: "groups", groups: ["ops"] }, "carol@example.test");
+    const cardless = await x.enroll();
+    const A = await daemon(x, a);
+    const H = await daemon(x, hidden);
+    const C = await daemon(x, cardless);
+    await A.send(request("r1", hidden.id));
+    await A.send(request("r3", "a".repeat(32)));
+    expect(A.events().map((e) => [e.id, e.reason])).toEqual([["r1", "offline"], ["r3", "offline"]]);
+    expect(H.events()).toEqual([]);
+    // No card, nothing for the directory to hide: only enrollment decides.
+    await A.send(request("r2", cardless.id));
+    expect(C.events()).toEqual([{ t: "prekey_request", id: "r2", nonce: NONCE, expires_at: expect.any(Number), from: a.id }]);
+    // Visible to any one of the group's members: the same target is served for bob's device.
+    const bobDev = await enr(x, {}, "bob@example.test");
+    const Bob = await daemon(x, bobDev);
+    await Bob.send(request("r4", hidden.id));
+    expect(H.events()).toEqual([{ t: "prekey_request", id: "r4", nonce: NONCE, expires_at: expect.any(Number), from: bobDev.id }]);
+    Bob.ws.close();
+    A.ws.close();
+    H.ws.close();
+    C.ws.close();
+  });
+
+  it("answers need no card: a target replies to a requester that has none", async () => {
+    const x = tenant();
+    const a = await x.enroll();
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    await A.send(request("r1", b.id));
+    expect(B.events()).toHaveLength(1);
+    await B.send(reply("r1", a.id));
+    expect(A.events()).toEqual([{ t: "prekey_reply", id: "r1", prekey: BLOB, from: b.id }]);
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("stops relaying for a device the moment it is revoked, though its socket is still open, in both directions", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    expect((await x.revoke([a.id], 1)).status).toBe(200);
+    await A.send(request("r1", b.id));
+    await A.send(reply("r2", b.id));
+    expect(B.events()).toEqual([]);
+    await B.send(reply("r3", a.id)); // and nothing reaches a revoked device
+    expect(A.events().map((e) => [e.id, e.reason])).toEqual([["r1", "offline"]]); // and r3 never reached a revoked device
+    await B.send(request("r4", a.id)); // a revoked target is refused to the requester
+    expect(B.events().at(-1)).toEqual({ t: "prekey_refused", id: "r4", from: a.id, reason: "offline" });
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it("gives a target a budget of its own: one flooding caller is cut off by its own, and callers together cannot spend more than the target's", async () => {
+    const x = tenant();
+    const t = await enr(x);
+    const other = await enr(x);
+    const T = await daemon(x, t);
+    const O = await daemon(x, other);
+    const callers = [];
+    for (let i = 0; i < 5; i++) {
+      const c = await enr(x);
+      await lowerBudget(x.t, c.id, "2"); // the target's budget is 3 times this: 6
+      callers.push({ c, D: await daemon(x, c) });
+    }
+    // One caller floods: it passes 2, and the target has 4 left for everybody else.
+    for (let i = 0; i < 10; i++) await callers[0]!.D.send(request(`a${i}`, t.id));
+    expect(T.events()).toHaveLength(2);
+    // Others are served up to what is left (4), then refused: the tradeoff of a per-target budget, bounded by it.
+    for (const [i, { D }] of callers.slice(1).entries()) for (let j = 0; j < 2; j++) await D.send(request(`b${i}${j}`, t.id));
+    expect(T.events()).toHaveLength(6);
+    expect(callers[4]!.D.events().filter((e) => e.reason === "rate_limited")).toHaveLength(2);
+    expect(callers[4]!.D.events()[0]).toMatchObject({ from: t.id, retry_after_ms: expect.any(Number) });
+    // The budget is per target: the same callers are served for another one.
+    const fresh = await enr(x);
+    const F = await daemon(x, fresh);
+    await lowerBudget(x.t, fresh.id, "2");
+    await F.send(request("c1", other.id));
+    expect(O.events()).toHaveLength(1);
+    F.ws.close();
+    // Answers are not requests: the target can still answer all of them.
+    await T.send(reply("a0", callers[0]!.c.id));
+    expect(callers[0]!.D.events().at(-1)).toMatchObject({ t: "prekey_reply", id: "a0" });
+    for (const { D } of callers) D.ws.close();
+    T.ws.close();
+    O.ws.close();
+  });
+
+  it("gives a name that cannot be a device no budget of its own, so junk targets make no buckets and are all just offline", async () => {
+    const x = tenant();
+    const callers = [];
+    for (let i = 0; i < 4; i++) {
+      const c = await enr(x);
+      await lowerBudget(x.t, c.id, "1"); // a target's budget would be 3: the fourth caller would be cut off
+      callers.push(await daemon(x, c));
+    }
+    for (const [i, D] of callers.entries()) {
+      await D.send(request(`j${i}`, "not-a-device"));
+      expect(D.events()).toEqual([{ t: "prekey_refused", id: `j${i}`, from: "not-a-device", reason: "offline" }]);
+      D.ws.close();
+    }
+  });
+
+  it("treats a target that cannot be reached as offline, and does not fail the sender's frame", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    await runInDurableObject(env.DEVICE.get(env.DEVICE.idFromName(`${x.t}:${a.id}`)), async (inst) => {
+      const holder = inst as unknown as { env: Record<string, unknown> };
+      holder.env = { ...holder.env, DEVICE: { idFromName: (n: string) => n, get: () => ({ deliver: () => Promise.reject(new Error("overloaded")) }) } };
+    });
+    await A.send(request("r1", b.id));
+    expect(A.events()).toEqual([{ t: "prekey_refused", id: "r1", from: b.id, reason: "offline" }]);
+    A.ws.close();
+  });
 });
 
 // Each byte is two hex digits, so a byte under 0x10 keeps its leading zero and a challenge is always 64 characters.

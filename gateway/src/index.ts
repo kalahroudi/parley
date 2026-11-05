@@ -5,7 +5,7 @@ import { agentCard, handleA2A } from "./a2a";
 import { authenticate, handleConnectAuth } from "./connect";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
 import { handleSession, issueSession } from "./session";
-import { Device } from "./device";
+import { Device, IDENTITY_DEVICE, IDENTITY_TENANT } from "./device";
 import { handleDirectory } from "./directory";
 import { handleEnroll } from "./enroll";
 import { Task } from "./task";
@@ -27,6 +27,8 @@ export interface Env extends AuthEnv {
   RATE_TASK_PER_MIN?: string;
   RATE_MESSAGE_PER_MIN?: string;
   RATE_FIND_PER_MIN?: string;
+  // Per-minute limit per device for prekey frames it sends through the relay (requests and answers).
+  RATE_PREKEY_PER_MIN?: string;
   // Comma-separated `tenant:email` pairs allowed to hold an admin session.
   ADMINS?: string;
   // Comma-separated `tenant:email` pairs and `tenant:domain` pairs allowed to hold a user session. With neither set
@@ -65,6 +67,12 @@ export default {
       return new Response("expected websocket", { status: 426 });
     }
     const who = await authenticate(request, env, "connect");
-    return who ? env.DEVICE.get(env.DEVICE.idFromName(`${who.tenant}:${who.device}`)).fetch(request) : new Response("unauthorized", { status: 401 });
+    if (!who) return new Response("unauthorized", { status: 401 });
+    // The Device DO learns who it is from the Worker, which has just verified the token: these headers are
+    // set here, overwriting whatever the client sent, and a DO is not reachable any other way.
+    const forwarded = new Request(request);
+    forwarded.headers.set(IDENTITY_TENANT, who.tenant);
+    forwarded.headers.set(IDENTITY_DEVICE, who.device);
+    return env.DEVICE.get(env.DEVICE.idFromName(`${who.tenant}:${who.device}`)).fetch(forwarded);
   },
 } satisfies ExportedHandler<Env>;
