@@ -4,7 +4,8 @@
 package caller
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 	"time"
 )
@@ -26,9 +27,8 @@ func (b *bucket) take() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	t := b.now()
-	if d := t.Sub(b.last); d > 0 {
-		b.tokens = min(b.perMinute, b.tokens+b.perMinute*d.Seconds()/60)
-	}
+	// A clock that went backwards adds nothing.
+	b.tokens = min(b.perMinute, b.tokens+b.perMinute*max(t.Sub(b.last).Seconds(), 0)/60)
 	b.last = t
 	if b.tokens < 1 {
 		return false
@@ -38,5 +38,5 @@ func (b *bucket) take() bool {
 }
 
 func sortNewestFirst(ts []*task) {
-	sort.Slice(ts, func(i, j int) bool { return ts[i].seq > ts[j].seq })
+	slices.SortFunc(ts, func(a, b *task) int { return cmp.Compare(b.seq, a.seq) })
 }
