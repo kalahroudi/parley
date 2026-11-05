@@ -66,12 +66,14 @@ describe("rate limits", () => {
     const rows = () => runInDurableObject(rl, async (_i, ctx) => (await ctx.storage.list()).size);
     expect(await rows()).toBe(1);
     await new Promise((r) => setTimeout(r, 1600));
-    expect((await rl.hit(2, 1500)).ok).toBe(true); // a new window, though refusals kept coming before it ended
+    // The new window is long: on a loaded CI machine (Windows) the steps below can take over a second, and a window of
+    // 1.5 s would end before the alarm is run "early".
+    expect((await rl.hit(2, 5000)).ok).toBe(true); // a new window, though refusals kept coming before it ended
     await runDurableObjectAlarm(rl); // early: the window is still open, so the counter stays
     expect(await rows()).toBe(1);
-    expect((await rl.hit(2, 1500)).ok).toBe(true);
-    expect((await rl.hit(2, 1500)).ok).toBe(false);
-    await new Promise((r) => setTimeout(r, 1600));
+    expect((await rl.hit(2, 5000)).ok).toBe(true);
+    expect((await rl.hit(2, 5000)).ok).toBe(false);
+    await new Promise((r) => setTimeout(r, 5100));
     await runDurableObjectAlarm(rl); // (it may already have fired by itself)
     expect(await rows()).toBe(0);
   });

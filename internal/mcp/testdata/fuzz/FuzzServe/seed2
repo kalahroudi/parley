@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"send_task\",\"arguments\":{\"text\":\"x\",\"text\":\"y\"}}}")

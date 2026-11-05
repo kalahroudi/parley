@@ -20,6 +20,8 @@ import (
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
+const usage = "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | find [text] | send | get | cancel | list"
+
 //cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -55,6 +57,9 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writ
 		}
 		return enrollCmd(ctx, args[1:], in, out, errw, dirs, getenv, t)
 	}
-	fmt.Fprintln(errw, "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file]")
+	if len(args) >= 1 && callerCommand(args[0]) {
+		return runCaller(ctx, args, in, out, errw, getenv, configDir)
+	}
+	fmt.Fprintln(errw, usage)
 	return 2
 }

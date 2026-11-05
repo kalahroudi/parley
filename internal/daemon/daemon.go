@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
+	"github.com/kalahroudi/parley/internal/caller"
 	"github.com/kalahroudi/parley/internal/connect"
 	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/keystore"
@@ -120,6 +121,7 @@ type Daemon struct {
 	nodeMu sync.Mutex
 	node   *pipeline.Node
 	pool   *prekey.Pool
+	caller *caller.Service
 	tun    atomic.Pointer[tunnel.Client]
 }
 
@@ -188,6 +190,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 		sup: &supervisor.Supervisor{Log: deps.Log, MinBackoff: deps.MinBackoff, ShutdownTimeout: deps.ShutdownTimeout},
 	}
 	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status}}
+	d.initCaller()
 	return d, nil
 }
 
@@ -264,7 +267,8 @@ func (d *Daemon) status(context.Context, json.RawMessage) (any, error) {
 // component would not stop.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer keystore.Zero(d.signer)
-	defer d.closeNode() // before the key is zeroed (defers run last in, first out): the pipeline signs with it until then
+	defer d.caller.Close() // after closeNode: no update can arrive once the pipeline is closed
+	defer d.closeNode()    // before the key is zeroed (defers run last in, first out): the pipeline signs with it until then
 	release, err := LockState(d.dirs.State)
 	if err != nil {
 		return err

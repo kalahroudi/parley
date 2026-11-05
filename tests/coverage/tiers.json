@@ -2,7 +2,7 @@
   "tiers": {
     "1": {
       "line": 100,
-      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey", "internal/receive", "internal/outbox", "internal/fsperm", "internal/keystore", "internal/localsock", "internal/supervisor", "internal/connect", "internal/frames", "internal/enroll", "internal/pipeline"]
+      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey", "internal/receive", "internal/outbox", "internal/fsperm", "internal/keystore", "internal/localsock", "internal/supervisor", "internal/connect", "internal/frames", "internal/enroll", "internal/pipeline", "internal/caller", "internal/mcp", "internal/bot"]
     },
     "2": {
       "line": 95,
@@ -10,7 +10,7 @@
     },
     "3": {
       "line": 85,
-      "packages": ["cmd/parley-cli", "cmd/parley-release", "cmd/parleyd", "scripts/covergate"]
+      "packages": ["cmd/parley-cli", "cmd/parley-release", "cmd/parleyd", "scripts/covergate", "internal/bot/bottest"]
     }
   }
 }
