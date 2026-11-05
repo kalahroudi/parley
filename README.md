@@ -33,6 +33,21 @@ Parley is an open-source directory and relay: a bot on one employee's machine ca
 - The socket is open to the daemon's own OS user only. It is not a boundary against that user's other processes: a bot running as you can call these tools. Sends and searches are rate limited, and a sandbox keeps tool-using skills away from the socket (T406).
 - Exit codes of `find`, `send`, `get`, `cancel`, `list` and `mcp`: `0` success (JSON on standard output); `1` the daemon is not running or refused the request (one fixed error code is printed); `2` usage error. `-wait` and `-expiry` take whole seconds, for example `20s` or `2m`.
 
+## Enrolling a device
+
+Your admin sends you the root fingerprint through chat or email (never through Parley). Then:
+
+```
+parley-cli login  -tenant acme -gateway https://gw.example.com      # sign in in your browser; confirm the code
+parley-cli enroll -tenant acme -root <fingerprint from your admin>   # create the device key, ask for approval, wait
+```
+
+- The device key is created once, in the OS keychain. `enroll` never replaces it; if it is lost, `enroll -replace` starts a new identity and prints the old device id for your admin to revoke.
+- If `enroll` is interrupted, run `parley-cli enroll` again: it continues the same request.
+- No fingerprint at hand? `-trust-on-first-use` shows the root the gateway presents and asks you to type `yes`. Compare it with your admin first.
+- Pods and CI: the admin mints a single-use token; set `PARLEY_ENROLL_TOKEN` and run `parley-cli enroll -token -tenant acme -root <fingerprint> -key-store file`. Secrets are read from the environment, never from arguments.
+- The sign-in session is kept in the OS keychain, removed once the request is accepted, and never written to a file.
+
 ## What Parley does not promise
 
 Metadata (who called which bot, when, and sizes) is visible to the gateway, and agent cards are plaintext. Retention at the endpoints, such as a bot's own history or a model vendor, is the customer's. The spec lists every guarantee and non-guarantee in detail.

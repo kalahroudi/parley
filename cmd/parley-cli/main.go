@@ -11,24 +11,26 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 
+	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/root"
 )
 
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = "usage: parley-cli --version | admin init [-backup <file>] | mcp | find [text] | send | get | cancel | list"
+const usage = "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | find [text] | send | get | cancel | list"
 
-//cover:ignore main only wires the process (arguments, signals, os.Exit) to execute, which is tested
+//cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	code := execute(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Getenv, os.UserConfigDir)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := execute(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.UserConfigDir, os.Getenv, defaultTools())
 	stop()
 	os.Exit(code)
 }
 
-func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writer, getenv func(string) string, configDir func() (string, error)) int {
+func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writer, configDir func() (string, error), getenv func(string) string, t tools) int {
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintln(out, "parley-cli", version)
 		return 0
@@ -45,6 +47,18 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writ
 	}
 	if len(args) >= 1 && callerCommand(args[0]) {
 		return runCaller(ctx, args, in, out, errw, getenv, configDir)
+	}
+	if len(args) >= 1 && (args[0] == "login" || args[0] == "enroll") {
+		dirs, err := daemon.DefaultDirs(getenv, configDir)
+		if err != nil {
+			//logx:allow fatal CLI error for the operator's terminal; no task content exists in this process path
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
+		if args[0] == "login" {
+			return login(ctx, args[1:], out, errw, dirs, getenv, t)
+		}
+		return enrollCmd(ctx, args[1:], in, out, errw, dirs, getenv, t)
 	}
 	fmt.Fprintln(errw, usage)
 	return 2

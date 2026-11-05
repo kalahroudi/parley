@@ -57,7 +57,7 @@ func record(s *seen, result any, err error) localsock.Method {
 	}
 }
 
-func run(t *testing.T, home, stdin string, args ...string) (code int, out, errw string) {
+func runCLI(t *testing.T, home, stdin string, args ...string) (code int, out, errw string) {
 	t.Helper()
 	var o, e bytes.Buffer
 	getenv := func(k string) string {
@@ -66,7 +66,7 @@ func run(t *testing.T, home, stdin string, args ...string) (code int, out, errw 
 		}
 		return ""
 	}
-	code = execute(context.Background(), args, strings.NewReader(stdin), &o, &e, getenv, func() (string, error) { return "", errors.New("unused") })
+	code = execute(context.Background(), args, strings.NewReader(stdin), &o, &e, func() (string, error) { return "", errors.New("unused") }, getenv, tools{})
 	return code, o.String(), e.String()
 }
 
@@ -91,7 +91,7 @@ func TestCommandsSendTheRightRequests(t *testing.T) {
 	} {
 		var s seen
 		home := daemonWith(t, map[string]localsock.Method{tc.method: record(&s, map[string]any{"ok": true}, nil)})
-		code, out, errw := run(t, home, tc.stdin, tc.args...)
+		code, out, errw := runCLI(t, home, tc.stdin, tc.args...)
 		if code != 0 || errw != "" || !strings.Contains(out, `"ok": true`) {
 			t.Errorf("%v: %d %q %q", tc.args, code, out, errw)
 		}
@@ -107,7 +107,7 @@ func TestCommandsSendTheRightRequests(t *testing.T) {
 
 func TestUntrustedResultsCarryANoticeOnStderrOnly(t *testing.T) {
 	home := daemonWith(t, map[string]localsock.Method{"get_task": record(&seen{}, map[string]any{"content": "x", "untrusted": true}, nil)})
-	code, out, errw := run(t, home, "", "get", "abc")
+	code, out, errw := runCLI(t, home, "", "get", "abc")
 	if code != 0 || !strings.Contains(errw, "UNTRUSTED") || strings.Contains(out, "UNTRUSTED") {
 		t.Fatalf("%d out=%q err=%q", code, out, errw)
 	}
@@ -122,19 +122,19 @@ func TestDaemonErrorsAreShownAsFixedCodes(t *testing.T) {
 		"get_task":    record(&seen{}, nil, &localsock.RPCError{Code: "not_found"}),
 		"cancel_task": record(&seen{}, nil, errors.New("SECRET internal detail")),
 	})
-	if code, out, errw := run(t, home, "", "get", "abc"); code != 1 || out != "" || errw != "error: not_found\n" {
+	if code, out, errw := runCLI(t, home, "", "get", "abc"); code != 1 || out != "" || errw != "error: not_found\n" {
 		t.Errorf("%d %q %q", code, out, errw)
 	}
-	if code, _, errw := run(t, home, "", "cancel", "abc"); code != 1 || errw != "error: internal\n" {
+	if code, _, errw := runCLI(t, home, "", "cancel", "abc"); code != 1 || errw != "error: internal\n" {
 		t.Errorf("%d %q", code, errw)
 	}
-	if code, _, errw := run(t, home, "", "list"); code != 1 || errw != "error: unknown_method\n" {
+	if code, _, errw := runCLI(t, home, "", "list"); code != 1 || errw != "error: unknown_method\n" {
 		t.Errorf("%d %q", code, errw)
 	}
 }
 
 func TestNoDaemon(t *testing.T) {
-	code, _, errw := run(t, t.TempDir(), "", "list")
+	code, _, errw := runCLI(t, t.TempDir(), "", "list")
 	if code != 1 || !strings.Contains(errw, "not running") {
 		t.Fatalf("%d %q", code, errw)
 	}
@@ -150,7 +150,7 @@ func TestBadUsage(t *testing.T) {
 		{"send", "-to", "dev-2", "-expiry", "500ms", "x"}, {"send", "-to", "dev-2", "-expiry", "-5s", "x"},
 		{"get", "-wait", "1500ms", "abc"}, {"get", "-wait", "-1s", "abc"},
 	} {
-		if code, out, _ := run(t, home, "", args...); code != 2 || out != "" {
+		if code, out, _ := runCLI(t, home, "", args...); code != 2 || out != "" {
 			t.Errorf("%v: %d %q", args, code, out)
 		}
 	}
@@ -161,7 +161,7 @@ func TestSendReadsAtMostTheTaskLimitFromStdin(t *testing.T) {
 	home := daemonWith(t, map[string]localsock.Method{"send_task": record(&s, map[string]any{}, nil)})
 	// The daemon refuses what is too large; the CLI must not read without bound.
 	big := strings.Repeat("a", 1<<20)
-	run(t, home, big, "send", "-to", "dev-2", "-")
+	runCLI(t, home, big, "send", "-to", "dev-2", "-")
 	if len(s.params) > 40000 {
 		t.Fatalf("sent %d bytes", len(s.params))
 	}
@@ -183,7 +183,7 @@ func TestMCPOverTheRealSocket(t *testing.T) {
 	home := daemonWith(t, map[string]localsock.Method{"find_agents": record(&seen{}, map[string]any{"agents": []string{}, "untrusted": true}, nil)})
 	in := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_agents","arguments":{"text":"x"}}}` + "\n"
-	code, out, errw := run(t, home, in, "mcp")
+	code, out, errw := runCLI(t, home, in, "mcp")
 	if code != 0 || errw != "" || strings.Count(out, "\n") != 2 || !strings.Contains(out, "UNTRUSTED CONTENT") {
 		t.Fatalf("%d %q %q", code, out, errw)
 	}
@@ -199,7 +199,7 @@ func TestMCPSessionEndsWithAnErrorOnHostileInput(t *testing.T) {
 
 func TestNoConfigDirectory(t *testing.T) {
 	var o, e bytes.Buffer
-	code := execute(context.Background(), []string{"list"}, nil, &o, &e, func(string) string { return "" }, func() (string, error) { return "", errors.New("no home") })
+	code := execute(context.Background(), []string{"list"}, nil, &o, &e, func() (string, error) { return "", errors.New("no home") }, func(string) string { return "" }, tools{})
 	if code != 1 || e.String() != "error: daemon: no user config directory: no home\n" {
 		t.Fatalf("%d %q", code, e.String())
 	}
