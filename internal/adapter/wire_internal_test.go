@@ -167,3 +167,30 @@ func TestConverseBoundsQuestionsAndStatuses(t *testing.T) {
 		t.Fatalf("exactly the limit is allowed: %v, %d statuses", err, s.statuses)
 	}
 }
+
+// The capacity of an encoded line is exactly its length, so the content is copied once, into a buffer that can be
+// cleared (a growing buffer would leave copies behind).
+func TestEncodeAllocatesExactly(t *testing.T) {
+	for _, l := range [][]byte{taskLine(bot.Task{ID: [16]byte{1}, Context: "c", Content: []byte("some content")}), answerLine([16]byte{2}, 3, []byte("a")), cancelLine([16]byte{3})} {
+		if cap(l) != len(l) {
+			t.Fatalf("cap %d, len %d: %q", cap(l), len(l), l)
+		}
+	}
+}
+
+// The limit is on the whole line, however many reads it takes: MaxLine bytes pass, one more does not.
+func TestReadMessageLimitIsExact(t *testing.T) {
+	line := func(n int) string {
+		const head, tail = `{"type":"result","content":"`, `"}`
+		k := (n - len(head) - len(tail)) / 4 * 4 // valid base64, then spaces up to the exact length
+		return head + strings.Repeat("A", k) + tail + strings.Repeat(" ", n-len(head)-k-len(tail))
+	}
+	for _, size := range []int{16, 4096} { // lines that span many reads, and fewer
+		if m, err := readMessage(bufio.NewReaderSize(strings.NewReader(line(MaxLine)+"\n"), size)); err != nil || m.Type != typeResult {
+			t.Fatalf("size %d: a line of MaxLine bytes: %v", size, err)
+		}
+		if _, err := readMessage(bufio.NewReaderSize(strings.NewReader(line(MaxLine+1)+"\n"), size)); err != errTooLong {
+			t.Fatalf("size %d: a line of MaxLine+1 bytes: %v", size, err)
+		}
+	}
+}

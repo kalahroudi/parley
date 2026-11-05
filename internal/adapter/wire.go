@@ -61,7 +61,7 @@ type toBot struct {
 func encode(h toBot, content []byte, withContent bool) []byte {
 	head, _ := json.Marshal(h) // a struct of strings and ints cannot fail
 	const key = `,"content":"`
-	n := len(head) + 2
+	n := len(head) + 1 // the head without its closing brace, then the brace and the newline
 	if withContent {
 		n += len(key) + base64.StdEncoding.EncodedLen(len(content)) + 1
 	}

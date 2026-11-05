@@ -27,6 +27,9 @@ var ErrAPIConfig = errors.New("adapter: invalid API configuration")
 
 const cancelTimeout = 2 * time.Second
 
+// readBuffer is the size of the buffer a bot's output is read through.
+const readBuffer = 65536
+
 // APIConfig configures the API adapter.
 type APIConfig struct {
 	// URL is the bot service. https, or http only to a loopback address; no
@@ -61,13 +64,9 @@ func NewAPI(cfg APIConfig) (*API, error) {
 	default:
 		return nil, ErrAPIConfig
 	}
-	var dialer net.Dialer
-	if u.Scheme == "http" {
-		dialer.Control = loopbackOnly // the name "localhost" must not lead anywhere else, whatever resolves it
-	}
 	return &API{url: u.String(), token: cfg.Token, client: &http.Client{
 		Transport: &http.Transport{
-			DialContext:        dialer.DialContext,
+			DialContext:        dialerFor(u.Scheme).DialContext,
 			Proxy:              nil, // the plaintext task must not detour through an environment proxy
 			TLSClientConfig:    &tls.Config{MinVersion: tls.VersionTLS12},
 			DisableCompression: true,
@@ -79,10 +78,20 @@ func NewAPI(cfg APIConfig) (*API, error) {
 	}}, nil
 }
 
-// loopbackOnly refuses a connection to an address that is not loopback; it runs after name resolution.
+// dialerFor is the dialer for a service URL's scheme: for plain http it refuses any address that is not loopback.
+func dialerFor(scheme string) *net.Dialer {
+	d := &net.Dialer{}
+	if scheme == "http" {
+		d.Control = loopbackOnly // the name "localhost" must not lead anywhere else, whatever resolves it
+	}
+	return d
+}
+
+// loopbackOnly refuses a connection to an address that is not loopback; it runs after name resolution. An address
+// that does not parse gives a nil IP, which is not loopback.
 func loopbackOnly(_, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+	host, _, _ := net.SplitHostPort(address)
+	if !net.ParseIP(host).IsLoopback() {
 		return ErrAPIConfig
 	}
 	return nil
@@ -174,7 +183,7 @@ func (p *apiPeer) post(ctx context.Context, line []byte) error {
 		resp.Body.Close()
 		return fmt.Errorf("adapter: the bot service answered %d", resp.StatusCode)
 	}
-	p.body, p.r = resp.Body, bufio.NewReaderSize(resp.Body, 64<<10)
+	p.body, p.r = resp.Body, bufio.NewReaderSize(resp.Body, readBuffer)
 	return nil
 }
 

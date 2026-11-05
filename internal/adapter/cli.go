@@ -72,7 +72,7 @@ func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, er
 		return nil, errors.New("adapter: the bot command could not be started") // the OS text names the path
 	}
 	kill, err := contain(cmd)
-	p := &cliPeer{cmd: cmd, id: t.ID, in: stdin, r: bufio.NewReaderSize(stdout, 64<<10), kill: kill}
+	p := &cliPeer{cmd: cmd, id: t.ID, in: stdin, r: bufio.NewReaderSize(stdout, readBuffer), kill: kill}
 	defer p.close()
 	if err != nil {
 		_ = cmd.Process.Kill() // a bot that cannot be contained does not run

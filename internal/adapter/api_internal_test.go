@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/pipeline"
 )
 
 func TestAPITransportSettings(t *testing.T) {
@@ -67,5 +69,42 @@ func TestAPIRefusesANilContext(t *testing.T) {
 	var ctx context.Context // the request cannot be built without one
 	if _, err := a.Handle(ctx, bot.Task{}, nil); err == nil {
 		t.Fatal("no error")
+	}
+}
+
+// Only plain http gets the loopback-only dial; https goes where its certificate says.
+func TestDialerForRestrictsPlainHTTPOnly(t *testing.T) {
+	if dialerFor("http").Control == nil || dialerFor("https").Control != nil {
+		t.Fatal("the loopback-only dial belongs to http and only http")
+	}
+}
+
+// The buffers the bot's output is read through have the size the line limit assumes.
+func TestReadBuffersAreSixtyFourKilobytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"type":"question","content":"cQ=="}`+"\n")
+	}))
+	defer srv.Close()
+	a, err := NewAPI(APIConfig{URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &apiPeer{a: a}
+	if err := p.post(context.Background(), []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	defer p.close()
+	if p.r.Size() != 64<<10 || readBuffer != 64<<10 {
+		t.Fatalf("buffer %d", p.r.Size())
+	}
+}
+
+// The values that have no statement for mutation testing to cover.
+func TestConstantsArePinned(t *testing.T) {
+	if cancelTimeout != 2*time.Second || reapDelay != 2*time.Second || MaxStatuses != 1024 || MaxQuestions != 16 {
+		t.Fatal("a limit changed")
+	}
+	if pipeline.MaxContent != 522240 || MaxLine != 174081*4+4096 {
+		t.Fatalf("MaxLine %d", MaxLine)
 	}
 }
