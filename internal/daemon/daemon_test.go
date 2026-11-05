@@ -152,7 +152,7 @@ func TestDaemonLifecycle(t *testing.T) {
 	if s.Tenant != "t1" || s.Device != "dev-1" || s.RootPrint != root.Fingerprint(ed25519.PublicKey(e.cfg.RootPublicKey)) {
 		t.Errorf("status identity: %+v", s)
 	}
-	if len(s.Components) != 2 || s.Components[0].Name != "tunnel" || s.Components[1].Name != "revocations" {
+	if len(s.Components) != 3 || s.Components[0].Name != "tunnel" || s.Components[1].Name != "revocations" || s.Components[2].Name != "sweep" {
 		t.Errorf("components: %+v", s.Components)
 	}
 	// The revocation refresh fetches the fake gateway's list and persists it.

@@ -19,12 +19,14 @@
 //     Daemon.SigningKey and Daemon.Trust give the device key and a trust.Daemon
 //     already pinned to the configured root; New opens the rollback stores, so a
 //     corrupt or rolled-back store stops startup.
-//   - T412 (receive pipeline): Deps.OnEvent receives every tunnel event in
-//     order and must not block for long; Daemon.Handle registers local socket
-//     methods before Run; a new background job is one more Component in
+//   - T412 (message pipeline, internal/pipeline): every tunnel event goes to
+//     Daemon.Node().HandleEvent, in order (Deps.OnEvent is a tap that sees it
+//     first). The bot is Deps.OnInbound behind the owner allowlist Deps.Allow;
+//     Deps.Directory finds peers' bindings; Node().Submit sends. Sending
+//     goes through Daemon.Trust, which refuses when the binding or revocation
+//     state is missing, stale or rolled back. Daemon.Handle registers local
+//     socket methods before Run; a new background job is one more Component in
 //     Daemon.components (restarted with jittered backoff, stopped on shutdown).
-//     Sending must go through Daemon.Trust, which refuses when the binding or
-//     revocation state is missing, stale or rolled back.
 //
 // The security-critical pieces live in their own tier 1 packages: keystore
 // (the device key and what each OS guarantees), fsperm (private directories and
