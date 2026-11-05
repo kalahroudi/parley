@@ -55,6 +55,8 @@ func TestNodeFailsClosedWithoutDirectoryOrBot(t *testing.T) {
 	e := newEnv(t)
 	r := e.start(t, func(d *Deps) { d.AllowUnlockedMemory = true })
 	enroll(t, e, r)
+	// The pipeline refuses everything without a fresh revocation list; the refresh loop fetches one a moment after start.
+	waitFor(t, "revocation list fetched", func() bool { return status(t, e).Revocations == "" })
 	n, err := r.d.Node()
 	if err != nil {
 		t.Fatal(err)

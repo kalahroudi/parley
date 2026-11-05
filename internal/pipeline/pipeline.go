@@ -40,8 +40,13 @@
 //     next message. A caller with no such key waits for the target's next message.
 //
 // What this package does not do: it holds no plaintext beyond a callback, writes
-// no logs and keeps nothing on disk. Errors are fixed sentinels. A daemon crash
-// loses every in-flight task and the callers resend, by design.
+// no logs and keeps nothing on disk. Errors are fixed sentinels. A panic in the
+// bot's or the caller's callback is contained (ErrCallback) after the key was
+// erased, and the plaintext buffer is cleared however the callback ends. Go
+// cannot promise that no other copy of a plaintext exists (the runtime and the OS
+// may copy pages, and a callback may keep what it was given): this package
+// zeroes the buffers it owns, and the prekey scalars live in locked memory. A
+// daemon crash loses every in-flight task and the callers resend, by design.
 package pipeline
 
 import (
