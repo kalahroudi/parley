@@ -16,8 +16,11 @@ T109 is **not** fully done. The Cloudflare half is done (limits, costs, hibernat
 
 ## Rules this run follows
 
-- Account `b891d462...` is pinned in a generated wrangler config and in `CLOUDFLARE_ACCOUNT_ID`, and `cf accounts list` must show it before every deploy, delete or listing (`tests/reality/cf/safety.mjs`, tested in `safety.test.mjs`).
-- Only a Worker named `parley-test-*` is created, deployed or deleted. workers.dev only: no routes, domains, previews, D1, KV or R2. The config is generated in the system temp directory (mode 0600) and removed afterwards; the repo's `gateway/wrangler.jsonc` is untouched.
+- Opt-in: nothing touches a real account unless the person sets `PARLEY_REALITY_REAL=1` in their own shell. CI never sets it and never runs these scripts; the unit tests inject every Cloudflare call and use a made-up account id.
+- The account id is never in the repo, a log or a report: the person names the account with `PARLEY_CF_ACCOUNT_ID` (32 hex characters). It is pinned in a generated wrangler config and in `CLOUDFLARE_ACCOUNT_ID`, and `cf accounts list` must show it before every deploy, delete or listing (`tests/reality/cf/safety.mjs`, tested in `safety.test.mjs`).
+- Spend ceiling: the run counts its WebSocket messages, connections, HTTP requests and deploys, and stops (and cleans up) past the ceilings in `safety.mjs` (2,000,000 messages, 20,000 connections, 5,000 requests, 12 deploys), far above the plan below. The 10k soak is a fixed size inside that.
+- Harness status (2026-11-05): the Cloudflare harness and the Go soak authenticate with the development sign-in (`DEV_AUTH`, `dev:` tokens) that existed on 2026-11-02, when the numbers below were measured. That path has since been removed from the gateway (release gate `scripts/check-dev-auth.mjs`), so `run.mjs` and `TestRealSoak` cannot be run again against the current gateway until they use device connect tokens (T310). The recorded results are unaffected; re-running them is not possible today.
+- Only a Worker named `parley-test-*` is created, deployed or deleted. workers.dev only: no routes, domains, previews, D1, KV or R2. The config is generated in the system temp directory (mode 0600 on macOS and Linux; Windows has no POSIX modes, so it relies on the per-user temp directory) and removed afterwards; the repo's `gateway/wrangler.jsonc` is untouched.
 - Everything is deleted in a `finally` block, and a search for `parley-test-` Workers proves none remain.
 - No token or OAuth credential is printed, logged or committed. Authentication is wrangler's and `cf`'s own login.
 
@@ -198,7 +201,7 @@ A small tenant (10 devices) costs nothing beyond the plan's $5 minimum; overage 
 
 The client id is public and is baked into `tests/reality/logins/google.mjs`: `221774361645-4isrhvs33j1eft8133hsk239s831d33r.apps.googleusercontent.com`. The **client secret never goes into chat, a file or this repo**; you type it into wrangler's hidden prompt yourself. The secret must be the one for **this** client; an older client's secret will not work.
 
-The check always uses the fixed throwaway Worker `parley-test-login` on account `b891d462...`, so one redirect URI is registered once and stays valid. The account's workers.dev subdomain is `hello-891` (read from a real deploy; the CLI has no command for it). The callback path is `/auth/google/callback` (`gateway/src/auth.ts`).
+The check always uses the fixed throwaway Worker `parley-test-login` on the pinned account, so one redirect URI is registered once and stays valid. The account's workers.dev subdomain is `hello-891` (read from a real deploy; the CLI has no command for it). The callback path is `/auth/google/callback` (`gateway/src/auth.ts`).
 
 **Step 1: register the redirect URI (once).** In console.cloud.google.com open the project that owns the client, then Google Auth Platform, Clients, open the client whose id is the one above (its type must be **Web application**), Authorized redirect URIs, Add URI, paste exactly:
 
@@ -223,7 +226,7 @@ node tests/reality/logins/google.mjs
 It verifies the account, deploys the Worker with the client id as a plain variable, and prints the redirect URI and then this command (with the real temp-config path filled in), which you run in a second terminal and answer at the prompt:
 
 ```
-cd gateway && npx wrangler secret put GOOGLE_CLIENT_SECRET --name parley-test-login --config "<temp config pinned to account b891d462...>"
+cd gateway && npx wrangler secret put GOOGLE_CLIENT_SECRET --name parley-test-login --config "<temp config pinned to the account in PARLEY_CF_ACCOUNT_ID>"
 ```
 
 The script notices the secret (it lists secret *names* only) and then runs its first check, before anyone is asked to click: the login redirect must go to Google and name **exactly** the client id above and **exactly** the callback above (compared to fixed constants, not to wherever the Worker happened to deploy), with PKCE S256, a state and a nonce. A mismatch, such as another workers.dev host or a different client, fails there with the exact difference, and the Worker is deleted. If it passes, the script opens the login URL. Sign in and click **Allow** once. The gateway's own callback validates the id token's signature, issuer, audience, nonce and expiry plus the state and PKCE, and, for a hosted-domain run (`--domain`, below), the `hd` claim. The script then prints `PASS` or `REFUSED` with only the provider, issuer, email **domain** and flags (never the email, subject id or tokens; the browser is shown a plain "signed in" page), deletes the Worker in a `finally` block and lists `parley-test-*` Workers to show none remain. Deleting the Worker also deletes the secret, so each run needs the command again. If a run is abandoned, `node tests/reality/logins/google.mjs cleanup` deletes the Worker.
@@ -239,7 +242,7 @@ Expected results:
 | Consent denied (click Cancel) | any | `REFUSED ... idp_denied` |
 | Account not a test user (Testing mode) | any | Google's own "Access blocked" page; no result arrives and the script times out and cleans up |
 
-**Result of the user's run (2026-11-03, account `b891d462...`, the new client).** The user ran `node tests/reality/logins/google.mjs` with a personal Google account and it passed. As reported by the user's run, not re-run by me:
+**Result of the user's run (2026-11-03, the pinned account, the new client).** The user ran `node tests/reality/logins/google.mjs` with a personal Google account and it passed. As reported by the user's run, not re-run by me:
 
 - First check: the login redirect went to Google and named exactly the client id above and exactly the callback `https://parley-test-login.hello-891.workers.dev/auth/google/callback`, with PKCE S256, a state and a nonce.
 - Sign-in and one consent click, then: `PASS {"ok":true,"status":200,"provider":"google","issuer":"https://accounts.google.com","emailDomain":"gmail.com","personalAccount":true,"hasSub":true,"hostedDomainChecked":false}`.

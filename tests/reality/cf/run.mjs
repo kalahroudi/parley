@@ -6,6 +6,10 @@
 // finally block, then proves no `parley-test-*` Worker remains. See
 // specs/parley-mvp/reality-check-1.md for the plan and the measured results.
 //
+// Opt in per shell session with PARLEY_REALITY_REAL=1 and name the account with
+// PARLEY_CF_ACCOUNT_ID (the id is never in the repo). The run counts what it spends and stops at the
+// ceilings in safety.mjs. It is never run by CI.
+//
 //   node tests/reality/cf/run.mjs [--only limits,hibernation,deploy,soak] [--idle-long 600] [--out file.json]
 //
 // Nothing here prints tokens; the probe token lives in this process, the
@@ -13,10 +17,11 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as ex from "./experiments.mjs";
-import { ACCOUNT_ID, deploy, deployAsync, destroy, remaining, removeConfig, verifyAccount } from "./safety.mjs";
+import { checkCeiling, deploy, deployAsync, destroy, remaining, removeConfig, requireOptIn, verifyAccount } from "./safety.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..", "..");
@@ -35,8 +40,9 @@ const stats = { wsMessages: 0, connections: 0, deploys: 0, httpRequests: 0 };
 const results = { name, startedAt: new Date().toISOString(), plan: {}, experiments: {}, stats, versions: {} };
 
 async function main() {
+  requireOptIn();
   verifyAccount();
-  log(`account ${ACCOUNT_ID.slice(0, 8)}... verified; deploying ${name}`);
+  log(`account verified; deploying ${name}`);
   const t0 = Date.now();
   const origin = deploy(name, vars("build-0"));
   stats.deploys++;
@@ -56,8 +62,10 @@ async function main() {
   const ctx = { WebSocket, url: wsUrl, token: (d) => `dev:${tenant}:${d}`, stats };
   const step = async (key, fn) => {
     if (!only.has(key)) return;
+    checkCeiling(stats);
     log(`experiment: ${key}`);
     results.experiments[key] = await fn();
+    checkCeiling(stats);
   };
 
   await step("limits", () => ex.limits(ctx));
@@ -81,7 +89,7 @@ async function main() {
   await step("deploy", () => ex.deployDuringSockets(ctx, deployOnce));
 
   await step("soak", async () => {
-    const outFile = join(process.env.TMPDIR ?? "/tmp", `${name}-soak.json`);
+    const outFile = join(tmpdir(), `${name}-soak.json`);
     const deployScript = join(here, "deploy.mjs");
     const r = spawnSync("go", ["test", "-count=1", "-run", "TestRealSoak", "-timeout", "30m", "./internal/tunnel"], {
       cwd: repo,
@@ -131,7 +139,7 @@ try {
   }
   results.finishedAt = new Date().toISOString();
   results.failure = failure ? failure.message : null;
-  const out = typeof args.out === "string" ? args.out : join(process.env.TMPDIR ?? "/tmp", `${name}-results.json`);
+  const out = typeof args.out === "string" ? args.out : join(tmpdir(), `${name}-results.json`);
   writeFileSync(out, JSON.stringify(results, null, 2));
   log(`results in ${out}; remaining parley-test-* workers: ${JSON.stringify(results.remainingAfterCleanup)}`);
   process.exit(failure ? 1 : 0);

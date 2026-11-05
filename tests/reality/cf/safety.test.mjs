@@ -5,8 +5,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { ACCOUNT_ID, assertName, configPath, remaining, removeConfig, secretCommand, secretNames, verifyAccount, wranglerConfig, writeConfig } from "./safety.mjs";
+import { ACCOUNT_ENV, OPT_IN, accountId, assertName, checkCeiling, requireOptIn, configPath, remaining, removeConfig, secretCommand, secretNames, verifyAccount, wranglerConfig, writeConfig } from "./safety.mjs";
+
+// A made-up account id, and the opt-in: these tests never reach a real account (every call is injected).
+const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
+const OTHER = "fedcba9876543210fedcba9876543210";
+process.env[OPT_IN] = "1";
+process.env[ACCOUNT_ENV] = ACCOUNT_ID;
 
 test("only parley-test-* worker names are accepted", () => {
   assert.equal(assertName("parley-test-r1-abc123"), "parley-test-r1-abc123");
@@ -18,11 +26,34 @@ test("only parley-test-* worker names are accepted", () => {
 test("the account is verified with `cf accounts list` and a missing target aborts", () => {
   const calls = [];
   const run = (ids) => (cmd, args) => (calls.push([cmd, ...args]), JSON.stringify(ids.map((id) => ({ id }))));
-  assert.equal(verifyAccount(run([ACCOUNT_ID, "e2bc588eb3e8cc1eb913146950f30889"])), true);
+  assert.equal(verifyAccount(run([ACCOUNT_ID, OTHER])), true);
   assert.deepEqual(calls, [["cf", "accounts", "list"]]);
-  assert.throws(() => verifyAccount(run(["e2bc588eb3e8cc1eb913146950f30889"])), /b891d462\.\.\. not found/);
+  assert.throws(() => verifyAccount(run([OTHER])), /not in `cf accounts list`/);
   assert.throws(() => verifyAccount(() => "not json"), /cannot verify/);
   assert.throws(() => verifyAccount(() => { throw new Error("cf missing"); }), /cannot verify.*cf missing/);
+});
+
+test("nothing touches a real account without the opt-in and a well-formed account id", () => {
+  const run = () => JSON.stringify([{ id: ACCOUNT_ID }]);
+  assert.throws(() => requireOptIn({}), /set PARLEY_REALITY_REAL=1/);
+  assert.throws(() => requireOptIn({ [OPT_IN]: "true" }), /opt in/);
+  assert.throws(() => verifyAccount(run, { [ACCOUNT_ENV]: ACCOUNT_ID }), /opt in/);
+  assert.throws(() => verifyAccount(run, { [OPT_IN]: "1" }), /32-character hex/);
+  assert.throws(() => verifyAccount(run, { [OPT_IN]: "1", [ACCOUNT_ENV]: "0123abcd" }), /32-character hex/);
+  assert.throws(() => accountId({ [ACCOUNT_ENV]: `${ACCOUNT_ID}\n` }), /32-character hex/);
+  assert.equal(verifyAccount(run, { [OPT_IN]: "1", [ACCOUNT_ENV]: ACCOUNT_ID }), true);
+});
+
+test("the repo holds no account id", () => {
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  assert.doesNotMatch(readFileSync(join(here, "safety.mjs"), "utf8"), /\b[0-9a-f]{32}\b/);
+});
+
+test("the spend ceiling stops a run that counts past it", () => {
+  checkCeiling({ wsMessages: 10, deploys: 3 });
+  assert.throws(() => checkCeiling({ deploys: 13 }), /spend ceiling reached: deploys 13 > 12/);
+  assert.throws(() => checkCeiling({ wsMessages: 2_000_001 }), /wsMessages/);
+  assert.throws(() => checkCeiling({ x: 2 }, { x: 1 }), /x 2 > 1/);
 });
 
 test("the generated config pins the account and only enables workers.dev", () => {
@@ -40,7 +71,8 @@ test("the config is written privately outside the repo and removed afterwards", 
   const path = writeConfig("parley-test-r1-unit", { PROBE_TOKEN: "t" });
   try {
     assert.ok(path.startsWith(tmpdir()), "outside the repo tree");
-    assert.equal(statSync(path).mode & 0o077, 0, "owner-only");
+    // Windows has no POSIX modes (a file reads as 0o666): there the owner-only check does not apply.
+    if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o077, 0, "owner-only");
     assert.equal(JSON.parse(readFileSync(path, "utf8")).vars.PROBE_TOKEN, "t");
   } finally {
     removeConfig("parley-test-r1-unit");

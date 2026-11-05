@@ -11,11 +11,32 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ACCOUNT_ID = "b891d46224e846153205dd9144c205c9";
 export const PREFIX = "parley-test-";
 const NAME = /^parley-test-[a-z0-9][a-z0-9-]{0,40}$/;
 const here = fileURLToPath(new URL(".", import.meta.url));
 const gatewayDir = resolve(here, "..", "..", "..", "gateway");
+
+// Nothing here runs against a real account by accident: a person opts in for the shell session that
+// runs it, and names the account. The account id is never in the repo, a log or a report.
+export const OPT_IN = "PARLEY_REALITY_REAL";
+export const ACCOUNT_ENV = "PARLEY_CF_ACCOUNT_ID";
+
+export function requireOptIn(env = process.env) {
+  if (env[OPT_IN] !== "1") throw new Error(`refusing to touch a real Cloudflare account: set ${OPT_IN}=1 to opt in (see specs/parley-mvp/reality-check-1.md)`);
+}
+
+export function accountId(env = process.env) {
+  const id = env[ACCOUNT_ENV];
+  if (!/^[0-9a-f]{32}$/.test(id ?? "")) throw new Error(`${ACCOUNT_ENV} must be the 32-character hex id of the account to use (the login has more than one account; the default never decides)`);
+  return id;
+}
+
+// Hard ceilings on what one run may spend, counted by the run itself, so a loop that goes wrong stops
+// instead of billing. They sit far above what the measured plan uses (see reality-check-1.md).
+export const CEILING = { wsMessages: 2_000_000, connections: 20_000, httpRequests: 5_000, deploys: 12 };
+export function checkCeiling(stats, ceiling = CEILING) {
+  for (const [k, max] of Object.entries(ceiling)) if ((stats[k] ?? 0) > max) throw new Error(`spend ceiling reached: ${k} ${stats[k]} > ${max}; stopping and cleaning up`);
+}
 
 export function assertName(name) {
   if (!NAME.test(name)) throw new Error(`refusing Worker name ${JSON.stringify(name)}: must match ${NAME}`);
@@ -24,24 +45,26 @@ export function assertName(name) {
 
 // `cf accounts list` must show the target account; the login has two accounts and
 // the default must never decide. Aborts otherwise.
-export function verifyAccount(run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" })) {
+export function verifyAccount(run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }), env = process.env) {
+  requireOptIn(env);
+  const want = accountId(env);
   let ids;
   try {
     ids = JSON.parse(run("cf", ["accounts", "list"])).map((a) => a.id);
   } catch (err) {
     throw new Error(`cannot verify the Cloudflare account: ${err.message}`);
   }
-  if (!ids.includes(ACCOUNT_ID)) throw new Error(`target account ${ACCOUNT_ID.slice(0, 8)}... not found in \`cf accounts list\`; aborting`);
+  if (!ids.includes(want)) throw new Error(`the account named by ${ACCOUNT_ENV} is not in \`cf accounts list\`; aborting`);
   return true;
 }
 
 // A generated wrangler config outside the repo tree. The account is pinned, only
 // workers.dev is enabled (no routes, domains or previews), and logging is off.
-export function wranglerConfig({ name, entry, vars }) {
+export function wranglerConfig({ name, entry, vars }, env = process.env) {
   assertName(name);
   return {
     name,
-    account_id: ACCOUNT_ID,
+    account_id: accountId(env),
     main: entry,
     compatibility_date: "2026-10-01",
     workers_dev: true,
@@ -65,6 +88,7 @@ export function workDir(name) {
 }
 
 export function writeConfig(name, vars) {
+  requireOptIn();
   const dir = workDir(name);
   const path = join(dir, "wrangler.jsonc");
   writeFileSync(path, JSON.stringify(wranglerConfig({ name, entry: entryPath, vars }), null, 2), { mode: 0o600 });
@@ -90,7 +114,9 @@ const wranglerBin = join(gatewayDir, "node_modules", ".bin", "wrangler");
 const wranglerOpts = {
   cwd: gatewayDir,
   encoding: "utf8",
-  env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID, WRANGLER_SEND_METRICS: "false" },
+  get env() {
+    return { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId(), WRANGLER_SEND_METRICS: "false" };
+  },
 };
 const wrangler = (args, config) => execFileSync(wranglerBin, [...args, "--config", config], { ...wranglerOpts, stdio: ["ignore", "pipe", "pipe"] });
 // The async form leaves the event loop running, so sockets can be watched during a deploy.
@@ -132,7 +158,7 @@ export function destroy(name) {
 }
 
 // Names of Workers on the target account that start with the prefix. Empty means none remain.
-export function remaining(run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID } })) {
+export function remaining(run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId() } })) {
   verifyAccount(run);
   const out = run("cf", ["workers", "scripts", "search", "--name", PREFIX]);
   return [...new Set([...out.matchAll(/parley-test-[a-z0-9-]+/g)].map((m) => m[0]))];
