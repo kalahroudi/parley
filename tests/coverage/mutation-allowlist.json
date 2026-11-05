@@ -307,32 +307,8 @@
     {
       "package": "internal/pipeline",
       "file": "pipeline.go",
-      "line": 74,
+      "line": 79,
       "type": "INVERT_NEGATIVES",
-      "status": "NOT COVERED",
-      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
-    },
-    {
-      "package": "internal/pipeline",
-      "file": "pipeline.go",
-      "line": 74,
-      "type": "ARITHMETIC_BASE",
-      "status": "NOT COVERED",
-      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
-    },
-    {
-      "package": "internal/pipeline",
-      "file": "pipeline.go",
-      "line": 74,
-      "type": "INVERT_BITWISE",
-      "status": "NOT COVERED",
-      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
-    },
-    {
-      "package": "internal/pipeline",
-      "file": "pipeline.go",
-      "line": 78,
-      "type": "ARITHMETIC_BASE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
     },
@@ -347,7 +323,15 @@
     {
       "package": "internal/pipeline",
       "file": "pipeline.go",
-      "line": 80,
+      "line": 79,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/pipeline",
+      "file": "pipeline.go",
+      "line": 83,
       "type": "ARITHMETIC_BASE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
@@ -355,7 +339,23 @@
     {
       "package": "internal/pipeline",
       "file": "pipeline.go",
-      "line": 174,
+      "line": 84,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/pipeline",
+      "file": "pipeline.go",
+      "line": 85,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/pipeline",
+      "file": "pipeline.go",
+      "line": 180,
       "type": "ARITHMETIC_BASE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
