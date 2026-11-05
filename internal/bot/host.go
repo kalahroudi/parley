@@ -20,9 +20,9 @@ import (
 const (
 	DefaultMaxRunning = 5
 	DefaultMaxQueued  = 5
-	DefaultTimeout    = 15 * time.Minute
-	DefaultGrace      = 5 * time.Second
-	sendTimeout       = 30 * time.Second
+	DefaultTimeout    = time.Duration(900e9) // 15 minutes
+	DefaultGrace      = time.Duration(5e9)   // 5 seconds
+	sendTimeout       = time.Duration(30e9)  // 30 seconds
 )
 
 // Responder sends the bot's messages to the caller; *pipeline.Node is one.
