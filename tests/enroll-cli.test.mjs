@@ -169,8 +169,9 @@ test("T411: sign-in through the gateway's device login, then enrollment, from th
     };
 
     // The user's browser: the printed address, through the mock IdP, to the page that shows the code.
+    // The two lines are printed one after the other and can arrive in different reads (slow on Windows): wait for both.
     const link = await waitFor("the sign-in address", () => /Sign in in your browser: (\S+)/.exec(out)?.[1]);
-    const code = /The page will show the code (\S+)\./.exec(out)[1];
+    const code = await waitFor("the code the page will show", () => /The page will show the code (\S+)\./.exec(out)?.[1]);
     const jar = new Map();
     const keep = (res) => { for (const c of res.headers.getSetCookie()) { const [kv] = c.split(";"); const i = kv.indexOf("="); jar.set(kv.slice(0, i), kv.slice(i + 1)); } };
     const cookie = () => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
