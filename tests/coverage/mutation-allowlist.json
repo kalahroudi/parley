@@ -283,7 +283,7 @@
     {
       "package": "internal/frames",
       "file": "frames.go",
-      "line": 41,
+      "line": 42,
       "type": "INVERT_BITWISE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
@@ -291,7 +291,7 @@
     {
       "package": "internal/frames",
       "file": "frames.go",
-      "line": 43,
+      "line": 44,
       "type": "INVERT_BITWISE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."

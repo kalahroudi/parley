@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/kalahroudi/parley/internal/prekey"
@@ -109,10 +110,70 @@ func canonical(s string, max int) ([]byte, error) {
 		return nil, ErrFormat
 	}
 	b, err := base64.StdEncoding.Strict().DecodeString(s)
-	if err != nil || len(b) > max {
+	// The decoder skips CR and LF, so compare the re-encoding too.
+	if err != nil || len(b) > max || base64.StdEncoding.EncodeToString(b) != s {
 		return nil, ErrFormat
 	}
 	return b, nil
+}
+
+// MaxRetryAfterMS bounds retry_after_ms (one day) so converting it to a Duration cannot overflow.
+const MaxRetryAfterMS int64 = 86_400_000
+
+// maxDepth bounds JSON nesting that checkKeys walks.
+const maxDepth = 16
+
+// known are the field names this package reads. encoding/json matches keys
+// case-insensitively and keeps the last of duplicates; neither is a canonical
+// frame, so checkKeys refuses both.
+var known = []string{"t", "a2a", "id", "from", "to", "nonce", "expires_at", "prekey", "reason",
+	"retry_after_ms", "task", "status", "message", "parts", "raw", "mediaType"}
+
+func checkKeys(body string) error {
+	d := json.NewDecoder(bytes.NewReader([]byte(body)))
+	if err := walk(d, 0); err != nil {
+		return ErrFormat
+	}
+	return nil
+}
+
+func walk(d *json.Decoder, depth int) error {
+	tok, err := d.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if depth >= maxDepth {
+		return ErrFormat
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		if delim == '{' {
+			kt, err := d.Token()
+			if err != nil {
+				return err
+			}
+			k, _ := kt.(string)
+			lk := strings.ToLower(k)
+			if seen[lk] {
+				return ErrFormat
+			}
+			seen[lk] = true
+			for _, n := range known {
+				if strings.EqualFold(k, n) && k != n {
+					return ErrFormat
+				}
+			}
+		}
+		if err := walk(d, depth+1); err != nil {
+			return err
+		}
+	}
+	_, err = d.Token() // the closing delimiter
+	return err
 }
 
 // strictJSON decodes one value and refuses unknown fields. ParseEvent has
@@ -189,6 +250,9 @@ func parseRelay(body string) (*Relay, error) {
 		if r.Reason != ReasonRefused && r.Reason != ReasonOffline && r.Reason != ReasonRateLimited {
 			return nil, ErrFormat
 		}
+		if w.RetryAfter > MaxRetryAfterMS {
+			return nil, ErrFormat
+		}
 		r.RetryAfter = time.Duration(w.RetryAfter) * time.Millisecond
 	default:
 		return nil, ErrFormat
@@ -223,6 +287,9 @@ type a2aEvent struct {
 func ParseEvent(body string) (Event, error) {
 	if len(body) > MaxEventBytes {
 		return Event{}, ErrFormat
+	}
+	if err := checkKeys(body); err != nil {
+		return Event{}, err
 	}
 	var probe struct {
 		T   string `json:"t"`
@@ -262,6 +329,9 @@ func EncodePrekey(s *prekey.Signed) []byte { return append(s.Encode(), s.Signatu
 // produced (so one prekey has one encoding). It does not check the signature.
 // It reads no more than len(p) bytes; callers bound p.
 func DecodePrekey(p []byte) (*prekey.Signed, error) {
+	if len(p) > MaxPrekeyBlob {
+		return nil, ErrFormat
+	}
 	r := reader{b: p}
 	r.field() // label and suite: the re-encoding check below pins both
 	r.field()

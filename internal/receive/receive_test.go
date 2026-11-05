@@ -746,3 +746,47 @@ func TestKeepLeavesTheKeyForLaterMessages(t *testing.T) {
 		t.Fatalf("the last message: err=%v outstanding=%d, want the key erased", err, f.pool.Outstanding())
 	}
 }
+
+// A panicking Admit is a refusal: nothing is recorded, opened or erased, and
+// the panic does not reach the caller.
+func TestAdmitPanicFailsClosed(t *testing.T) {
+	f := newFixture(t, func(c *Config) { c.Admit = func(envelope.Header) error { panic("admit") } })
+	m, _ := f.seal(nil)
+	ru, err := f.receive(m, nil, nil)
+	if !errors.Is(err, ErrRejected) || len(ru.events) != 0 {
+		t.Fatalf("err=%v events=%v, want ErrRejected and nothing run", err, ru.events)
+	}
+	if !f.intact() || f.table.Len() != 0 {
+		t.Fatalf("a panicking Admit changed state: outstanding=%d replays=%d", f.pool.Outstanding(), f.table.Len())
+	}
+}
+
+// A panicking Keep means "not kept": the key is erased, the message still runs
+// once, and the panic does not unwind past the erase.
+func TestKeepPanicErasesTheKey(t *testing.T) {
+	f := newFixture(t, func(c *Config) { c.Keep = func(envelope.Header) bool { panic("keep") } })
+	m, _ := f.seal(nil)
+	ru, err := f.receive(m, nil, nil)
+	if err != nil || len(ru.events) != 2 {
+		t.Fatalf("err=%v events=%v", err, ru.events)
+	}
+	if f.pool.Outstanding() != 0 {
+		t.Fatal("key survived a panicking Keep")
+	}
+	if _, err := f.receive(m, nil, nil); !errors.Is(err, ErrDropped) {
+		t.Fatalf("redelivery: %v, want ErrDropped", err)
+	}
+}
+
+// Keep is never asked about a forged or unadmitted message, and sees only the header.
+func TestKeepNotAskedBeforeAdmitAndAuth(t *testing.T) {
+	asked := false
+	f := newFixture(t, func(c *Config) {
+		c.Keep = func(envelope.Header) bool { asked = true; return true }
+		c.Admit = func(envelope.Header) error { return errors.New("no") }
+	})
+	m, _ := f.seal(nil)
+	if _, err := f.receive(m, nil, nil); !errors.Is(err, ErrRejected) || asked || !f.intact() {
+		t.Fatalf("err=%v asked=%v intact=%v", err, asked, f.intact())
+	}
+}

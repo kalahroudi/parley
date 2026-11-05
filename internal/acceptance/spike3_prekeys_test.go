@@ -1215,6 +1215,10 @@ func TestGatewayRelaysPrekeyRequestsThroughTheLimiter(t *testing.T) {
 		"never lets a sender claim to be someone else, and ignores identity headers from the client",
 		"relays only to devices of the sender's own tenant",
 		"stores nothing: the Device DOs hold no frame body, key or nonce afterwards",
+		"refuses a request for a target none of whose cards the sender may see, or that is not enrolled, and allows one with no card",
+		"stops relaying for a device the moment it is revoked, though its socket is still open, in both directions",
+		"gives a target a budget of its own: one flooding caller is cut off by its own, and callers together cannot spend more than the target's",
+		"treats a target that cannot be reached as offline, and does not fail the sender's frame",
 	} {
 		if !strings.Contains(string(src), name) {
 			t.Errorf("gateway/test/connect.test.ts lost the test %q", name)

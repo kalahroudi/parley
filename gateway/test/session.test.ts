@@ -223,7 +223,10 @@ describe("expiry and sign-out", () => {
   it("keeps at most a few sessions per user and role, dropping the oldest", async () => {
     const t = tenant();
     const all = [];
-    for (let i = 0; i < MAX_SESSIONS_PER_USER + 2; i++) all.push(await mint(t, "admin", "a@example.test"));
+    for (let i = 0; i < MAX_SESSIONS_PER_USER + 2; i++) {
+      all.push(await mint(t, "admin", "a@example.test"));
+      await new Promise((r) => setTimeout(r, 3)); // "oldest" is by creation time in milliseconds: two in one millisecond have no order
+    }
     const other = await mint(t, "user", "a@example.test"); // a different role is counted separately
     const alive = await Promise.all(all.map(async (s) => (await stub(t).getSession(s.secret)) !== null));
     expect(alive.filter(Boolean)).toHaveLength(MAX_SESSIONS_PER_USER);

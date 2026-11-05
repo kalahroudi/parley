@@ -16,7 +16,9 @@ import {
   parseRelayFrame,
   type ServerMessage,
 } from "./protocol";
+import { isDeviceId } from "./acl";
 import { limitDevice } from "./ratelimit";
+import { tenantStub } from "./tenant";
 
 // Set by the Worker on the request it forwards, after it has verified the device's token.
 export const IDENTITY_TENANT = "x-parley-tenant";
@@ -124,7 +126,8 @@ export class Device extends DurableObject<Env> {
 
   private async liveHeld(): Promise<Held[]> {
     const now = Date.now();
-    return ((await this.ctx.storage.get<Held[]>("held")) ?? []).filter((h) => h.until > now);
+    const held = await this.ctx.storage.get<Held[]>("held");
+    return held ? held.filter((h) => h.until > now) : [];
   }
 
   private taskStub(h: Held) {
@@ -133,7 +136,8 @@ export class Device extends DurableObject<Env> {
 
   // Deletes the held events the daemon has acknowledged (everything up to `upTo`).
   private async ackHeld(upTo: number): Promise<void> {
-    const infl = (await this.ctx.storage.get<Inflight[]>("inflight")) ?? [];
+    const infl = await this.ctx.storage.get<Inflight[]>("inflight");
+    if (!infl) return;
     const done = infl.filter((i) => i.seq <= upTo);
     if (!done.length) return;
     for (const i of done) await this.taskStub(i).ack(i.tenant, i.device, i.id);
@@ -148,7 +152,7 @@ export class Device extends DurableObject<Env> {
       await this.ackHeld(session.acked_tx);
       const [prevHeld, prevInfl] = await Promise.all([this.ctx.storage.get<Held[]>("held"), this.ctx.storage.get<Inflight[]>("inflight")]);
       const held: Held[] = [];
-      const infl = (prevInfl ?? []).filter((i) => i.until > Date.now());
+      const infl = prevInfl ? prevInfl.filter((i) => i.until > Date.now()) : [];
       const tx = session.tx_seq;
       for (const h of await this.liveHeld()) {
         const events = await this.taskStub(h).drain(h.tenant, h.device);
@@ -166,11 +170,11 @@ export class Device extends DurableObject<Env> {
       // Write only what changed: a connection with nothing held (always so in Strict) writes nothing here, which
       // also keeps the keys out of storage altogether.
       const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-      await Promise.all([
-        ...(session.tx_seq === tx ? [] : [this.ctx.storage.put("session", session)]),
-        ...(same(held, prevHeld ?? []) ? [] : [this.ctx.storage.put("held", held)]),
-        ...(same(infl, prevInfl ?? []) ? [] : [this.ctx.storage.put("inflight", infl)]),
-      ]);
+      const changes: Record<string, unknown> = {};
+      if (session.tx_seq !== tx) changes.session = session;
+      if (!same(held, prevHeld ?? [])) changes.held = held;
+      if (!same(infl, prevInfl ?? [])) changes.inflight = infl;
+      if (Object.keys(changes).length) await this.ctx.storage.put(changes);
     });
   }
 
@@ -240,16 +244,28 @@ export class Device extends DurableObject<Env> {
     const who = (ws.deserializeAttachment() as Attachment).who;
     const frame = parseRelayFrame(body);
     if (!who || !frame || frame.to === who.device) return;
-    const wait = await limitDevice(this.env, who.tenant, who.device, "prekey");
+    const request = frame.t === "prekey_request";
+    // A target that cannot be a device id (it is refused as offline below) gets no budget of its own, so junk names cannot make buckets.
+    const wait = await limitDevice(this.env, who.tenant, who.device, "prekey", request && isDeviceId(frame.to) ? frame.to : undefined);
     if (wait !== null) {
-      if (frame.t === "prekey_request") await this.deliver(refusedRateLimited(frame.id, frame.to, wait));
+      if (request) await this.deliver(refusedRateLimited(frame.id, frame.to, wait));
+      return;
+    }
+    // Enrolled and not revoked now, and (for a request) the target visible to the sender: rechecked per frame.
+    if (!(await tenantStub(this.env, who.tenant).mayRelay(who.device, frame.to, request))) {
+      if (request) await this.deliver(refusedOffline(frame.id, frame.to));
       return;
     }
     const { to, ...rest } = frame;
     const event = JSON.stringify(frame.t === "prekey_refused" ? { ...rest, from: who.device, reason: "refused" } : { ...rest, from: who.device });
     const peer = this.env.DEVICE.get(this.env.DEVICE.idFromName(`${who.tenant}:${to}`));
-    const r = await peer.deliver(event);
-    if (r.status !== "delivered" && frame.t === "prekey_request") await this.deliver(JSON.stringify({ t: "prekey_refused", id: frame.id, from: to, reason: "offline" }));
+    let delivered = false;
+    try {
+      delivered = (await peer.deliver(event)).status === "delivered";
+    } catch {
+      // An overloaded or restarting peer is an unreachable one: the requester is told below.
+    }
+    if (!delivered && request) await this.deliver(refusedOffline(frame.id, to));
   }
 
   async webSocketClose(ws: WebSocket, code: number): Promise<void> {
@@ -273,6 +289,11 @@ export class Device extends DurableObject<Env> {
 // What the requester is told when the gateway will not carry its prekey request: wait this long.
 function refusedRateLimited(id: string, from: string, retryAfterMs: number): string {
   return JSON.stringify({ t: "prekey_refused", id, from, reason: "rate_limited", retry_after_ms: retryAfterMs });
+}
+
+// Not connected, not enrolled, not visible to the requester: one answer for all, so it reveals nothing.
+function refusedOffline(id: string, from: string): string {
+  return JSON.stringify({ t: "prekey_refused", id, from, reason: "offline" });
 }
 
 function validId(v: string | null): v is string {
