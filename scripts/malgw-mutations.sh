@@ -13,6 +13,9 @@
 #   scripts/malgw-mutations.sh receive    # only labels containing "receive"
 #   MALGW_RUN='Crash|Junk' scripts/malgw-mutations.sh   # which tests must kill them (go test -run)
 #
+# Rows in internal/pipeline are killed by that package's own tests (the full pipeline against the
+# malicious-gateway world); every other row by the acceptance suite.
+#
 # Fields are separated by "@@": file, original text, replacement, label.
 set -eu
 cd "$(dirname "$0")/.."
@@ -52,10 +55,21 @@ internal/acceptance/malgw_test.go@@h.Seq > out.nextSeq@@false@@harness reply pat
 internal/acceptance/malgw_test.go@@!bytes.Equal(h.PrevHash, out.last)@@false@@harness reply path: chain not checked
 internal/acceptance/malgw_test.go@@h.SenderDevice != out.target@@false@@harness reply path: sender not the target
 internal/acceptance/malgw_test.go@@out.canceling \&\& h.Type != envelope.TypeCancel@@false@@harness reply path: reply after cancel
-internal/acceptance/malgw_test.go@@h.SenderDevice != in.caller@@false@@harness cancel path: caller not checked'
+internal/acceptance/malgw_test.go@@h.SenderDevice != in.caller@@false@@harness cancel path: caller not checked
+internal/pipeline/pipeline.go@@c.cancel \&\& h.Type != envelope.TypeCancel@@false@@pipeline: reply after cancel accepted
+internal/pipeline/pipeline.go@@h.PrekeyID != receive.PrekeyID(c.reply.ID)@@false@@pipeline: reply sealed to another key of ours accepted
+internal/pipeline/pipeline.go@@c.role != caller || c.done || h.SenderDevice != c.peer@@c.role != caller || c.done || false@@pipeline: reflected or foreign reply accepted
+internal/pipeline/pipeline.go@@c.role != target || c.done || h.SenderDevice != c.peer@@c.role != target || c.done || false@@pipeline: follow-up from a device that is not the caller accepted
+internal/pipeline/pipeline.go@@if c != nil || len(n.chains) >= n.cfg.MaxTasks {@@if false {@@pipeline: task id reused or task table unbounded
+internal/pipeline/pipeline.go@@h.PrekeyID != receive.PrekeyID(c.follow.ID)@@false@@pipeline: follow-up sealed to a key we did not issue for it
+internal/pipeline/send.go@@Nonce: nonce, BindingVersion@@Nonce: sp.Nonce, BindingVersion@@pipeline: prekey answer not bound to our nonce
+internal/pipeline/send.go@@w != nil \&\& w.target == r.Peer@@w != nil@@pipeline: prekey answer from a device other than the one asked
+internal/pipeline/send.go@@if err := n.cfg.Trust.AuthorizeSend(tb, now); err != nil {@@if err := error(nil); err != nil {@@pipeline: send without the trust check
+internal/pipeline/send.go@@!ok || v != n.cfg.Version@@!ok || v < 0@@pipeline: device standing not checked before sending
+internal/pipeline/send.go@@errors.Is(err, prekey.ErrRateLimited) ||@@false ||@@pipeline: too many outstanding reply keys fails the task'
 
 # A mutant that does not compile is not a kill: start from a suite that builds.
-go test -count=1 -run '^$' ./internal/acceptance >/dev/null
+go test -count=1 -run '^$' ./internal/acceptance ./internal/pipeline >/dev/null
 survived=0 ran=0
 IFS='
 '
@@ -65,13 +79,15 @@ for row in $table; do
 	to=${rest%%@@*}; label=${rest#*@@}
 	case $label in *"$filter"*) ;; *) continue ;; esac
 	ran=$((ran + 1))
+	pkg=./internal/acceptance
+	case $file in internal/pipeline/*) pkg=./internal/pipeline ;; esac
 	FROM=$(printf '%s' "$from" | sed 's/\\&/\&/g') TO=$(printf '%s' "$to" | sed 's/\\&/\&/g') \
 		perl -0pi -e 'BEGIN { $f = $ENV{FROM}; $t = $ENV{TO} } $n = s/\Q$f\E/$t/; END { exit($n ? 0 : 3) }' "$file" ||
 		{ echo "MISSING  $label: pattern not found in $file"; survived=$((survived + 1)); git checkout -q -- "$file"; continue; }
-	if ! go test -count=1 -run '^$' ./internal/acceptance >/dev/null 2>&1; then
+	if ! go test -count=1 -run '^$' "$pkg" >/dev/null 2>&1; then
 		echo "BROKEN   $label: the mutant does not compile"
 		survived=$((survived + 1))
-	elif go test -count=1 -run "${MALGW_RUN:-.}" ./internal/acceptance >/dev/null 2>&1; then
+	elif go test -count=1 -run "${MALGW_RUN:-.}" "$pkg" >/dev/null 2>&1; then
 		echo "SURVIVED $label"
 		survived=$((survived + 1))
 	else

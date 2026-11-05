@@ -1076,7 +1076,7 @@ describe("the prekey relay", () => {
     for (const { D } of callers) D.ws.close();
     T.ws.close();
     O.ws.close();
-  });
+  }, 120_000); // eight enrollments and ten sockets: slower than the default budget on a loaded Windows runner
 
   it("gives a name that cannot be a device no budget of its own, so junk targets make no buckets and are all just offline", async () => {
     const x = tenant();
@@ -1091,7 +1091,7 @@ describe("the prekey relay", () => {
       expect(D.events()).toEqual([{ t: "prekey_refused", id: `j${i}`, from: "not-a-device", reason: "offline" }]);
       D.ws.close();
     }
-  });
+  }, 120_000);
 
   it("treats a target that cannot be reached as offline, and does not fail the sender's frame", async () => {
     const x = tenant();

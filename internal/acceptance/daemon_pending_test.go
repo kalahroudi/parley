@@ -178,16 +178,16 @@ func (m memKeys) Load() (ed25519.PrivateKey, error) {
 }
 func (m memKeys) Save(ed25519.PrivateKey) error { return errors.New("not expected") }
 
-func TestPending_DaemonProcessesTunnelEvents(t *testing.T) {
-	pending(t, "T412", "parleyd's OnEvent is a no-op; assert tasks pushed through the tunnel reach the receive pipeline (open, verify, erase, ack, execute) and nothing is dropped")
-}
-
 func TestPending_DaemonEnrollmentAndBindings(t *testing.T) {
 	pending(t, "T411", "the daemon core opens the binding tracker but has no enrollment flow; assert a fresh daemon enrolls, receives its root-signed binding and records it before serving")
 }
 
-func TestPending_DaemonRefusesToSendWithoutFreshTrustState(t *testing.T) {
-	pending(t, "T412", "the daemon has no send path yet. When T412 adds one, prove it refuses to send (and sends nothing, not even a partial frame) whenever: the binding store is missing, unreadable or corrupt; the revocation list is missing, older than its refusal age, unreadable or corrupt; the revocation list revokes the recipient or this device; and that it sends again once a fresh valid list is stored. Reuse trust.Daemon, binding.Tracker and revocation.Guard; a test that passes with a re-implemented check proves nothing")
+// The peer-binding lookup the pipeline needs (daemon.Deps.Directory) has no gateway endpoint yet, so a real daemon
+// cannot find a peer's binding on its own and rejects everything until one is wired. T412 proves the pipeline
+// with an injected directory; the first task that runs two real daemons through a real gateway must add the
+// endpoint (device-authenticated, same tenant only, root-signed bindings of approved devices) and this test.
+func TestPending_DaemonFindsPeerBindingsThroughTheGateway(t *testing.T) {
+	pending(t, "T414", "daemon.Deps.Directory has no production implementation: assert a daemon with no injected directory fetches a peer's root-signed binding from the gateway (same tenant only, never another tenant's, never an unapproved or revoked device's), that the pipeline then accepts that peer's task, and that a gateway answering with a binding for another device or an older version is refused")
 }
 
 func TestPending_WindowsDaemonPeerRestriction(t *testing.T) {
