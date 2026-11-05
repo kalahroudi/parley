@@ -19,12 +19,12 @@ func TestExecute(t *testing.T) {
 	dir := func() (string, error) { return cfg, nil }
 	var out, errw bytes.Buffer
 
-	if code := run([]string{"--version"}, &out, &errw, dir); code != 0 || out.String() != "parley-cli "+version+"\n" {
+	if code := runExec([]string{"--version"}, &out, &errw, dir); code != 0 || out.String() != "parley-cli "+version+"\n" {
 		t.Fatalf("--version: %d %q", code, out.String())
 	}
 
 	out.Reset()
-	if code := run([]string{"admin", "init"}, &out, &errw, dir); code != 0 || !strings.Contains(out.String(), "Recovery code: ") {
+	if code := runExec([]string{"admin", "init"}, &out, &errw, dir); code != 0 || !strings.Contains(out.String(), "Recovery code: ") {
 		t.Fatalf("admin init: %d out=%q err=%q", code, out.String(), errw.String())
 	}
 	// The key and backup went under <config>/parley.
@@ -35,19 +35,19 @@ func TestExecute(t *testing.T) {
 	}
 
 	errw.Reset()
-	if code := run([]string{"admin", "init"}, &out, &errw, func() (string, error) { return "", errors.New("no home") }); code != 1 || errw.String() != "error: no home\n" {
+	if code := runExec([]string{"admin", "init"}, &out, &errw, func() (string, error) { return "", errors.New("no home") }); code != 1 || errw.String() != "error: no home\n" {
 		t.Fatalf("no config dir: %d %q", code, errw.String())
 	}
 
 	for _, args := range [][]string{nil, {"admin"}, {"bogus"}, {"--version", "x"}} {
 		errw.Reset()
-		if code := run(args, &out, &errw, dir); code != 2 || !strings.Contains(errw.String(), "usage:") {
+		if code := runExec(args, &out, &errw, dir); code != 2 || !strings.Contains(errw.String(), "usage:") {
 			t.Errorf("%v: %d %q", args, code, errw.String())
 		}
 	}
 }
 
 // run is execute with no environment and no enrollment (the commands that need them have their own tests).
-func run(args []string, out, errw io.Writer, dir func() (string, error)) int {
+func runExec(args []string, out, errw io.Writer, dir func() (string, error)) int {
 	return execute(context.Background(), args, strings.NewReader(""), out, errw, dir, func(string) string { return "" }, tools{})
 }
