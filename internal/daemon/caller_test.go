@@ -116,6 +116,11 @@ func TestSendTaskReachesThePipelineOnceEnrolled(t *testing.T) {
 	e := newEnv(t)
 	r := e.start(t, func(d *Deps) { d.AllowUnlockedMemory = true })
 	enroll(t, e, r)
+	// A send before the daemon holds a revocation list fails at once (not_ready) and the task ends, so the list is
+	// installed here rather than left to the background refresh, which a slow machine may not have finished.
+	if err := r.d.Trust().Guard.Accept(e.revs(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	resp := callLocal(t, e, "send_task", map[string]string{"agent": "dev-2:ab", "text": "hello"})
 	var v struct {
 		ID      string `json:"task_id"`
