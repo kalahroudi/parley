@@ -48,12 +48,22 @@ type fakeGateway struct {
 	rootBody func() any
 	bind     func(id string, key []byte) *binding.Signed
 	bound    map[string]*binding.Signed
+	login    fakeLogin
 }
 
 type fakeReq struct {
 	key         []byte
 	poll, name  string
 	auth, token string
+}
+
+type fakeLogin struct {
+	starts, polls int
+	sessionHash   string
+	pollHash      string
+	doneAfter     int
+	notFound      bool
+	startBody     func() (int, any)
 }
 
 func newFakeGateway(t *testing.T) *fakeGateway {
@@ -80,7 +90,8 @@ func (g *fakeGateway) snapshot() map[string]*fakeReq {
 	}
 	return out
 }
-func (g *fakeGateway) pollCount() int { g.mu.Lock(); defer g.mu.Unlock(); return g.polls }
+func (g *fakeGateway) pollCount() int       { g.mu.Lock(); defer g.mu.Unlock(); return g.polls }
+func (g *fakeGateway) loginSnap() fakeLogin { g.mu.Lock(); defer g.mu.Unlock(); return g.login }
 
 func (g *fakeGateway) distinct() int { g.mu.Lock(); defer g.mu.Unlock(); return len(g.reqs) }
 func (g *fakeGateway) rawPosts() int { g.mu.Lock(); defer g.mu.Unlock(); return g.posts }
@@ -169,6 +180,26 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 			g.bound[str("id")] = bd
 		}
 		reply(200, map[string]any{"status": "approved", "binding": bd})
+	case "/v1/login/start":
+		g.login.starts++
+		if g.login.startBody != nil {
+			code, v := g.login.startBody()
+			reply(code, v)
+			return
+		}
+		g.login.sessionHash, g.login.pollHash = str("session_hash"), str("poll_hash")
+		reply(201, map[string]any{"id": strings.Repeat("a", 32), "code": "ABCD-1234", "expires_at": time.Now().Add(time.Minute).UnixMilli()})
+	case "/v1/login/poll":
+		g.login.polls++
+		if g.login.notFound || str("id") != strings.Repeat("a", 32) || hexSHA(str("poll")) != g.login.pollHash {
+			reply(404, nil)
+			return
+		}
+		if g.login.polls > g.login.doneAfter {
+			reply(200, map[string]any{"state": "done"})
+			return
+		}
+		reply(200, map[string]any{"state": "pending"})
 	default:
 		reply(404, nil)
 	}

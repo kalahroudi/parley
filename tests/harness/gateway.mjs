@@ -116,6 +116,13 @@ function encode(parts) {
   }));
 }
 
+// The binding the root holder signs for a device (internal/binding): `root` is from registerRoot, `publicKey` the
+// device's 32-byte key, `notAfter` unix seconds.
+export function signBinding(root, { tenant, owner, id, publicKey, version = 1, notAfter = Math.floor(Date.now() / 1000) + 90 * 86400 }) {
+  const signature = cryptoSign(null, encode(["parley/binding/v1", tenant, owner, id, publicKey, BigInt(version), BigInt(notAfter)]), root.privateKey);
+  return { tenant, owner, device_id: id, signing_key: publicKey.toString("base64"), version, not_after: new Date(notAfter * 1000).toISOString().replace(".000Z", "Z"), signature: signature.toString("base64") };
+}
+
 // A device that holds its own key, brought to "approved with a binding the root signed" the way an admin's daemon
 // would: the user requests enrollment with the device's public key, the admin approves and posts a binding (signed
 // by `root`, see registerRoot) naming that key. `userToken` and `adminToken` are session bearer tokens (see signIn).
@@ -136,8 +143,7 @@ export async function enrollDevice(url, { tenant, userToken, adminToken, root, o
   if (decided.status !== 200) throw new Error(`approval answered ${decided.status}`);
   let binding;
   if (bind) {
-    const signature = cryptoSign(null, encode(["parley/binding/v1", tenant, owner, id, pub, BigInt(version), BigInt(notAfter)]), root.privateKey);
-    binding = { tenant, owner, device_id: id, signing_key: pub.toString("base64"), version, not_after: new Date(notAfter * 1000).toISOString().replace(".000Z", "Z"), signature: signature.toString("base64") };
+    binding = signBinding(root, { tenant, owner, id, publicKey: pub, version, notAfter });
     const posted = await post("/v1/admin/bindings", adminToken, { id, binding });
     if (posted.status !== 200) throw new Error(`binding answered ${posted.status}`);
   }

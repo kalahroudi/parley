@@ -5,23 +5,29 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 
+	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/root"
 )
 
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-//cover:ignore main only wires the process (arguments, config directory, os.Exit) to execute, which is tested
+//cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {
-	os.Exit(execute(os.Args[1:], os.Stdout, os.Stderr, os.UserConfigDir))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	code := execute(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.UserConfigDir, os.Getenv, defaultTools())
+	stop()
+	os.Exit(code)
 }
 
-func execute(args []string, out, errw io.Writer, configDir func() (string, error)) int {
+func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writer, configDir func() (string, error), getenv func(string) string, t tools) int {
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintln(out, "parley-cli", version)
 		return 0
@@ -36,6 +42,18 @@ func execute(args []string, out, errw io.Writer, configDir func() (string, error
 		dir = filepath.Join(dir, "parley")
 		return adminInit(args[2:], out, errw, root.FileStore{Dir: dir}, filepath.Join(dir, "root-backup.json"))
 	}
-	fmt.Fprintln(errw, "usage: parley-cli --version | admin init [-backup <file>]")
+	if len(args) >= 1 && (args[0] == "login" || args[0] == "enroll") {
+		dirs, err := daemon.DefaultDirs(getenv, configDir)
+		if err != nil {
+			//logx:allow fatal CLI error for the operator's terminal; no task content exists in this process path
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
+		if args[0] == "login" {
+			return login(ctx, args[1:], out, errw, dirs, getenv, t)
+		}
+		return enrollCmd(ctx, args[1:], in, out, errw, dirs, getenv, t)
+	}
+	fmt.Fprintln(errw, "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file]")
 	return 2
 }
