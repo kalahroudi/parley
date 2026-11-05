@@ -8,6 +8,7 @@ package fsperm
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -101,6 +102,41 @@ func TestEnsureDirFailures(t *testing.T) {
 		t.Errorf("create failure: %v", err)
 	}
 	createDir = oldCreate
+}
+
+// A directory created by someone else between the existence check and the create is verified, not an error;
+// concurrent callers all succeed, and a lookalike that is not ours is still refused.
+func TestEnsureDirLosesTheCreateRace(t *testing.T) {
+	oldCreate := createDir
+	defer func() { createDir = oldCreate }()
+	base := tempDir(t)
+	dir := filepath.Join(base, "raced")
+	createDir = func(p *uint16, sa *windows.SecurityAttributes) error {
+		if err := oldCreate(p, sa); err != nil {
+			return err
+		}
+		return windows.ERROR_ALREADY_EXISTS
+	}
+	if err := EnsureDir(dir); err != nil {
+		t.Errorf("losing the create race: %v", err)
+	}
+	createDir = func(*uint16, *windows.SecurityAttributes) error { return windows.ERROR_ALREADY_EXISTS }
+	if err := EnsureDir(filepath.Join(base, "ghost")); err == nil {
+		t.Error("a directory that does not exist passed")
+	}
+	createDir = oldCreate
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs[i] = EnsureDir(filepath.Join(base, "many")) }()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent EnsureDir: %v", err)
+		}
+	}
 }
 
 func TestEnsureDirUnderAFile(t *testing.T) {

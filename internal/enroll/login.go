@@ -34,6 +34,7 @@ var ErrLoginExpired = errors.New("enroll: the sign-in was not confirmed in time;
 
 const (
 	defaultLoginTimeout = 10 * time.Minute
+	defaultPoll         = 2 * time.Second
 	maxLoginPoll        = 10 * time.Second
 )
 

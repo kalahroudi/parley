@@ -2,7 +2,7 @@
   "tiers": {
     "1": {
       "line": 100,
-      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey", "internal/receive", "internal/outbox", "internal/fsperm", "internal/keystore", "internal/localsock", "internal/supervisor", "internal/connect", "internal/enroll"]
+      "packages": ["internal/binding", "internal/envelope", "internal/replay", "internal/revocation", "internal/logx", "internal/prekey", "internal/receive", "internal/outbox", "internal/fsperm", "internal/keystore", "internal/localsock", "internal/supervisor", "internal/connect", "internal/frames", "internal/enroll"]
     },
     "2": {
       "line": 95,

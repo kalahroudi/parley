@@ -72,10 +72,7 @@ var (
 // CrashPoints are the step boundaries a Crash hook is called at, in order of a first run.
 var CrashPoints = []string{"pinned", "key-created", "keyed", "request-chosen", "request-sent", "requested", "binding-recorded", "approved", "config-written"}
 
-const (
-	defaultTimeout = time.Hour
-	defaultPoll    = 2 * time.Second
-)
+const defaultTimeout = time.Hour
 
 func randHex(r io.Reader, n int) (string, error) {
 	b := make([]byte, n)
@@ -147,9 +144,6 @@ func Enroll(ctx context.Context, o Options) (Result, error) {
 	if o.Log == nil {
 		o.Log = logx.New(io.Discard)
 	}
-	if o.Poll <= 0 {
-		o.Poll = defaultPoll
-	}
 	if o.Timeout <= 0 {
 		o.Timeout = defaultTimeout
 	}
@@ -204,30 +198,9 @@ func (en *run) configExists() bool {
 }
 
 func (en *run) run(ctx context.Context) (Result, error) {
-	st, err := loadState(en.Dirs.State)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		st = nil
-	case err != nil:
+	st, err := en.begin(ctx)
+	if err != nil {
 		return Result{}, err
-	}
-	switch {
-	case en.Replace:
-		if st, err = en.replace(st); err != nil {
-			return Result{}, err
-		}
-	case st == nil && en.configExists():
-		return Result{}, ErrAlreadyEnrolled // enrolled by other means: never touched
-	case st == nil:
-		if st, err = en.start(ctx); err != nil {
-			return Result{}, err
-		}
-	case st.Phase == PhaseBound:
-		return Result{}, ErrAlreadyEnrolled
-	default:
-		if err := st.matches(en.Options); err != nil {
-			return Result{}, err
-		}
 	}
 	en.st = st
 	if st.Phase != PhaseApproved && en.configExists() {
@@ -275,6 +248,30 @@ func (en *run) run(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Config: cfg, Replaced: st.Replaces}, nil
+}
+
+// begin finds the state to run: the saved one, a new one, or the replacement for a lost identity.
+func (en *run) begin(ctx context.Context) (*state, error) {
+	st, err := loadState(en.Dirs.State)
+	if errors.Is(err, os.ErrNotExist) {
+		st, err = nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if en.Replace {
+		return en.replace(st)
+	}
+	if st == nil {
+		if en.configExists() {
+			return nil, ErrAlreadyEnrolled // enrolled by other means: never touched
+		}
+		return en.start(ctx)
+	}
+	if st.Phase == PhaseBound {
+		return nil, ErrAlreadyEnrolled
+	}
+	return st, st.matches(en.Options)
 }
 
 // start validates a first run, pins the root and saves the first state.
@@ -372,21 +369,20 @@ func (s *state) matches(o Options) error {
 func (en *run) replace(old *state) (*state, error) {
 	var ids []string
 	var base *state
-	switch {
-	case old != nil:
+	if old != nil {
 		base = old
 		if old.ID != "" {
 			ids = append(ids, old.ID)
 		}
 		ids = append(ids, old.Replaces...)
-	case en.configExists():
+	} else if en.configExists() {
 		cfg, err := daemon.LoadConfig(en.Dirs.Config)
 		if err != nil {
 			return nil, err
 		}
 		base = &state{Format: stateFormat, Gateway: cfg.GatewayURL, Tenant: cfg.Tenant, RootPublicKey: cfg.RootPublicKey, KeyStore: cfg.KeyStore}
 		ids = append(ids, cfg.DeviceID)
-	default:
+	} else {
 		return nil, ErrNothingToReplace
 	}
 	acct, err := randHex(en.Rand, 8)
@@ -479,10 +475,9 @@ func (en *run) sendRequest(ctx context.Context, cl *trust.Client, pub ed25519.Pu
 	st := en.st
 	req := trust.EnrollRequest{Name: st.Name, Key: pub, ID: st.ID, Poll: st.Poll}
 	var session bool
-	switch {
-	case en.Token != "":
+	if en.Token != "" {
 		req.Tenant, req.Token = st.Tenant, en.Token
-	case en.Sessions != nil:
+	} else if en.Sessions != nil {
 		tok, err := en.Sessions.Load(st.Tenant)
 		if err != nil {
 			if errors.Is(err, ErrNoSession) {
@@ -491,7 +486,7 @@ func (en *run) sendRequest(ctx context.Context, cl *trust.Client, pub ed25519.Pu
 			return err
 		}
 		cl.Auth, session = "Bearer "+tok, true
-	default:
+	} else {
 		return ErrNeedCredential
 	}
 	id, poll, err := cl.Request(ctx, req)
@@ -528,15 +523,15 @@ func (en *run) await(ctx context.Context, cl *trust.Client, pub ed25519.PublicKe
 	wctx, cancel := context.WithTimeout(ctx, en.Timeout)
 	defer cancel()
 	if _, err := td.Await(wctx, st.ID, st.Poll, pub, en.Poll, en.Now); err != nil {
-		switch {
-		case errors.Is(err, trust.ErrNotFound), errors.Is(err, trust.ErrRejected):
+		if errors.Is(err, trust.ErrNotFound) || errors.Is(err, trust.ErrRejected) {
 			// The request is over: forget it and keep the key, so the next run asks again with the same device key.
 			if errors.Is(err, trust.ErrNotFound) {
 				err = ErrRequestExpired
 			}
 			st.ID, st.Poll = "", ""
 			return errors.Join(err, en.enter(PhaseKeyed))
-		case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+		}
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return ErrTimeout
 		}
 		return err

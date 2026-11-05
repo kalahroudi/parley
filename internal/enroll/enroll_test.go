@@ -9,6 +9,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -385,6 +386,9 @@ func TestReplaceStartsANewIdentityAndReportsTheOldOnes(t *testing.T) {
 	if len(second.Replaced) != 1 || second.Replaced[0] != first.Config.DeviceID || !strings.Contains(e.text(), first.Config.DeviceID) {
 		t.Errorf("replaced %v", second.Replaced)
 	}
+	if st, _ := loadState(e.dirs.State); st.KeyStore != daemon.KeyStoreFile {
+		t.Errorf("a replacement without a key store choice must keep the old one, got %q", st.KeyStore)
+	}
 	// Replacing again lists both, once each.
 	e.keys.forget()
 	e.sess.Save("acme", "ps_acme."+strings.Repeat("c", 64))
@@ -425,6 +429,35 @@ func TestReplaceWhenStoppedHalfWayStillEndsWithoutTheOldConfig(t *testing.T) {
 	res, err := Enroll(bg, e.resume())
 	if err != nil || len(res.Replaced) != 1 {
 		t.Fatalf("%v %+v", err, res)
+	}
+}
+
+// The old config goes as soon as the new identity is recorded, not only when the new one is finished.
+func TestStaleConfigIsRemovedAsSoonAsTheReplacementStarts(t *testing.T) {
+	e := newEnv(t)
+	if _, err := Enroll(bg, e.opts); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(e.dirs.Config, "config.json")
+	e.keys.forget()
+	stop := errors.New("killed")
+	o := e.resume()
+	o.Replace = true
+	o.Crash = func(p string) error {
+		if p == "keyed" {
+			return stop
+		}
+		return nil
+	}
+	if _, err := Enroll(bg, o); !errors.Is(err, stop) {
+		t.Fatal(err)
+	}
+	if e.have(cfg) {
+		t.Fatal("the old config is still there while the replacement is half done")
+	}
+	e.sess.Save("acme", "ps_acme."+strings.Repeat("f", 64))
+	if _, err := Enroll(bg, e.resume()); err != nil || !e.have(cfg) {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -595,6 +628,10 @@ func TestEnrollValidatesInput(t *testing.T) {
 		want error
 	}{
 		"nothing at all":  {func(o *Options) { *o = Options{Dirs: o.Dirs} }, ErrNothingPending},
+		"only a gateway":  {func(o *Options) { *o = Options{Dirs: o.Dirs, Gateway: o.Gateway} }, daemon.ErrConfig},
+		"only a tenant":   {func(o *Options) { *o = Options{Dirs: o.Dirs, Tenant: "acme"} }, daemon.ErrConfig},
+		"only a root":     {func(o *Options) { *o = Options{Dirs: o.Dirs, RootFingerprint: "ABCD"} }, daemon.ErrConfig},
+		"only first use":  {func(o *Options) { *o = Options{Dirs: o.Dirs, TrustOnFirstUse: true} }, daemon.ErrConfig},
 		"http gateway":    {func(o *Options) { o.Gateway = "http://gw.example.test" }, daemon.ErrConfig},
 		"bad tenant":      {func(o *Options) { o.Tenant = "a b" }, daemon.ErrConfig},
 		"bad key store":   {func(o *Options) { o.KeyStore = "cloud" }, daemon.ErrConfig},
@@ -668,6 +705,24 @@ func TestEnrollRefusesUnsoundGatewayReplies(t *testing.T) {
 		}
 		if e.phase() != PhaseRequesting {
 			t.Errorf("phase %s", e.phase())
+		}
+	})
+	t.Run("reply with the right id and another poll secret", func(t *testing.T) {
+		e := newEnv(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/enroll/request" {
+				var b map[string]any
+				json.NewDecoder(r.Body).Decode(&b)
+				w.WriteHeader(202)
+				json.NewEncoder(w).Encode(map[string]any{"id": b["id"], "poll": strings.Repeat("0", 48)})
+				return
+			}
+			e.gw.serve(w, r)
+		}))
+		defer srv.Close()
+		e.opts.Gateway = srv.URL
+		if _, err := Enroll(bg, e.opts); !errors.Is(err, ErrBadReply) {
+			t.Fatalf("got %v", err)
 		}
 	})
 	t.Run("request refused", func(t *testing.T) {
@@ -1011,11 +1066,19 @@ func TestLoadStateRejectsDamagedState(t *testing.T) {
 	if _, err := loadState(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("missing: %v", err)
 	}
+	if err := good.save(dir); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("cannot open")
+	oldOpen := openState
+	openState = func(string) (*os.File, error) { return nil, boom }
+	_, err := loadState(dir)
+	openState = oldOpen
+	if !errors.Is(err, boom) {
+		t.Errorf("a file that cannot be opened must fail, not read as missing: %v", err)
+	}
 	if runtime.GOOS != "windows" {
 		p := filepath.Join(dir, stateFile)
-		if err := good.save(dir); err != nil {
-			t.Fatal(err)
-		}
 		if err := os.Chmod(p, 0o644); err != nil {
 			t.Fatal(err)
 		}

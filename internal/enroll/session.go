@@ -6,6 +6,7 @@ package enroll
 import (
 	"errors"
 	"regexp"
+	"strings"
 )
 
 // SessionService is the keychain service the signed-in session is filed under.
@@ -39,7 +40,7 @@ type KeyringSessions struct{ KR Keyring }
 var sessionToken = regexp.MustCompile(`^ps_[A-Za-z0-9_-]{1,64}\.[0-9a-f]{64}$`)
 
 func validToken(tenant, token string) bool {
-	return sessionToken.MatchString(token) && len(token) > len("ps_"+tenant+".") && token[:len("ps_"+tenant+".")] == "ps_"+tenant+"."
+	return sessionToken.MatchString(token) && strings.HasPrefix(token, "ps_"+tenant+".")
 }
 
 func (k KeyringSessions) Save(tenant, token string) error {

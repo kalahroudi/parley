@@ -211,7 +211,7 @@ export class Tenant extends DurableObject<Env> {
   async loginStart(sessionHash: string, pollHash: string): Promise<{ id: string; code: string; expires_at: number } | { error: "bad_request" | "too_many" }> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const hex64 = /^[0-9a-f]{64}$/;
-      if (!hex64.test(sessionHash) || !hex64.test(pollHash)) return { error: "bad_request" as const };
+      if (typeof sessionHash !== "string" || typeof pollHash !== "string" || !hex64.test(sessionHash) || !hex64.test(pollHash)) return { error: "bad_request" as const };
       const now = Date.now();
       const live = [...(await this.ctx.storage.list<StoredLogin>({ prefix: "lgn:" })).values()].filter((l) => l.exp > now);
       if (live.length >= MAX_PENDING_LOGINS) return { error: "too_many" as const };
@@ -617,6 +617,22 @@ export class Tenant extends DurableObject<Env> {
     const c = await this.ctx.storage.get<DirectoryEntry>(`card:${id}`);
     const owner = c && (await this.ownerOf(c.device_id));
     return c && owner && canSee(c, owner, viewer, await this.viewerGroups(viewer)) ? { ...c, owner } : null;
+  }
+
+  // May `caller` relay a prekey frame to `target`? Both must be enrolled (approved, bound, not revoked) now, which
+  // is rechecked per frame because a socket outlives a revocation. A request also needs one of the target's cards
+  // visible to the caller when it has cards (hidden and not-permitted are the same answer as unknown, like
+  // resolve); a device that published none says nothing the directory could hide, so only enrollment counts.
+  // Advisory: the target daemon still decides, and the gateway grants nothing.
+  async mayRelay(caller: string, target: string, request: boolean): Promise<boolean> {
+    const viewer = await this.ownerOf(caller);
+    const owner = viewer && (await this.ownerOf(target));
+    if (!viewer || !owner) return false;
+    if (!request) return true;
+    const cards = await this.ctx.storage.list<DirectoryEntry>({ prefix: `card:${target}:`, limit: MAX_CARDS_PER_DEVICE });
+    if (cards.size === 0) return true;
+    const groups = await this.viewerGroups(viewer);
+    return [...cards.values()].some((c) => canSee(c, owner, viewer, groups));
   }
 
   // Groups are managed by the admin; membership is by identity (email or named

@@ -95,8 +95,7 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
   return take(env, "session", source, limitFor(env.RATE_SESSION_PER_MIN, DEFAULTS.session));
 }
 
-// Requests that name a device (A2A sends, status, GetTask, CancelTask, directory search; prekey requests join
-// when the gateway relays them, T412) are counted per scope against two budgets in the same RateLimit DO:
+// Requests that name a device (A2A sends, status, GetTask, CancelTask, directory search; prekey requests and answers, which the Device DO relays) are counted per scope against two budgets (three for prekey requests, which also spend the target's) in the same RateLimit DO:
 //  - the device's own, in a bucket named by a hash salted with the tenant, so the same device id in another
 //    tenant has its own and no name or id is stored;
 //  - the tenant's, TENANT_FACTOR times the device's, which caps what a tenant's devices cost the Worker together.
@@ -104,19 +103,31 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
 // budget and burns at most that much of the tenant's: it takes TENANT_FACTOR devices flooding at once (all of them
 // enrolled and approved) to lock out the tenant's honest ones. Buckets never cross tenants: the tenant is part of
 // every name and comes from the verified credential. Returns null to go on, else the wait in milliseconds.
-export type Scope = "task" | "message" | "find" | "connect";
-const SCOPES: Record<Scope, { env: "RATE_TASK_PER_MIN" | "RATE_MESSAGE_PER_MIN" | "RATE_FIND_PER_MIN" | "RATE_CONNECT_DEVICE_PER_MIN"; dflt: number }> = {
+export type Scope = "task" | "message" | "find" | "connect" | "prekey";
+const SCOPES: Record<Scope, { env: "RATE_TASK_PER_MIN" | "RATE_MESSAGE_PER_MIN" | "RATE_FIND_PER_MIN" | "RATE_CONNECT_DEVICE_PER_MIN" | "RATE_PREKEY_PER_MIN"; dflt: number }> = {
   task: { env: "RATE_TASK_PER_MIN", dflt: 30 }, // new tasks
   message: { env: "RATE_MESSAGE_PER_MIN", dflt: 300 }, // status, replies, cancels, GetTask
   find: { env: "RATE_FIND_PER_MIN", dflt: 60 }, // directory searches
   connect: { env: "RATE_CONNECT_DEVICE_PER_MIN", dflt: 30 }, // connect challenges and tokens (a reconnect is two requests)
+  prekey: { env: "RATE_PREKEY_PER_MIN", dflt: 300 }, // prekey requests and answers relayed between devices (a task costs one request; a bot that answers many callers needs room)
 };
 export const TENANT_FACTOR = 10;
+// A device that is the target of requests (prekey requests) has a budget of its own, TARGET_FACTOR times a caller's,
+// spent after the caller's. Tradeoff: one caller is stopped by its own budget, so it takes TARGET_FACTOR callers
+// flooding one target to use the target's up and lock its other callers out until the window ends; the budget
+// bounds what any set of callers can make one device do. It is advisory: the device's own per-caller limit decides.
+// Accepted, not mitigated (reviewed): the callers are enrolled, approved, visible-to-the-target devices of one tenant, the
+// lockout ends with the window (one minute) and only delays requests (the requester is told when to retry), and the target's
+// own per-caller limit is the real defence. A reserved share for known peers would need the gateway to remember who talked
+// to whom, which it must not store.
+export const TARGET_FACTOR = 3;
 
-export async function limitDevice(env: Env, tenant: string, device: string, scope: Scope): Promise<number | null> {
+export async function limitDevice(env: Env, tenant: string, device: string, scope: Scope, target?: string): Promise<number | null> {
   const { env: v, dflt } = SCOPES[scope];
   const per = limitFor(env[v], dflt);
-  const mine = await count(env, `dev-${scope}`, `${tenant.length}:${tenant}${device}`, per);
-  const wait = mine ?? (await count(env, `ten-${scope}`, tenant, per * TENANT_FACTOR));
+  const dev = `dev-${scope}`;
+  const mine = await count(env, dev, `${tenant.length}:${tenant}${device}`, per);
+  const theirs = mine ?? (target === undefined ? null : await count(env, dev, `to:${tenant.length}:${tenant}${target}`, per * TARGET_FACTOR));
+  const wait = theirs ?? (await count(env, `ten-${scope}`, tenant, per * TENANT_FACTOR));
   return wait === null ? null : wait * 1000;
 }

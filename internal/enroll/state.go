@@ -44,7 +44,7 @@ const (
 
 // ErrBadState means the saved enrollment state is damaged or inconsistent. The
 // run stops: guessing would risk a second key or a second identity.
-var ErrBadState = errors.New("enroll: saved enrollment state is invalid; it was not changed")
+var ErrBadState = errors.New("enroll: saved enrollment state (enrollment.json in the state directory) is damaged or inconsistent, and was not changed; restore it from a backup, or move it away and run enroll again to start over with a new device key (and ask your admin to revoke any earlier request of this device)")
 
 var (
 	idRe   = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -77,13 +77,16 @@ func (s *state) save(dir string) error {
 	return fsperm.WriteAtomic(filepath.Join(dir, stateFile), data)
 }
 
+// openState opens the state file; tests replace it, because making a file unreadable is not possible the same way on every OS.
+var openState = func(path string) (*os.File, error) { return os.Open(path) }
+
 // loadState returns os.ErrNotExist (wrapped) when there is no state.
 func loadState(dir string) (*state, error) {
 	path := filepath.Join(dir, stateFile)
 	if err := fsperm.CheckFile(path); err != nil {
 		return nil, err // a missing file satisfies errors.Is(err, os.ErrNotExist)
 	}
-	f, err := os.Open(path)
+	f, err := openState(path)
 	if err != nil {
 		return nil, err
 	}

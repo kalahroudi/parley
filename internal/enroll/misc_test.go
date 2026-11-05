@@ -4,7 +4,10 @@
 package enroll
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +206,48 @@ func TestBindingIsOnlyRecordedForTheCorrectRoot(t *testing.T) {
 	for id := range e.gw.snapshot() {
 		if _, ok := tr.Version("acme", id); ok {
 			t.Error("a binding from another root was recorded")
+		}
+	}
+}
+
+// The limits are part of the behaviour (a state file larger than this is refused, a request is abandoned after this
+// long), so they are pinned: a change to one must be deliberate.
+func TestConstantsArePinned(t *testing.T) {
+	if requestTimeout != 30*time.Second || maxStateBytes != 16384 || defaultTimeout != time.Hour || maxReplaces != 32 || maxName != 100 {
+		t.Errorf("limits changed: %v %d %v %d %d", requestTimeout, maxStateBytes, defaultTimeout, maxReplaces, maxName)
+	}
+}
+
+// A state file exactly at the size limit loads; one byte more is refused for its size alone.
+func TestStateFileSizeLimitIsExact(t *testing.T) {
+	st := state{Format: 1, Phase: PhasePinned, Gateway: "https://gw.example.test", Tenant: "acme", RootPublicKey: make([]byte, 32), Name: "n", KeyStore: daemon.KeyStoreFile, KeyAccount: "k-1"}
+	one, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for extra, want := range map[int]bool{0: true, 1: false} {
+		dir := t.TempDir()
+		padded := append(append([]byte(nil), one...), bytes.Repeat([]byte(" "), maxStateBytes-len(one)+extra)...)
+		if err := os.WriteFile(filepath.Join(dir, stateFile), padded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadState(dir)
+		if (err == nil) != want {
+			t.Errorf("%d bytes: %v", len(padded), err)
+		}
+	}
+}
+
+// Exactly the allowed number of replaced identities is fine; one more is not.
+func TestReplacedListLimitIsExact(t *testing.T) {
+	st := state{Format: 1, Phase: PhasePinned, Gateway: "https://gw.example.test", Tenant: "acme", RootPublicKey: make([]byte, 32), Name: "n", KeyStore: daemon.KeyStoreFile, KeyAccount: "k-1"}
+	for n, want := range map[int]bool{maxReplaces: true, maxReplaces + 1: false} {
+		st.Replaces = nil
+		for i := 0; i < n; i++ {
+			st.Replaces = append(st.Replaces, fmt.Sprintf("d%d", i))
+		}
+		if got := st.valid(); got != want {
+			t.Errorf("%d replaced: valid=%v", n, got)
 		}
 	}
 }
