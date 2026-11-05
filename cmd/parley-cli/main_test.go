@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,12 +18,12 @@ func TestExecute(t *testing.T) {
 	dir := func() (string, error) { return cfg, nil }
 	var out, errw bytes.Buffer
 
-	if code := execute([]string{"--version"}, &out, &errw, dir); code != 0 || out.String() != "parley-cli "+version+"\n" {
+	if code := execute(context.Background(), []string{"--version"}, nil, &out, &errw, os.Getenv, dir); code != 0 || out.String() != "parley-cli "+version+"\n" {
 		t.Fatalf("--version: %d %q", code, out.String())
 	}
 
 	out.Reset()
-	if code := execute([]string{"admin", "init"}, &out, &errw, dir); code != 0 || !strings.Contains(out.String(), "Recovery code: ") {
+	if code := execute(context.Background(), []string{"admin", "init"}, nil, &out, &errw, os.Getenv, dir); code != 0 || !strings.Contains(out.String(), "Recovery code: ") {
 		t.Fatalf("admin init: %d out=%q err=%q", code, out.String(), errw.String())
 	}
 	// The key and backup went under <config>/parley.
@@ -33,13 +34,13 @@ func TestExecute(t *testing.T) {
 	}
 
 	errw.Reset()
-	if code := execute([]string{"admin", "init"}, &out, &errw, func() (string, error) { return "", errors.New("no home") }); code != 1 || errw.String() != "error: no home\n" {
+	if code := execute(context.Background(), []string{"admin", "init"}, nil, &out, &errw, os.Getenv, func() (string, error) { return "", errors.New("no home") }); code != 1 || errw.String() != "error: no home\n" {
 		t.Fatalf("no config dir: %d %q", code, errw.String())
 	}
 
 	for _, args := range [][]string{nil, {"admin"}, {"bogus"}, {"--version", "x"}} {
 		errw.Reset()
-		if code := execute(args, &out, &errw, dir); code != 2 || !strings.Contains(errw.String(), "usage:") {
+		if code := execute(context.Background(), args, nil, &out, &errw, os.Getenv, dir); code != 2 || !strings.Contains(errw.String(), "usage:") {
 			t.Errorf("%v: %d %q", args, code, errw.String())
 		}
 	}

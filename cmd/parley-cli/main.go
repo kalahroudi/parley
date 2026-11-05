@@ -5,9 +5,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 
 	"github.com/kalahroudi/parley/internal/root"
@@ -16,12 +18,17 @@ import (
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-//cover:ignore main only wires the process (arguments, config directory, os.Exit) to execute, which is tested
+const usage = "usage: parley-cli --version | admin init [-backup <file>] | mcp | find [text] | send | get | cancel | list"
+
+//cover:ignore main only wires the process (arguments, signals, os.Exit) to execute, which is tested
 func main() {
-	os.Exit(execute(os.Args[1:], os.Stdout, os.Stderr, os.UserConfigDir))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	code := execute(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Getenv, os.UserConfigDir)
+	stop()
+	os.Exit(code)
 }
 
-func execute(args []string, out, errw io.Writer, configDir func() (string, error)) int {
+func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writer, getenv func(string) string, configDir func() (string, error)) int {
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintln(out, "parley-cli", version)
 		return 0
@@ -36,6 +43,9 @@ func execute(args []string, out, errw io.Writer, configDir func() (string, error
 		dir = filepath.Join(dir, "parley")
 		return adminInit(args[2:], out, errw, root.FileStore{Dir: dir}, filepath.Join(dir, "root-backup.json"))
 	}
-	fmt.Fprintln(errw, "usage: parley-cli --version | admin init [-backup <file>]")
+	if len(args) >= 1 && callerCommand(args[0]) {
+		return runCaller(ctx, args, in, out, errw, getenv, configDir)
+	}
+	fmt.Fprintln(errw, usage)
 	return 2
 }
