@@ -119,7 +119,12 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
     assert.match(down.out, /not running or not reachable/);
 
     const [da, db, dc] = [startDaemon(a), startDaemon(b), startDaemon(c)];
-    await waitFor("the daemons' sockets", () => [a, b, c].every((d) => existsSync(join(d.home, "parleyd.sock"))));
+    // Ready when each daemon answers its local socket. The socket file is not looked for: on Windows it is an AF_UNIX
+    // socket that Node's file checks cannot see. A daemon that died says why instead of the wait timing out.
+    await waitFor("the daemons to answer on their sockets", async () => {
+      for (const d of daemons) assert.equal(d.child.exitCode, null, `a daemon exited early (${d.child.exitCode}):\n${d.output()}`);
+      return (await Promise.all([a, b, c].map((d) => cli(d.home, ["list"]).done))).every((r) => r.code === 0);
+    }, 450);
 
     // 1. Two devices of one owner.
     const pass = await cli(a.home, ["test", "-to", b.id, "-timeout", "90s"]).done;
