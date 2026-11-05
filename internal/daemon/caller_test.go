@@ -128,7 +128,16 @@ func TestSendTaskReachesThePipelineOnceEnrolled(t *testing.T) {
 	if got := callLocal(t, e, "get_task", map[string]string{"task_id": v.ID}); !got.OK {
 		t.Fatalf("%+v", got)
 	}
-	if c := callLocal(t, e, "cancel_task", map[string]string{"task_id": v.ID}); !c.OK || !strings.Contains(string(c.Result), "TASK_STATE_CANCELED") {
+	// The outbox may be in the middle of a send attempt; "sending" is its answer
+	// to a cancel at that moment, and it passes.
+	var c localsock.Response
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if c = callLocal(t, e, "cancel_task", map[string]string{"task_id": v.ID}); c.Error != "sending" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !c.OK || !strings.Contains(string(c.Result), "TASK_STATE_CANCELED") {
 		t.Fatalf("%+v", c)
 	}
 }
