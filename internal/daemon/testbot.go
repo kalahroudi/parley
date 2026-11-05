@@ -51,18 +51,15 @@ func (r nodeResponder) Respond(ctx context.Context, id [16]byte, typ envelope.Ty
 }
 
 // initTestBot makes the test bot the daemon's bot, unless it is disabled or a bot was supplied.
-func (d *Daemon) initTestBot() error {
+func (d *Daemon) initTestBot() {
 	if d.cfg.DisableTestBot || d.deps.Allow != nil || d.deps.OnInbound != nil {
-		return nil
+		return
 	}
-	h, err := bot.NewHost(bot.Config{Bot: echoBot{}, Responder: nodeResponder{d}, Now: d.deps.Now})
-	if err != nil {
-		return err
-	}
+	// NewHost fails only without a bot or a responder, and both are given here.
+	h, _ := bot.NewHost(bot.Config{Bot: echoBot{}, Responder: nodeResponder{d}, Now: d.deps.Now})
 	d.host = h
 	d.deps.OnInbound = h.Inbound
 	d.deps.Allow = d.allowOwner
-	return nil
 }
 
 // allowOwner is the test bot's allowlist: the owner named by this device's own recorded binding.

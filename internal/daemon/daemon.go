@@ -195,10 +195,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	}
 	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status}}
 	d.initCaller()
-	if err := d.initTestBot(); err != nil {
-		keystore.Zero(signer)
-		return nil, err
-	}
+	d.initTestBot()
 	return d, nil
 }
 
