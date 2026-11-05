@@ -55,7 +55,7 @@ func helper(mode string) {
 	case "deaf": // never reads its input, never answers
 		time.Sleep(time.Minute)
 	case "env":
-		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: []byte(fmt.Sprint(os.Getenv("PARLEY_SECRET"), "|", len(os.Environ()), "|", strings.Join(os.Args[1:], " ")))})
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: []byte(fmt.Sprint(os.Getenv("PARLEY_SECRET"), "|", len(environ()), "|", strings.Join(os.Args[1:], " ")))})
 	case "spawn": // a grandchild that keeps writing a heartbeat, then a bot that never answers
 		exe, _ := os.Executable()
 		child := exec.Command(exe)
@@ -69,6 +69,18 @@ func helper(mode string) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+}
+
+// environ is the helper's environment without the variable Go adds on Windows whenever a command has an explicit one
+// (SYSTEMROOT, which the system needs to start a process); names are compared without case there.
+func environ() []string {
+	var out []string
+	for _, e := range os.Environ() {
+		if !strings.EqualFold(strings.SplitN(e, "=", 2)[0], "SYSTEMROOT") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func self(t testing.TB) string {
