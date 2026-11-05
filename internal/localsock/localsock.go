@@ -51,8 +51,13 @@ import (
 // for the mutation gate to cover. TestConstantsArePinned pins them.
 const (
 	// MaxPath keeps the path under the smallest sun_path limit (104 on macOS).
-	MaxPath         = 100
-	maxRequestBytes = 65536                         // 64 KiB
+	MaxPath = 100
+	// A request carries up to 32 KiB of task text, which JSON escaping can make
+	// six times as long (control characters), so 256 KiB. A reply carries a
+	// directory page (at most 512 KiB from the gateway) that escaping can
+	// also inflate six times, so 4 MiB.
+	maxRequestBytes = 262144                        // 256 KiB
+	maxReplyBytes   = 4194304                       // 4 MiB
 	connDeadline    = time.Duration(30_000_000_000) // 30s
 	acceptRetry     = time.Duration(10_000_000)     // 10ms
 	maxConns        = 32
@@ -199,6 +204,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) {
 func (s *Server) handle(ctx context.Context, c net.Conn) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(connDeadline))
+	// The method gets the same deadline as the connection: a handler that waits
+	// on the network must not outlive the client that has given up, or hold one
+	// of the connection slots for ever.
+	ctx, cancel := context.WithTimeout(ctx, connDeadline)
+	defer cancel()
 	var req request
 	dec := json.NewDecoder(io.LimitReader(c, maxRequestBytes))
 	if err := dec.Decode(&req); err != nil {
@@ -253,7 +263,7 @@ func Call(ctx context.Context, socketPath, method string, params any) (Response,
 		return Response{}, err
 	}
 	var r Response
-	if err := json.NewDecoder(io.LimitReader(c, maxRequestBytes)).Decode(&r); err != nil {
+	if err := json.NewDecoder(io.LimitReader(c, maxReplyBytes)).Decode(&r); err != nil {
 		return Response{}, fmt.Errorf("localsock: bad reply: %w", err)
 	}
 	return r, nil

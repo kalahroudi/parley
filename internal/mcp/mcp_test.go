@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -314,4 +315,122 @@ func waitFor(t *testing.T, f func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("timed out")
+}
+
+func TestInvalidIDsAreRefusedAndNeverReachTheDaemon(t *testing.T) {
+	f := &fake{}
+	long := `"` + strings.Repeat("a", MaxID) + `"`
+	rs := session(t, f,
+		`{"jsonrpc":"2.0","id":{"a":1},"method":"tools/call","params":{"name":"list_tasks"}}`,
+		`{"jsonrpc":"2.0","id":[1],"method":"ping"}`,
+		`{"jsonrpc":"2.0","id":true,"method":"ping"}`,
+		`{"jsonrpc":"2.0","id":null,"method":"ping"}`,
+		`{"jsonrpc":"2.0","id":`+long+`,"method":"ping"}`,
+		`{"jsonrpc":"2.0","id":"ok","method":"ping"}`,
+		`{"jsonrpc":"2.0","id":-7,"method":"ping"}`)
+	if len(rs) != 7 {
+		t.Fatalf("%d replies: %v", len(rs), rs)
+	}
+	for _, r := range rs[:5] {
+		if r["error"] == nil || r["id"] != nil {
+			t.Errorf("accepted: %v", r)
+		}
+	}
+	if rs[5]["id"] != "ok" || rs[6]["id"] != float64(-7) || len(f.calls) != 0 {
+		t.Errorf("%v %v %v", rs[5], rs[6], f.calls)
+	}
+}
+
+func TestOversizedArgumentsAreRefusedBeforeTheDaemon(t *testing.T) {
+	f := &fake{}
+	big := `{"text":"` + strings.Repeat("a", MaxArguments) + `"}`
+	rs := session(t, f, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_task","arguments":`+big+`}}`)
+	if len(rs) != 1 || rs[0]["error"] == nil || len(f.calls) != 0 {
+		t.Errorf("%v %v", rs, f.calls)
+	}
+}
+
+func TestACanceledContextEndsTheSessionWhileTheClientIsSilent(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (&Server{Call: (&fake{}).Call}).Serve(ctx, pr, io.Discard) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the context was canceled")
+	}
+}
+
+// FuzzServe: whatever arrives on stdin, the server answers with well-formed
+// JSON lines only, never reaches the daemon with a method that is not one of
+// the five tools, never panics, and returns.
+func FuzzServe(f *testing.F) {
+	for _, s := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_task","arguments":{"text":"x","text":"y"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"../../etc/passwd","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_task","arguments":[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`,
+		`{"jsonrpc":"2.0","id":{"x":1},"method":"ping"}`,
+		"\x00\xff{{{\n\n[]\nnull\n\"\"\n",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		var mu sync.Mutex
+		var bad string
+		call := func(_ context.Context, method string, _ any) (localsock.Response, error) {
+			if !known(method) {
+				mu.Lock()
+				bad = method
+				mu.Unlock()
+			}
+			return localsock.Response{OK: true, Result: json.RawMessage(`{"untrusted":true}`)}, nil
+		}
+		var out bytes.Buffer
+		_ = (&Server{Call: call}).Serve(context.Background(), strings.NewReader(in), &out)
+		if bad != "" {
+			t.Fatalf("daemon called with %q", bad)
+		}
+		for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+			if l != "" && !json.Valid([]byte(l)) {
+				t.Fatalf("reply is not JSON: %q", l)
+			}
+		}
+	})
+}
+
+func TestNotificationsGetNoAnswer(t *testing.T) {
+	rs := session(t, &fake{},
+		`{"jsonrpc":"2.0","method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","method":"ping"}`,
+		`{"jsonrpc":"2.0","method":"tools/list"}`,
+		`{"jsonrpc":"2.0","method":"nope"}`)
+	if len(rs) != 0 {
+		t.Errorf("answered notifications: %v", rs)
+	}
+}
+
+func TestServeLeavesNoGoroutinesBehind(t *testing.T) {
+	before := runtime.NumGoroutine()
+	for i := 0; i < 20; i++ {
+		f := &fake{block: make(chan struct{})}
+		ctx, cancel := context.WithCancel(context.Background())
+		pr, pw := io.Pipe()
+		done := make(chan struct{})
+		go func() { (&Server{Call: f.Call}).Serve(ctx, pr, io.Discard); close(done) }()
+		io.WriteString(pw, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_task","arguments":{}}}`+"\n")
+		waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.calls) == 1 })
+		cancel()
+		<-done
+		pw.Close()
+	}
+	waitFor(t, func() bool { return runtime.NumGoroutine() <= before+1 })
 }

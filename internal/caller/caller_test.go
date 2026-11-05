@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -697,5 +698,41 @@ func TestMethodsDecodeStrictly(t *testing.T) {
 	}
 	if res, err := call("list_tasks", ``); err != nil || len(res.(ListResult).Tasks) != 1 {
 		t.Fatalf("no params at all must work: %+v %v", res, err)
+	}
+}
+
+func TestNewDefaultsToTheRealClock(t *testing.T) {
+	s := New(Config{})
+	defer s.Close()
+	if s.cfg.Now == nil || time.Since(s.cfg.Now()) > time.Minute {
+		t.Error("no usable clock")
+	}
+}
+
+func TestCancelBeforeTheNodeIsReady(t *testing.T) {
+	r := newRig(t)
+	v := r.send("dev-2", "x")
+	r.s.cfg.Node = func() (Node, error) { return nil, errors.New("SECRET") }
+	_, err := r.s.Cancel(context.Background(), CancelParams{TaskID: v.ID})
+	if code(err) != CodeNotReady || strings.Contains(err.Error(), "SECRET") {
+		t.Fatal(err)
+	}
+}
+
+func TestCloseLeavesNoGoroutinesBehind(t *testing.T) {
+	before := runtime.NumGoroutine()
+	for i := 0; i < 20; i++ {
+		r := newRig(t)
+		for j := 0; j < 5; j++ {
+			r.send("dev-2", "x") // each starts a watcher that waits for the outbox
+		}
+		r.s.Close()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > before+1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before+1 {
+		t.Errorf("%d goroutines left (before: %d)", n, before)
 	}
 }
