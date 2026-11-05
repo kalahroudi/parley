@@ -182,12 +182,12 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		reply(200, map[string]any{"status": "approved", "binding": bd})
 	case "/v1/login/start":
 		g.login.starts++
+		g.login.sessionHash, g.login.pollHash = str("session_hash"), str("poll_hash")
 		if g.login.startBody != nil {
 			code, v := g.login.startBody()
 			reply(code, v)
 			return
 		}
-		g.login.sessionHash, g.login.pollHash = str("session_hash"), str("poll_hash")
 		reply(201, map[string]any{"id": strings.Repeat("a", 32), "code": "ABCD-1234", "expires_at": time.Now().Add(time.Minute).UnixMilli()})
 	case "/v1/login/poll":
 		g.login.polls++

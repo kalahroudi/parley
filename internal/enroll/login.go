@@ -132,12 +132,13 @@ func Login(ctx context.Context, o LoginOptions) error {
 	for {
 		var r struct{ State string }
 		err := post(ctx, o.HTTP, gw, "/v1/login/poll", map[string]string{"tenant": o.Tenant, "id": st.ID, "poll": pollSecret}, &r)
-		switch {
-		case errors.Is(err, ErrNotFound), timedOut(err):
+		if errors.Is(err, ErrNotFound) || timedOut(err) {
 			return ErrLoginExpired
-		case err != nil:
+		}
+		if err != nil {
 			return err
-		case r.State == "done":
+		}
+		if r.State == "done" {
 			if err := o.Sessions.Save(o.Tenant, "ps_"+o.Tenant+"."+secret); err != nil {
 				return err
 			}
@@ -150,7 +151,7 @@ func Login(ctx context.Context, o LoginOptions) error {
 			}
 			return err
 		}
-		poll = min(poll+poll/2, maxLoginPoll)
+		poll = nextPoll(poll)
 	}
 }
 
@@ -177,14 +178,17 @@ func post(ctx context.Context, hc *http.Client, base, path string, in, out any) 
 	if len(raw) > maxReply {
 		return errors.New("enroll: gateway reply too large")
 	}
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
+	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
-	case resp.StatusCode/100 != 2:
+	}
+	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("enroll: gateway answered %d for %s", resp.StatusCode, path)
 	}
 	return json.Unmarshal(raw, out)
 }
+
+// nextPoll backs the poll interval off by half each time, up to maxLoginPoll.
+func nextPoll(d time.Duration) time.Duration { return min(d+d/2, maxLoginPoll) }
 
 // wait sleeps for d or until ctx ends.
 func wait(ctx context.Context, d time.Duration) error {

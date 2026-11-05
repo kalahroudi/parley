@@ -125,9 +125,23 @@ func TestLoginFailures(t *testing.T) {
 			e := newEnv(t)
 			e.gw.set(func(g *fakeGateway) { g.login.startBody = body })
 			o, _ := loginOpts(e)
-			if err := Login(bg, o); err == nil {
-				t.Errorf("%s: accepted", name)
+			if err := Login(bg, o); err == nil || errors.Is(err, ErrLoginExpired) {
+				t.Errorf("%s: %v (it must be refused at the start, not later)", name, err)
 			}
+			if e.gw.loginSnap().polls != 0 {
+				t.Errorf("%s: the sign-in went on to poll", name)
+			}
+		}
+		// The longest code allowed is accepted.
+		e := newEnv(t)
+		e.gw.set(func(g *fakeGateway) {
+			g.login.startBody = func() (int, any) {
+				return 201, map[string]any{"id": strings.Repeat("a", 32), "code": strings.Repeat("X", 16)}
+			}
+		})
+		o, _ := loginOpts(e)
+		if err := Login(bg, o); err != nil {
+			t.Errorf("a 16 character code: %v", err)
 		}
 	})
 	t.Run("poll fails", func(t *testing.T) {
@@ -296,5 +310,57 @@ func TestLoginTimeoutWhileAPollIsInFlight(t *testing.T) {
 	defer stop2()
 	if err := Login(dctx, o); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrLoginExpired) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestPollDefaultsAndBackoff(t *testing.T) {
+	// A zero Poll means the default (2 s): a login that needs one more poll and has 300 ms runs out of time ...
+	e := newEnv(t)
+	e.gw.set(func(g *fakeGateway) { g.login.doneAfter = 1 })
+	o, _ := loginOpts(e)
+	o.Poll, o.Timeout = 0, 300*time.Millisecond
+	if err := Login(bg, o); !errors.Is(err, ErrLoginExpired) {
+		t.Fatalf("default poll: %v", err)
+	}
+	// ... while a short Poll that is given is used as given.
+	e = newEnv(t)
+	e.gw.set(func(g *fakeGateway) { g.login.doneAfter = 2 })
+	o, _ = loginOpts(e)
+	o.Poll, o.Timeout = time.Millisecond, 1500*time.Millisecond
+	if err := Login(bg, o); err != nil {
+		t.Fatalf("given poll: %v", err)
+	}
+	for in, want := range map[time.Duration]time.Duration{
+		time.Millisecond: 1500 * time.Microsecond, 2 * time.Second: 3 * time.Second, 6 * time.Second: 9 * time.Second,
+		7 * time.Second: maxLoginPoll, maxLoginPoll: maxLoginPoll,
+	} {
+		if got := nextPoll(in); got != want {
+			t.Errorf("nextPoll(%v) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestLimitsOfThePostHelperAreExact(t *testing.T) {
+	if maxReply != 65536 || defaultLoginTimeout != 10*time.Minute || defaultPoll != 2*time.Second || maxLoginPoll != 10*time.Second {
+		t.Errorf("limits changed: %d %v %v %v", maxReply, defaultLoginTimeout, defaultPoll, maxLoginPoll)
+	}
+	body := `{"state":"ok"}`
+	for size, wantErr := range map[int]bool{maxReply: false, maxReply + 1: true} {
+		reply := body + strings.Repeat(" ", size-len(body))
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(reply)) }))
+		var out struct{ State string }
+		err := post(bg, newHTTP(), srv.URL, "/x", map[string]string{}, &out)
+		srv.Close()
+		if (err != nil) != wantErr || (!wantErr && out.State != "ok") {
+			t.Errorf("%d bytes: %v %+v", size, err, out)
+		}
+	}
+	for code, wantErr := range map[int]bool{403: true, 200: false, 201: false, 299: false, 300: true, 404: true, 500: true} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code); w.Write([]byte(`{}`)) }))
+		err := post(bg, newHTTP(), srv.URL, "/x", map[string]string{}, &struct{}{})
+		srv.Close()
+		if (err != nil) != wantErr {
+			t.Errorf("status %d: %v", code, err)
+		}
 	}
 }
