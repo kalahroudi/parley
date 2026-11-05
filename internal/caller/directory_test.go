@@ -319,3 +319,23 @@ func TestDirectoryBindingRenewsAnExpiredTokenOnceAndFailsClosed(t *testing.T) {
 		t.Error("closed gateway")
 	}
 }
+
+// The first attempt uses the cached token: only a 401 asks for a fresh one (a mutated `attempt > 0` would ask every time).
+func TestDirectoryBindingReusesItsTokenUntilTheGatewayRefusesIt(t *testing.T) {
+	var status atomic.Int32
+	var body, seen atomic.Value
+	status.Store(200)
+	body.Store(`{"binding":{"tenant":"t","owner":"o","device_id":"d","signing_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":1,"not_after":"2099-01-01T00:00:00Z","signature":"AAAA"}}`)
+	d := bindingGW(t, &status, &body, &seen)
+	var tokens atomic.Int32
+	inner := d.Token
+	d.Token = func(ctx context.Context) (string, time.Time, error) { tokens.Add(1); return inner(ctx) }
+	for range 3 {
+		if _, err := d.Binding(context.Background(), "d"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tokens.Load() != 1 || seen.Load() != `POST /v1/directory/binding Bearer tok1 {"device":"d"}` {
+		t.Fatalf("tokens %d, last request %v", tokens.Load(), seen.Load())
+	}
+}

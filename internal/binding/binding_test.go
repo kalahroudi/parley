@@ -287,6 +287,15 @@ func TestTrackerOwner(t *testing.T) {
 	}
 }
 
+func ownerOf(t *testing.T, root ed25519.PublicKey, enc []byte) (string, bool) {
+	t.Helper()
+	tr, err := NewTracker(root, &memStore{recs: []Record{{Tenant: "t1", DeviceID: "d1", Version: 1, Encoded: enc}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr.Owner("t1", "d1")
+}
+
 // A record the tracker did not write itself (a damaged store file) gives no owner rather than a wrong one.
 func TestTrackerOwnerDamagedRecords(t *testing.T) {
 	rpub, _ := keys(t)
@@ -310,6 +319,15 @@ func TestTrackerOwnerDamagedRecords(t *testing.T) {
 		"owner missing":    cat(field(label), field("t1")),
 		"owner cut":        cat(field(label), field("t1"), good[len(good)-1:]),
 	}
+	// The limits are exact: a length that is exactly what is left is fine (the owner may end the record), one more
+	// byte than is left is not, and a length header with fewer than four bytes is not a header.
+	exact := cat(field(label), field("t1"), field("a@x.io"))
+	if o, ok := ownerOf(t, rpub, exact); !ok || o != "a@x.io" {
+		t.Errorf("a record that ends with the owner: %q, %v", o, ok)
+	}
+	cases["owner one byte short"] = exact[:len(exact)-1]
+	cases["header of three bytes"] = cat(field(label), field("t1")[:7])
+	cases["header of four bytes, empty owner"] = cat(field(label), field("t1"), []byte{0, 0, 0, 0})
 	for name, enc := range cases {
 		tr, err := NewTracker(rpub, &memStore{recs: []Record{{Tenant: "t1", DeviceID: "d1", Version: 1, Encoded: enc}}})
 		if err != nil {

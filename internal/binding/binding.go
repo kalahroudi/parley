@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"io"
 	"sync"
 	"time"
 )
@@ -150,18 +151,15 @@ func (t *Tracker) Owner(tenant, device string) (string, bool) {
 		return "", false
 	}
 	// Encode: label, tenant, owner, ... each field a 4-byte length and its bytes.
-	rest := r.Encoded
+	rd := bytes.NewReader(r.Encoded)
 	var fields [3][]byte
 	for i := range fields {
-		if len(rest) < 4 {
+		var n uint32
+		if binary.Read(rd, binary.BigEndian, &n) != nil || uint64(n) > uint64(rd.Len()) {
 			return "", false
 		}
-		n := binary.BigEndian.Uint32(rest)
-		rest = rest[4:]
-		if uint64(n) > uint64(len(rest)) {
-			return "", false
-		}
-		fields[i], rest = rest[:n], rest[n:]
+		fields[i] = make([]byte, n)
+		_, _ = io.ReadFull(rd, fields[i]) // n bytes are there: checked just above
 	}
 	if string(fields[0]) != label || string(fields[1]) != tenant || len(fields[2]) == 0 {
 		return "", false
