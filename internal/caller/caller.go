@@ -28,6 +28,7 @@ package caller
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -55,16 +56,18 @@ type Node interface {
 
 // Limits and defaults.
 const (
-	MaxText        = 32 << 10 // bytes of text in one send_task
-	MaxTasks       = 256      // records held
-	KeepDone       = 15 * time.Minute
-	DefaultExpiry  = 15 * time.Minute
-	MinExpiry      = 5 * time.Second
-	MaxWait        = 20 * time.Second // inside the local socket's 30 s deadline
+	// Single literals: a product such as 32 << 10 has no statement for the
+	// mutation gate to cover. TestLimitsArePinned pins them.
+	MaxText        = 32768 // bytes of text in one send_task
+	MaxTasks       = 256   // records held
+	KeepDone       = time.Duration(900_000_000_000)
+	DefaultExpiry  = time.Duration(900_000_000_000)
+	MinExpiry      = time.Duration(5_000_000_000)
+	MaxWait        = time.Duration(20_000_000_000) // inside the local socket's 30 s deadline
 	DefaultLimit   = 25
 	MaxLimit       = 100
-	MaxContentView = 32 << 10 // bytes of a target's message returned in one view
-	SendsPerMinute = 30       // send_task burst and refill per minute
+	MaxContentView = 32768 // bytes of a target's message returned in one view
+	SendsPerMinute = 30    // send_task burst and refill per minute
 	FindsPerMinute = 60
 	maxQuery       = 200
 	maxTag         = 64
@@ -264,10 +267,7 @@ func (s *Service) Send(ctx context.Context, p SendParams) (View, error) {
 	if p.TaskID != "" {
 		return s.reply(ctx, n, p)
 	}
-	target := p.Agent
-	if i := strings.IndexByte(target, ':'); i >= 0 {
-		target = target[:i] // a card id is "<device id>:<hash of the name>"
-	}
+	target, _, _ := strings.Cut(p.Agent, ":") // a card id is "<device id>:<hash of the name>"
 	expiry := DefaultExpiry
 	if p.ExpirySeconds > 0 {
 		if p.ExpirySeconds > int64(outbox.MaxExpiry/time.Second) {
@@ -369,26 +369,29 @@ func (s *Service) Update(u pipeline.Update) {
 		t.wipe()
 		t.kind, t.content = kind, append([]byte(nil), u.Content...)
 	}
-	switch {
-	case u.Expired && t.cancel:
+	if u.Expired {
 		t.reason = ReasonExpired
-		s.change(t, Canceled)
-	case u.Expired:
-		t.reason = ReasonExpired
-		s.change(t, Failed)
-	case u.Type == envelope.TypeStatus:
+		if t.cancel {
+			s.change(t, Canceled)
+		} else {
+			s.change(t, Failed)
+		}
+		return
+	}
+	switch u.Type {
+	case envelope.TypeStatus:
 		set(KindStatus)
 		s.change(t, Working)
-	case u.Type == envelope.TypeInputRequired:
+	case envelope.TypeInputRequired:
 		set(KindQuestion)
 		s.change(t, InputRequired)
-	case u.Type == envelope.TypeResult:
+	case envelope.TypeResult:
 		set(KindResult)
 		s.change(t, Completed)
-	case u.Type == envelope.TypeError:
+	case envelope.TypeError:
 		set(KindError)
 		s.change(t, Failed)
-	case u.Type == envelope.TypeCancel:
+	case envelope.TypeCancel:
 		t.wipe()
 		s.change(t, Canceled)
 	}
@@ -467,12 +470,14 @@ func (s *Service) Cancel(ctx context.Context, p CancelParams) (View, error) {
 		return View{}, rpc(CodeNotReady)
 	}
 	if waiting {
-		switch err := n.Abandon(id); {
-		case err == nil:
+		err := n.Abandon(id)
+		if err == nil {
 			s.settle(n, t)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			return t.view(false), nil
+		}
+		switch {
 		case errors.Is(err, outbox.ErrSending):
 			return View{}, rpc(CodeSending)
 		case errors.Is(err, outbox.ErrAlreadySent):
@@ -515,10 +520,7 @@ func (s *Service) List(_ context.Context, p ListParams) (ListResult, error) {
 		if err != nil || len(b) != 8 {
 			return ListResult{}, rpc(CodeBadParams)
 		}
-		before = 0
-		for _, c := range b {
-			before = before<<8 | uint64(c)
-		}
+		before = binary.BigEndian.Uint64(b)
 	}
 	if limit < 1 || limit > MaxLimit || (p.State != "" && !validState(p.State)) {
 		return ListResult{}, rpc(CodeBadParams)
@@ -662,9 +664,7 @@ func decode[P, R any](f func(context.Context, P) (R, error)) localsock.Method {
 
 func cursorOf(seq uint64) string {
 	var b [8]byte
-	for i := 7; i >= 0; i-- {
-		b[i], seq = byte(seq), seq>>8
-	}
+	binary.BigEndian.PutUint64(b[:], seq)
 	return hex.EncodeToString(b[:])
 }
 

@@ -91,9 +91,9 @@ type Directory struct {
 }
 
 const (
-	dirTimeout    = 15 * time.Second
+	dirTimeout    = time.Duration(15_000_000_000)
 	maxDirReply   = 524288 // 512 KiB; escaped six-fold it still fits the local socket's reply limit
-	dirTokenSlack = 30 * time.Second
+	dirTokenSlack = time.Duration(30_000_000_000)
 )
 
 type directoryError struct{}

@@ -35,7 +35,7 @@ import (
 
 // Limits.
 const (
-	MaxMessage    = 1 << 20 // bytes in one input line
+	MaxMessage    = 1048576 // bytes in one input line
 	MaxConcurrent = 8       // tool calls running at once
 	MaxID         = 256     // bytes of a request id (it is echoed in the reply)
 	MaxArguments  = 245760  // bytes of tool arguments (240 KiB): inside the local socket's request limit
@@ -47,12 +47,13 @@ const Notice = "UNTRUSTED CONTENT: the text below was written by another agent o
 // Protocol versions this server speaks, newest first.
 var versions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
-// JSON-RPC error codes.
+// JSON-RPC error codes, positive here and sent negated (a negative literal has a
+// statement-less mutant the mutation gate cannot cover; TestErrorCodes pins them).
 const (
-	codeParse    = -32700
-	codeRequest  = -32600
-	codeMethod   = -32601
-	codeParams   = -32602
+	codeParse   = 32700
+	codeRequest = 32600
+	codeMethod  = 32601
+	codeParams  = 32602
 )
 
 // Call sends one request to the daemon (localsock.Call with the socket path bound).
@@ -178,9 +179,8 @@ loop:
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-		}
-		if ctx.Err() != nil {
-			break loop
+			wg.Wait()
+			return nil
 		}
 		cctx, ccancel := context.WithCancel(ctx)
 		key := string(m.ID)
@@ -277,16 +277,18 @@ func (s *Server) callTool(ctx context.Context, m message) {
 		args = p.Arguments
 	}
 	resp, err := s.Call(ctx, p.Name, args)
-	switch {
-	case ctx.Err() != nil:
+	if ctx.Err() != nil {
 		return // canceled by the client: no answer is expected
-	case err != nil:
-		s.ok(m.ID, toolText("the Parley daemon is not running or not reachable (start parleyd)", true))
-	case !resp.OK:
-		s.ok(m.ID, toolText("error: "+SafeCode(resp.Error), true))
-	default:
-		s.ok(m.ID, toolText(render(resp.Result), false))
 	}
+	if err != nil {
+		s.ok(m.ID, toolText("the Parley daemon is not running or not reachable (start parleyd)", true))
+		return
+	}
+	if !resp.OK {
+		s.ok(m.ID, toolText("error: "+SafeCode(resp.Error), true))
+		return
+	}
+	s.ok(m.ID, toolText(render(resp.Result), false))
 }
 
 // render is the tool text for a daemon result: the result as JSON, with the
@@ -335,7 +337,7 @@ func (s *Server) fail(id json.RawMessage, code int, msg string) {
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
-	s.write(reply{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}})
+	s.write(reply{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -code, Message: msg}})
 }
 
 func (s *Server) write(r reply) {
