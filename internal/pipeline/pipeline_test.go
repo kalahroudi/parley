@@ -715,3 +715,48 @@ func TestPanickingUpdateCallbackIsContained(t *testing.T) {
 	w.advance(time.Hour)
 	alice.node.Sweep() // must not panic
 }
+
+// Follow-up attacks on the target: a device other than the caller that holds
+// the issued follow-up key, and the caller sealing to a key of the target's that
+// was not the one issued for this follow-up. Both are refused before any key is
+// spent, and the genuine follow-up still works.
+func TestForeignAndMisdirectedFollowUpsBurnNothing(t *testing.T) {
+	w := newWorld(t, "alice", "bob", "mallory")
+	alice, bob, mallory := w.devs["alice"], w.devs["bob"], w.devs["mallory"]
+	id := w.run("alice", "bob", "x")
+	if err := bob.node.Respond(bg, id, envelope.TypeInputRequired, []byte("q?")); err != nil {
+		t.Fatal(err)
+	}
+	w.settle()
+	bc := bob.node.chains[id]
+	seal := func(sender *dev, key *prekey.Signed, held int) {
+		h := envelope.Header{Tenant: tenant, SenderDevice: sender.id, SenderKeyID: KeyID(sender.sign.Public().(ed25519Pub)), BindingVersion: 1, TargetDevice: "bob",
+			PrekeyID: receive.PrekeyID(key.ID), TaskID: id, ContextID: bc.context, Seq: 1, Type: envelope.TypeReply, IssuedAt: t0, Expiry: t0.Add(15 * time.Minute), PrevHash: bc.recvLast}
+		m, err := envelope.SealPadded(sender.sign, key.PublicKey, h, frames.PackInner(nil, []byte("forged")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.deliver("bob", event(m.Marshal()))
+		w.settle()
+		if err := bob.lastErr(); !errors.Is(err, receive.ErrRejected) {
+			t.Fatalf("%v", err)
+		}
+		if bob.pool.Outstanding() != held || bob.inboxLen() != 1 {
+			t.Fatalf("keys=%d inbox=%d: a refused follow-up spent a key or ran", bob.pool.Outstanding(), bob.inboxLen())
+		}
+	}
+	seal(mallory, bc.follow, 1) // an enrolled device with the leaked key
+	other, err := bob.pool.Issue(prekey.Request{Caller: "alice", Nonce: []byte("another"), TaskExpiry: t0.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal(alice, other, 2) // both keys are still held
+	_ = bob.pool.Consume(other.ID)
+	if err := alice.node.Follow(bg, id, envelope.TypeReply, []byte("answer")); err != nil {
+		t.Fatal(err)
+	}
+	w.settle()
+	if bob.inboxLen() != 2 || string(bob.inbox[1].Content) != "answer" {
+		t.Fatal("the genuine follow-up did not arrive")
+	}
+}
