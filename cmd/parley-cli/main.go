@@ -20,7 +20,7 @@ import (
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | find [text] | send | get | cancel | list"
+const usage = "usage: parley-cli --version | admin init [-backup <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | find [text] | send | get | cancel | list | test -to <device id> [-timeout 30s]"
 
 //cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {

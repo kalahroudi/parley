@@ -139,6 +139,36 @@ func (t *Tracker) Version(tenant, device string) (uint64, bool) {
 	return r.Version, ok
 }
 
+// Owner is the owner named by the highest binding this tracker has recorded for
+// the device, read back from the record (which Accept wrote only after Verify
+// passed). It is false when no binding is recorded or the record cannot be read.
+func (t *Tracker) Owner(tenant, device string) (string, bool) {
+	t.mu.Lock()
+	r, ok := t.seen[deviceKey{tenant, device}]
+	t.mu.Unlock()
+	if !ok {
+		return "", false
+	}
+	// Encode: label, tenant, owner, ... each field a 4-byte length and its bytes.
+	rest := r.Encoded
+	var fields [3][]byte
+	for i := range fields {
+		if len(rest) < 4 {
+			return "", false
+		}
+		n := binary.BigEndian.Uint32(rest)
+		rest = rest[4:]
+		if uint64(n) > uint64(len(rest)) {
+			return "", false
+		}
+		fields[i], rest = rest[:n], rest[n:]
+	}
+	if string(fields[0]) != label || string(fields[1]) != tenant || len(fields[2]) == 0 {
+		return "", false
+	}
+	return string(fields[2]), true
+}
+
 // Accept verifies s, durably records its version, and only then returns nil.
 // The identical binding can be presented repeatedly; a different binding at the
 // same version is rejected. If the store cannot be written, s is rejected.

@@ -182,14 +182,6 @@ func TestPending_DaemonEnrollmentAndBindings(t *testing.T) {
 	pending(t, "T411", "the daemon core opens the binding tracker but has no enrollment flow; assert a fresh daemon enrolls, receives its root-signed binding and records it before serving")
 }
 
-// The peer-binding lookup the pipeline needs (daemon.Deps.Directory) has no gateway endpoint yet, so a real daemon
-// cannot find a peer's binding on its own and rejects everything until one is wired. T412 proves the pipeline
-// with an injected directory; the first task that runs two real daemons through a real gateway must add the
-// endpoint (device-authenticated, same tenant only, root-signed bindings of approved devices) and this test.
-func TestPending_DaemonFindsPeerBindingsThroughTheGateway(t *testing.T) {
-	pending(t, "T414", "daemon.Deps.Directory has no production implementation: assert a daemon with no injected directory fetches a peer's root-signed binding from the gateway (same tenant only, never another tenant's, never an unapproved or revoked device's), that the pipeline then accepts that peer's task, and that a gateway answering with a binding for another device or an older version is refused")
-}
-
 func TestPending_WindowsDaemonPeerRestriction(t *testing.T) {
 	pending(t, "T505", "on Windows the control socket is AF_UNIX in a protected-DACL directory with no peer-credential check (see internal/localsock). Assert the Windows daemon uses a named pipe with a current-user-only ACL, or an equivalent peer check, and that a process of another local user cannot connect, while the same user can; also that the DACL check refuses a pipe or directory open to Everyone, Users or Authenticated Users")
 }

@@ -29,7 +29,7 @@ import (
 // callerCommand says whether name is one of the commands that talk to the daemon.
 func callerCommand(name string) bool {
 	switch name {
-	case "mcp", "find", "send", "get", "cancel", "list":
+	case "mcp", "find", "send", "get", "cancel", "list", "test":
 		return true
 	}
 	return false
@@ -40,6 +40,9 @@ type session struct {
 	call      mcp.Call
 	in        io.Reader
 	out, errw io.Writer
+	rand      io.Reader           // nil: crypto/rand
+	now       func() time.Time    // nil: time.Now
+	sleep     func(time.Duration) // nil: wait for real, until the context ends
 }
 
 // runCaller finds the daemon's socket the way parleyd does ($PARLEY_HOME, else
@@ -95,6 +98,8 @@ func (s *session) run(ctx context.Context, args []string) int {
 			return 2
 		}
 		return s.do(ctx, "send_task", caller.SendParams{Agent: *to, TaskID: *task, Text: text, ExpirySeconds: secs})
+	case "test":
+		return s.selfTest(ctx, rest)
 	case "get":
 		wait := fs.Duration("wait", 0, "wait up to this long (at most 20s) for a final state or a question")
 		id, ok := s.oneID(fs, rest)

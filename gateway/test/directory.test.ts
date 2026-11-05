@@ -611,3 +611,62 @@ describe("retention setting", () => {
     expect((await json(await post("/v1/admin/retention", {}, b.admin))).mode).toBe("strict");
   });
 });
+
+describe("peer bindings", () => {
+  const binding = (id: string, sk = key()) => ({ device_id: id, signing_key: sk, version: 1 });
+  const fetchBinding = (device: unknown, auth: string | Promise<string>) => post("/v1/directory/binding", { device }, auth);
+
+  it("serves the binding of an enrolled device of the caller's tenant exactly as the admin posted it", async () => {
+    const x = tenant();
+    const alice = await x.enroll("alice@example.test");
+    const bob = await x.enroll("bob@example.test", false);
+    const stored = await runInDurableObject(x.stub, async (_i, s) => (await s.storage.get<any>(`enr:${bob.id}`)).signing_key as string);
+    const sb = binding(bob.id, stored);
+    expect((await post("/v1/admin/bindings", { id: bob.id, binding: sb }, x.admin)).status).toBe(200);
+    const r = await fetchBinding(bob.id, alice.auth);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(await json(r)).toEqual({ binding: sb });
+    expect(await json(await fetchBinding(alice.id, bob.auth))).toEqual({ binding: expect.objectContaining({ device_id: alice.id }) });
+  });
+
+  it("says the same thing for a device that is unknown, unapproved, unbound, revoked or in another tenant", async () => {
+    const x = tenant();
+    const y = tenant();
+    const alice = await x.enroll("alice@example.test");
+    const unbound = await x.enroll("u@example.test", false);
+    const revoked = await x.enroll("r@example.test");
+    const foreign = await y.enroll("mallory@example.test");
+    const pendingReq = await json(await post("/v1/enroll/request", { name: "p", signing_key: key() }, await session(x.t, "user", "p@example.test")));
+    const list = { tenant: x.t, version: 1, issued_at: "2026-01-01T00:00:00Z", revoked: [revoked.id], signature: "AA" };
+    expect((await post("/v1/admin/revocations", { list }, x.admin)).status).toBe(200);
+    for (const id of ["f".repeat(32), unbound.id, revoked.id, foreign.id, pendingReq.id]) {
+      const r = await fetchBinding(id, alice.auth);
+      expect([r.status, await json(r)], id).toEqual([404, { error: "not_found" }]);
+    }
+    expect((await fetchBinding(alice.id, foreign.auth)).status).toBe(404); // the other tenant's device sees nothing here
+    expect((await fetchBinding(alice.id, revoked.auth)).status).toBe(403); // a revoked caller is not a device at all
+  });
+
+  it("needs a device that is enrolled and a well-formed device id", async () => {
+    const x = tenant();
+    const alice = await x.enroll("alice@example.test");
+    const pendingCaller = await json(await post("/v1/enroll/request", { name: "p", signing_key: key() }, await session(x.t, "user", "p@example.test")));
+    expect((await fetchBinding(alice.id, "")).status).toBe(401);
+    expect((await fetchBinding(alice.id, x.admin)).status).toBe(401); // an admin is not a device
+    expect((await fetchBinding(alice.id, `Bearer dev:${x.t}:${pendingCaller.id}`)).status).toBe(403); // not approved: not a device yet
+    for (const bad of [undefined, 7, "", "x/y", "a".repeat(65), ["a"]]) expect((await fetchBinding(bad, alice.auth)).status, String(bad)).toBe(400);
+  });
+
+  it("is limited like a directory search, with a Retry-After", async () => {
+    const en = { ...env, RATE_FIND_PER_MIN: "2" } as typeof env;
+    const x = tenant();
+    const alice = await x.enroll("alice@example.test");
+    const ask = () => handleDirectory(new Request("https://gw/v1/directory/binding", { method: "POST", headers: { Authorization: alice.auth }, body: JSON.stringify({ device: alice.id }) }), en, testDevice);
+    expect((await ask()).status).toBe(200);
+    expect((await ask()).status).toBe(200);
+    const r = await ask();
+    expect(r.status).toBe(429);
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
+  });
+});

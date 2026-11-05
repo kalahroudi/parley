@@ -123,6 +123,13 @@ export function signBinding(root, { tenant, owner, id, publicKey, version = 1, n
   return { tenant, owner, device_id: id, signing_key: publicKey.toString("base64"), version, not_after: new Date(notAfter * 1000).toISOString().replace(".000Z", "Z"), signature: signature.toString("base64") };
 }
 
+// The revocation list the root holder signs (internal/revocation): `issuedAt` is unix seconds. Post it with
+// POST /v1/admin/revocations ({ list }); daemons fetch it from /v1/revocations and refuse to send without a fresh one.
+export function signRevocations(root, { tenant, version = 1, issuedAt = Math.floor(Date.now() / 1000), revoked = [] }) {
+  const signature = cryptoSign(null, Buffer.concat([encode(["parley/revocation/v1", tenant, BigInt(version), BigInt(issuedAt)]), (() => { const n = Buffer.alloc(4); n.writeUInt32BE(revoked.length); return n; })(), ...revoked.map((id) => encode([id]))]), root.privateKey);
+  return { tenant, version, issued_at: new Date(issuedAt * 1000).toISOString().replace(".000Z", "Z"), revoked, signature: signature.toString("base64") };
+}
+
 // A device that holds its own key, brought to "approved with a binding the root signed" the way an admin's daemon
 // would: the user requests enrollment with the device's public key, the admin approves and posts a binding (signed
 // by `root`, see registerRoot) naming that key. `userToken` and `adminToken` are session bearer tokens (see signIn).

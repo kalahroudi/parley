@@ -22,7 +22,8 @@
 //   - T412 (message pipeline, internal/pipeline): every tunnel event goes to
 //     Daemon.Node().HandleEvent, in order (Deps.OnEvent is a tap that sees it
 //     first). The bot is Deps.OnInbound behind the owner allowlist Deps.Allow;
-//     Deps.Directory finds peers' bindings; Node().Submit sends. Sending
+//     Deps.Directory finds peers' bindings (default: the gateway, T414); with
+//     no bot supplied the built-in test bot runs (testbot.go); Node().Submit sends. Sending
 //     goes through Daemon.Trust, which refuses when the binding or revocation
 //     state is missing, stale or rolled back. Daemon.Handle registers local
 //     socket methods before Run; a new background job is one more Component in
@@ -83,6 +84,8 @@ type Config struct {
 	KeyAccount string `json:"key_account,omitempty"`
 	Refresh    string `json:"refresh_interval,omitempty"` // Go duration, default 1h
 	LogLevel   string `json:"log_level,omitempty"`        // debug, info, warn, error
+	// DisableTestBot turns off the built-in bot that answers `parley-cli test` (testbot.go).
+	DisableTestBot bool `json:"disable_test_bot,omitempty"`
 
 	refresh time.Duration
 }

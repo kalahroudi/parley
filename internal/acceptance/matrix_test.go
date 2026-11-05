@@ -201,7 +201,7 @@ func TestAttackMatrixCheckerCatchesGaps(t *testing.T) {
 	if tests["TestReplay"].subtests["no such subtest"] || !tests["TestReplay"].subtests["a task delivered twice runs once"] {
 		t.Fatal("subtests not read from source")
 	}
-	if tests["TestPending_DaemonFindsPeerBindingsThroughTheGateway"].pending != "T414" {
+	if tests["TestPending_WindowsDaemonPeerRestriction"].pending != "T505" {
 		t.Fatal("pending task not read from source")
 	}
 }

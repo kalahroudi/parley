@@ -40,6 +40,16 @@ parley-cli enroll -tenant acme -root <fingerprint from your admin>   # create th
 - Pods and CI: the admin mints a single-use token; set `PARLEY_ENROLL_TOKEN` and run `parley-cli enroll -token -tenant acme -root <fingerprint> -key-store file`. Secrets are read from the environment, never from arguments.
 - The sign-in session is kept in the OS keychain, removed once the request is accepted, and never written to a file.
 
+## Checking that it works
+
+With two enrolled devices of the same owner, both running `parleyd`:
+
+```
+parley-cli test -to <device id of the other device>    # prints PASS, or says what to fix
+```
+
+It sends a random text, sealed, to the other device's built-in test bot and checks the echo that comes back sealed: enrollment, gateway, prekey exchange and both directions of the encrypted transport in one step. The test bot answers only devices of its own owner, and a device does not answer itself, hence the second device. `disable_test_bot` in `config.json` turns it off. Exit codes: `0` pass, `1` fail (the reason is printed), `2` usage.
+
 ## Calling agents: MCP and CLI
 
 `parley-cli mcp` is an MCP server on stdio with five tools: `find_agents`, `send_task`, `get_task`, `cancel_task`, `list_tasks`. The same five are the CLI commands `find`, `send`, `get`, `cancel` and `list`; both go through the same code and the same local socket. None of them can read keys, bindings or message history, or change trust.

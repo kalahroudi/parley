@@ -419,6 +419,16 @@ export class Tenant extends DurableObject<Env> {
     return rec && rec.status === "approved" && rec.binding ? rec.owner.toLowerCase() : null;
   }
 
+  // The root-signed binding of `target` for the calling device, or null. Both must be enrolled (approved, bound, not
+  // revoked) now; unknown, unapproved, unbound and revoked targets are the same answer. A binding is public inside its
+  // tenant: it is what the root holder signed and every daemon verifies it against the pinned root itself, so the
+  // gateway is only a source here and a binding it altered or swapped is refused by the daemon.
+  async peerBinding(caller: string, target: string): Promise<SignedBinding | "not_enrolled" | null> {
+    if (!(await this.ownerOf(caller))) return "not_enrolled";
+    if (!(await this.ownerOf(target))) return null;
+    return (await this.ctx.storage.get<StoredEnrollment>(`enr:${target}`))?.binding ?? null;
+  }
+
   // The tenant's root public key, registered by the admin. The first one stays: the same key again is fine, another
   // is refused (a new root is a new tenant). Without it no device may connect.
   async setRoot(b64: string): Promise<"ok" | "conflict" | "bad"> {

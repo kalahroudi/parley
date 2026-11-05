@@ -254,3 +254,69 @@ func TestTrackerVersion(t *testing.T) {
 		}
 	}
 }
+
+type memStore struct{ recs []Record }
+
+func (m *memStore) Load() ([]Record, error) { return m.recs, nil }
+func (m *memStore) Save(r []Record) error   { m.recs = r; return nil }
+
+func TestTrackerOwner(t *testing.T) {
+	rpub, rpriv := keys(t)
+	tr, err := NewTracker(rpub, &memStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tr.Owner("t1", "d1"); ok {
+		t.Fatal("an owner for a device nobody recorded")
+	}
+	s, err := Sign(rpriv, sample(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Accept(s, now); err != nil {
+		t.Fatal(err)
+	}
+	if o, ok := tr.Owner("t1", "d1"); !ok || o != "a@x.io" {
+		t.Fatalf("owner = %q, %v", o, ok)
+	}
+	if _, ok := tr.Owner("t2", "d1"); ok {
+		t.Fatal("an owner across tenants")
+	}
+	if _, ok := tr.Owner("t1", "d2"); ok {
+		t.Fatal("an owner for another device")
+	}
+}
+
+// A record the tracker did not write itself (a damaged store file) gives no owner rather than a wrong one.
+func TestTrackerOwnerDamagedRecords(t *testing.T) {
+	rpub, _ := keys(t)
+	good := Binding{Tenant: "t1", Owner: "a@x.io", DeviceID: "d1", SigningKey: make([]byte, 32), Version: 1, NotAfter: now}.Encode()
+	field := func(p string) []byte { return append([]byte{0, 0, 0, byte(len(p))}, p...) }
+	cat := func(parts ...[]byte) []byte {
+		var out []byte
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	cases := map[string][]byte{
+		"empty":            nil,
+		"short length":     good[:3],
+		"label cut":        good[:10],
+		"length too large": append([]byte{0x7f, 0xff, 0xff, 0xff}, "x"...),
+		"wrong label":      cat(field("other"), field("t1"), field("a@x.io")),
+		"wrong tenant":     cat(field(label), field("t9"), field("a@x.io")),
+		"no owner":         cat(field(label), field("t1"), field("")),
+		"owner missing":    cat(field(label), field("t1")),
+		"owner cut":        cat(field(label), field("t1"), good[len(good)-1:]),
+	}
+	for name, enc := range cases {
+		tr, err := NewTracker(rpub, &memStore{recs: []Record{{Tenant: "t1", DeviceID: "d1", Version: 1, Encoded: enc}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o, ok := tr.Owner("t1", "d1"); ok {
+			t.Errorf("%s: owner %q from a damaged record", name, o)
+		}
+	}
+}

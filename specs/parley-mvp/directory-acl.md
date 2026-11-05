@@ -32,7 +32,13 @@ Plaintext metadata only (name 64, description 500, 10 tags of 32, 5 examples of 
 
 ## Admin and audit
 
-Group routes and `/v1/admin/audit` accept only the admin identity. Admins authenticate with a gateway admin session (cookie with CSRF, or a session bearer), the same as enrollment; devices resolve through the device-credential hook until connect tokens land. Group puts and deletes, card publishes and removes, and revocation lists are recorded as metadata events (action, actor, subject, counts; never member addresses or card text), each committed in the same write as the change.
+Group routes and `/v1/admin/audit` accept only the admin identity. Admins authenticate with a gateway admin session (cookie with CSRF, or a session bearer), the same as enrollment; devices authenticate with an `api` connect token (T415; `gateway/src/index.ts` hands `authenticate(req, env, "api")` to the handler as the device resolver, and without a resolver every device route is refused). Group puts and deletes, card publishes and removes, and revocation lists are recorded as metadata events (action, actor, subject, counts; never member addresses or card text), each committed in the same write as the change.
+
+## Peer bindings (T414)
+
+`POST /v1/directory/binding` with `{"device": "<32 hex>"}` returns `{"binding": <the root-signed binding as the admin posted it>}` for an enrolled device (approved, bound, not revoked) of the caller's own tenant, and `404 {"error":"not_found"}` for anything else (unknown, unapproved, unbound, revoked, another tenant's: one answer). A caller that is not itself enrolled gets 403 `not_enrolled`. It is counted against the caller's `find` budget. A binding is public inside its tenant, so any enrolled device may read any other's; no card, group or visibility rule applies, because a binding grants nothing.
+
+The gateway is only a source. The daemon (`caller.Directory.Binding`) decodes the answer strictly and checks that it names the device it asked for; the pipeline then verifies the root's signature, the tenant, expiry and the rollback store before it sends to or accepts anything from that device, so a gateway that substitutes, forges, ages or rolls back a binding stops the task (`internal/acceptance` `TestDaemonRefusesWhatAHostileDirectoryAnswers`). A 404 ends the task as `recipient_not_found`; a gateway that fails or answers badly is retried with backoff and nothing is sent.
 
 ## Revocation
 
