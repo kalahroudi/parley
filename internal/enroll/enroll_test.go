@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1069,5 +1070,32 @@ func TestCrashPointsAreAllReachedOnAFullRun(t *testing.T) {
 	}
 	if strings.Join(seen, ",") != strings.Join(CrashPoints, ",") {
 		t.Errorf("reached %v, declared %v", seen, CrashPoints)
+	}
+}
+
+// The wait's timeout can land inside a status request as well as between polls (the stress run found that case
+// in the sign-in code); a gateway that never answers a status request makes it the in-flight case every time.
+func TestTimeoutWhileAStatusRequestIsInFlight(t *testing.T) {
+	e := newEnv(t)
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/enroll/status" {
+			io.Copy(io.Discard, r.Body) // the server notices a closed connection only once the body is read
+			<-r.Context().Done()
+			return
+		}
+		e.gw.serve(w, r)
+	}))
+	defer hung.Close()
+	e.opts.Gateway = hung.URL
+	e.opts.Timeout = 50 * time.Millisecond
+	if _, err := Enroll(bg, e.opts); !errors.Is(err, ErrTimeout) || e.phase() != PhaseRequested {
+		t.Fatalf("got %v phase %s", err, e.phase())
+	}
+	// The caller's own deadline is reported as itself.
+	e.opts.Timeout = time.Minute
+	ctx, stop := context.WithTimeout(bg, 50*time.Millisecond)
+	defer stop()
+	if _, err := Enroll(ctx, e.resume()); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
+		t.Fatalf("got %v", err)
 	}
 }
