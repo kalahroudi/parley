@@ -601,3 +601,24 @@ func TestFollowUpLosesTheRaceToANewerReply(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A request that gets no answer ends in exactly one of two ways, and each is tested without waiting on a race:
+// the caller's context ends first (it is already over), or the timer does (the answer never comes and no context
+// ends). Both are "wait and ask again" for the outbox, except that a context that ended is its own error.
+func TestPrekeyRequestEndsWithItsContextOrItsTimer(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	w.onRelay = func(from, to, body string) (bool, string) { return false, "" } // the gateway swallows everything
+	a := w.devs["alice"].node
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	if _, err := a.requestPrekey(ctx, w.devs["bob"].bind, w.clock().Add(time.Minute)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("context: %v", err)
+	}
+	a.cfg.RequestTimeout = time.Millisecond
+	if _, err := a.requestPrekey(bg, w.devs["bob"].bind, w.clock().Add(time.Minute)); !errors.Is(err, ErrTimeout) || !errors.Is(err, outbox.ErrOffline) {
+		t.Fatalf("timer: %v", err)
+	}
+	if len(a.waiting) != 0 {
+		t.Fatal("a request that ended is still waiting")
+	}
+}
