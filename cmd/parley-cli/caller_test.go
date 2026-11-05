@@ -147,6 +147,8 @@ func TestBadUsage(t *testing.T) {
 		{"get"}, {"get", "a", "b"}, {"cancel"}, // task id missing or doubled
 		{"list", "extra"}, {"find", "-bogus"}, {"send", "-bogus"}, {"get", "-bogus", "x"}, {"list", "-bogus"},
 		{"mcp", "extra"},
+		{"send", "-to", "dev-2", "-expiry", "500ms", "x"}, {"send", "-to", "dev-2", "-expiry", "-5s", "x"},
+		{"get", "-wait", "1500ms", "abc"}, {"get", "-wait", "-1s", "abc"},
 	} {
 		if code, out, _ := run(t, home, "", args...); code != 2 || out != "" {
 			t.Errorf("%v: %d %q", args, code, out)

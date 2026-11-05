@@ -37,6 +37,8 @@ import (
 const (
 	MaxMessage    = 1 << 20 // bytes in one input line
 	MaxConcurrent = 8       // tool calls running at once
+	MaxID         = 256     // bytes of a request id (it is echoed in the reply)
+	MaxArguments  = 245760  // bytes of tool arguments (240 KiB): inside the local socket's request limit
 )
 
 // Notice leads every tool result that carries content from another agent.
@@ -51,7 +53,6 @@ const (
 	codeRequest  = -32600
 	codeMethod   = -32601
 	codeParams   = -32602
-	codeInternal = -32603
 )
 
 // Call sends one request to the daemon (localsock.Call with the socket path bound).
@@ -103,16 +104,48 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		running = map[string]context.CancelFunc{} // by request id, for notifications/cancelled
 		sem     = make(chan struct{}, MaxConcurrent)
 	)
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 0, 4096), MaxMessage)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
+	// Lines are read in a goroutine so that a canceled ctx (Ctrl-C) ends the
+	// session even while the client is silent. The goroutine ends with the
+	// input; the caller closes it or exits.
+	lines := make(chan []byte)
+	var scanErr error
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(in)
+		sc.Buffer(make([]byte, 0, 4096), MaxMessage)
+		for sc.Scan() {
+			select {
+			case lines <- bytes.Clone(sc.Bytes()):
+			case <-ctx.Done():
+				return
+			}
+		}
+		scanErr = sc.Err()
+	}()
+loop:
+	for {
+		var raw []byte
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				break loop
+			}
+			raw = l
+		case <-ctx.Done():
+			wg.Wait()
+			return nil
+		}
+		line := bytes.TrimSpace(raw)
 		if len(line) == 0 {
 			continue
 		}
 		var m message
 		if err := json.Unmarshal(line, &m); err != nil {
 			s.fail(nil, codeParse, "parse error")
+			continue
+		}
+		if !validID(m.ID) {
+			s.fail(nil, codeRequest, "invalid request id")
 			continue
 		}
 		if m.JSONRPC != "2.0" || (m.Method == "" && len(m.ID) == 0) {
@@ -147,7 +180,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		case <-ctx.Done():
 		}
 		if ctx.Err() != nil {
-			break
+			break loop
 		}
 		cctx, ccancel := context.WithCancel(ctx)
 		key := string(m.ID)
@@ -166,11 +199,24 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		}()
 	}
 	wg.Wait() // end of input does not cancel calls in flight: `echo request | parley-cli mcp` gets its answer
-	if errors.Is(sc.Err(), bufio.ErrTooLong) {
+	if errors.Is(scanErr, bufio.ErrTooLong) {
 		s.fail(nil, codeRequest, "message too long")
 		return ErrTooLong
 	}
-	return sc.Err()
+	return scanErr
+}
+
+// validID accepts what JSON-RPC allows as an id (a string or a number) or none,
+// and bounds its size because it is echoed in the reply.
+func validID(id json.RawMessage) bool {
+	if len(id) == 0 {
+		return true
+	}
+	if len(id) > MaxID {
+		return false
+	}
+	c := id[0]
+	return c == '"' || c == '-' || (c >= '0' && c <= '9')
 }
 
 func (s *Server) dispatch(_ context.Context, m message) {
@@ -219,6 +265,10 @@ func (s *Server) callTool(ctx context.Context, m message) {
 	}
 	var args any
 	if len(p.Arguments) > 0 && !bytes.Equal(bytes.TrimSpace(p.Arguments), []byte("null")) {
+		if len(p.Arguments) > MaxArguments {
+			s.fail(m.ID, codeParams, "arguments too large")
+			return
+		}
 		var obj map[string]json.RawMessage
 		if json.Unmarshal(p.Arguments, &obj) != nil {
 			s.fail(m.ID, codeParams, "arguments must be an object")
@@ -289,10 +339,7 @@ func (s *Server) fail(id json.RawMessage, code int, msg string) {
 }
 
 func (s *Server) write(r reply) {
-	b, err := json.Marshal(r)
-	if err != nil {
-		b = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error"}}`)
-	}
+	b, _ := json.Marshal(r) // cannot fail: ids are validated JSON, results are maps of strings and the fixed tool list
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	_, _ = s.out.Write(append(b, '\n'))

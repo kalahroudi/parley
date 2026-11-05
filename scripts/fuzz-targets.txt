@@ -16,3 +16,4 @@
 ./internal/frames     FuzzParseEvent     10s
 ./internal/frames     FuzzDecodePrekey   5s
 ./internal/frames     FuzzUnpackInner    5s
+./internal/mcp        FuzzServe          10s

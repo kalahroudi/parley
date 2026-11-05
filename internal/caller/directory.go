@@ -47,7 +47,7 @@ type Page struct {
 // is advisory: finding an agent is not permission to call it, the target decides.
 func (s *Service) FindAgents(ctx context.Context, q Query) (*Page, error) {
 	if !validText(q.Text) || !validText(q.Tag) || len(q.Text) > maxQuery || len(q.Tag) > maxTag || q.Limit < 0 || q.Limit > MaxLimit ||
-		len(q.Cursor) > 1600 || !validHex(q.Cursor) {
+		len(q.Cursor) > maxCursor || !validHex(q.Cursor) {
 		return nil, rpc(CodeBadParams)
 	}
 	if !s.finds.take() {
@@ -92,7 +92,7 @@ type Directory struct {
 
 const (
 	dirTimeout    = 15 * time.Second
-	maxDirReply   = 1 << 20
+	maxDirReply   = 524288 // 512 KiB; escaped six-fold it still fits the local socket's reply limit
 	dirTokenSlack = 30 * time.Second
 )
 
@@ -159,6 +159,9 @@ func (d *Directory) Find(ctx context.Context, q Query) (*Page, error) {
 		var p Page
 		dec := json.NewDecoder(bytes.NewReader(reply))
 		if dec.Decode(&p) != nil {
+			return nil, directoryError{}
+		}
+		if len(p.Agents) > MaxLimit || len(p.NextCursor) > maxCursor || !validHex(p.NextCursor) {
 			return nil, directoryError{}
 		}
 		if p.Agents == nil {

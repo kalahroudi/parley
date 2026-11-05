@@ -68,6 +68,7 @@ const (
 	FindsPerMinute = 60
 	maxQuery       = 200
 	maxTag         = 64
+	maxCursor      = 1600
 )
 
 // State names are A2A v1.0 task states.

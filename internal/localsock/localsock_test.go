@@ -397,7 +397,7 @@ func TestCallSendsMethodAndParams(t *testing.T) {
 // Constant expressions have no statement for a mutant to be covered by; the
 // limits are pinned here.
 func TestConstantsArePinned(t *testing.T) {
-	if MaxPath != 100 || maxRequestBytes != 64<<10 || connDeadline != 30*time.Second || acceptRetry != 10*time.Millisecond || maxConns != 32 {
+	if MaxPath != 100 || maxRequestBytes != 256<<10 || maxReplyBytes != 4<<20 || connDeadline != 30*time.Second || acceptRetry != 10*time.Millisecond || maxConns != 32 {
 		t.Error("a limit changed")
 	}
 }
@@ -515,4 +515,45 @@ func TestRefusedPeerDoesNotStopTheServer(t *testing.T) {
 		t.Errorf("a refused connection must not stop later ones being served: %+v %v", r, err)
 	}
 	waitFor(t, "refusal logged", func() bool { return strings.Contains(log.String(), "not this user") })
+}
+
+func TestHandlerContextHasTheConnectionDeadline(t *testing.T) {
+	got := make(chan time.Duration, 1)
+	ts := startServer(t, map[string]Method{"x": func(ctx context.Context, _ json.RawMessage) (any, error) {
+		dl, ok := ctx.Deadline()
+		if !ok {
+			got <- -1
+		} else {
+			got <- time.Until(dl)
+		}
+		return 1, nil
+	}})
+	if _, err := Call(context.Background(), ts.path, "x", nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-got; d <= 0 || d > connDeadline {
+		t.Errorf("handler deadline %v, want within (0, %v]", d, connDeadline)
+	}
+}
+
+// 32 KiB of control characters is 192 KiB of JSON in a request; 512 KiB of them
+// (the largest directory page) is 3 MiB in a reply. Both must fit.
+func TestEscapedMaximumRequestAndLargeReplyRoundTrip(t *testing.T) {
+	ts := startServer(t, map[string]Method{"x": func(_ context.Context, p json.RawMessage) (any, error) {
+		var s struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(p, &s); err != nil {
+			return nil, err
+		}
+		return strings.Repeat("\x01", 512<<10) + s.Text[:1], nil
+	}})
+	r, err := Call(context.Background(), ts.path, "x", map[string]string{"text": strings.Repeat("\x01", 32<<10)})
+	if err != nil || !r.OK {
+		t.Fatalf("%+v %v", r, err)
+	}
+	var s string
+	if json.Unmarshal(r.Result, &s) != nil || len(s) != 512<<10+1 {
+		t.Errorf("reply length %d", len(s))
+	}
 }

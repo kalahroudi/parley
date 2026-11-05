@@ -158,6 +158,9 @@ func TestDirectoryFindFailsClosedWithFixedErrors(t *testing.T) {
 		"server error": {500, `{"error":"SECRET"}`},
 		"not found":    {404, ``},
 		"not json":     {200, `<html>SECRET`},
+		"too many":     {200, `{"agents":[` + strings.Repeat(`{},`, MaxLimit) + `{}]}`},
+		"bad cursor":   {200, `{"agents":[],"next_cursor":"SECRET"}`},
+		"long cursor":  {200, `{"agents":[],"next_cursor":"` + strings.Repeat("ab", maxCursor/2+1) + `"}`},
 		"too large":    {200, `{"agents":[],"pad":"` + strings.Repeat("a", maxDirReply) + `"}`},
 	} {
 		g.status.Store(int32(tc.status))

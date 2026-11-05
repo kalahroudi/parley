@@ -19,6 +19,13 @@ import (
 	"github.com/kalahroudi/parley/internal/mcp"
 )
 
+// Exit codes of every command that talks to the daemon (documented in the README):
+//
+//	0  success; the result is JSON on standard output
+//	1  failure: the daemon is not running or not reachable, or it refused the
+//	   request (the error is one fixed code such as not_permitted or rate_limited)
+//	2  usage error: unknown flag, missing or extra arguments, unreadable input
+//
 // callerCommand says whether name is one of the commands that talk to the daemon.
 func callerCommand(name string) bool {
 	switch name {
@@ -78,19 +85,27 @@ func (s *session) run(ctx context.Context, args []string) int {
 		if fs.Parse(rest) != nil {
 			return 2
 		}
+		secs, ok := s.seconds("expiry", *expiry)
+		if !ok {
+			return 2
+		}
 		text, err := s.text(fs.Args())
 		if err != nil {
 			fmt.Fprintln(s.errw, "error:", err)
 			return 2
 		}
-		return s.do(ctx, "send_task", caller.SendParams{Agent: *to, TaskID: *task, Text: text, ExpirySeconds: int64(*expiry / time.Second)})
+		return s.do(ctx, "send_task", caller.SendParams{Agent: *to, TaskID: *task, Text: text, ExpirySeconds: secs})
 	case "get":
 		wait := fs.Duration("wait", 0, "wait up to this long (at most 20s) for a final state or a question")
 		id, ok := s.oneID(fs, rest)
 		if !ok {
 			return 2
 		}
-		return s.do(ctx, "get_task", caller.GetParams{TaskID: id, WaitSeconds: int64(*wait / time.Second)})
+		secs, ok := s.seconds("wait", *wait)
+		if !ok {
+			return 2
+		}
+		return s.do(ctx, "get_task", caller.GetParams{TaskID: id, WaitSeconds: secs})
 	case "cancel":
 		id, ok := s.oneID(fs, rest)
 		if !ok {
@@ -104,6 +119,17 @@ func (s *session) run(ctx context.Context, args []string) int {
 		}
 		return s.do(ctx, "list_tasks", caller.ListParams{State: *state, Limit: *limit, Cursor: *cursor})
 	}
+}
+
+// seconds converts a duration flag to whole seconds. A fraction of a second
+// would be rounded down to 0, which the daemon reads as "default" or "do not
+// wait", the opposite of what was asked, so it is refused, as is a negative one.
+func (s *session) seconds(flagName string, d time.Duration) (int64, bool) {
+	if d < 0 || d%time.Second != 0 {
+		fmt.Fprintf(s.errw, "error: -%s must be a whole number of seconds, not negative (for example 30s or 2m)\n", flagName)
+		return 0, false
+	}
+	return int64(d / time.Second), true
 }
 
 // oneID parses a command line that has a task id as its only argument.
