@@ -422,3 +422,80 @@ func TestSlowBotIsWaitedForWithinTheDefaultGrace(t *testing.T) {
 		}
 	}
 }
+
+// A bot's own context ending ends its Ask, whatever the task's context is doing.
+// (When the bot passes the task's context, which of the two select cases fires
+// first is scheduler luck, so this case needs its own deterministic test.)
+func TestAskEndsWithTheBotsOwnContext(t *testing.T) {
+	own, stop := context.WithCancel(context.Background())
+	rec := bottest.NewRecorder()
+	errs := make(chan error, 1)
+	b := scripted(func(_ context.Context, tk bot.Task, s bot.Session) ([]byte, error) {
+		go func() { // once the question is out, end the bot's own context
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			rec.Wait(ctx, tk.ID, 1)
+			stop()
+		}()
+		_, err := s.Ask(own, []byte("q"))
+		errs <- err
+		return nil, err
+	})
+	h, _ := bot.NewHost(bot.Config{Bot: b, Responder: rec})
+	defer h.Close()
+	h.Inbound(pipeline.Inbound{Type: envelope.TypeTask, TaskID: [16]byte{1}, Content: []byte("x")})
+	select {
+	case err := <-errs:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Ask did not end with the bot's own context")
+	}
+}
+
+// Close while a bot runs sends nothing: the daemon is going away and the
+// caller's task fails by expiry. (The other tests only hit this by whether
+// their cleanup beats the bot, so it needs its own deterministic test.)
+func TestCloseDuringATaskSendsNothing(t *testing.T) {
+	started := make(chan struct{})
+	rec := bottest.NewRecorder()
+	h, _ := bot.NewHost(bot.Config{Responder: rec, Bot: scripted(func(ctx context.Context, _ bot.Task, _ bot.Session) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})})
+	h.Inbound(pipeline.Inbound{Type: envelope.TypeTask, TaskID: [16]byte{1}, Content: []byte("x")})
+	<-started
+	h.Close() // returns once the bot has returned and its task has finished
+	if m := rec.Messages([16]byte{1}); len(m) != 0 {
+		t.Fatal(m)
+	}
+}
+
+// The slot of a bot that ignored its context comes back once it returns.
+func TestAbandonedBotFreesItsSlot(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	rec := bottest.NewRecorder()
+	h, _ := bot.NewHost(bot.Config{Responder: rec, MaxRunning: 1, MaxQueued: 1, Grace: 20 * time.Millisecond,
+		Bot: scripted(func(_ context.Context, tk bot.Task, _ bot.Session) ([]byte, error) {
+			if tk.ID == ([16]byte{1}) {
+				close(started)
+				<-release
+				return nil, nil
+			}
+			return []byte("ok"), nil
+		})})
+	defer h.Close()
+	h.Inbound(pipeline.Inbound{Type: envelope.TypeTask, TaskID: [16]byte{1}, Content: []byte("x"), Expiry: time.Now().Add(30 * time.Millisecond)})
+	<-started
+	final(t, rec, 1)
+	close(release)
+	h.Inbound(pipeline.Inbound{Type: envelope.TypeTask, TaskID: [16]byte{2}, Content: []byte("y")})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if m := rec.Wait(ctx, [16]byte{2}, 1); len(m) != 1 || m[0].Type != envelope.TypeResult {
+		t.Fatalf("%v", m)
+	}
+}
