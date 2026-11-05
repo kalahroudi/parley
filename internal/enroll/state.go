@@ -44,7 +44,7 @@ const (
 
 // ErrBadState means the saved enrollment state is damaged or inconsistent. The
 // run stops: guessing would risk a second key or a second identity.
-var ErrBadState = errors.New("enroll: saved enrollment state is invalid; it was not changed")
+var ErrBadState = errors.New("enroll: saved enrollment state (enrollment.json in the state directory) is damaged or inconsistent, and was not changed; restore it from a backup, or move it away and run enroll again to start over with a new device key (and ask your admin to revoke any earlier request of this device)")
 
 var (
 	idRe   = regexp.MustCompile(`^[0-9a-f]{32}$`)

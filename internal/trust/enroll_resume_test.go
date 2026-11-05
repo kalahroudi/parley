@@ -112,3 +112,40 @@ func TestAwaitResumesARequestAndReportsAnUnknownOne(t *testing.T) {
 		t.Errorf("an expired request: %v", err)
 	}
 }
+
+func TestJitterIsBoundedAndSpread(t *testing.T) {
+	poll := 400 * time.Millisecond
+	distinct := map[time.Duration]bool{}
+	for range 200 {
+		j := jitter(poll)
+		if j < 0 || j > poll/4 {
+			t.Fatalf("jitter %v outside [0, %v]", j, poll/4)
+		}
+		distinct[j] = true
+	}
+	if len(distinct) < 10 {
+		t.Errorf("only %d distinct jitters in 200 draws", len(distinct))
+	}
+}
+
+func TestAwaitSleepsThePollPlusJitter(t *testing.T) {
+	old := jitter
+	defer func() { jitter = old }()
+	var got time.Duration
+	jitter = func(p time.Duration) time.Duration { got = p; return 60 * time.Millisecond }
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n++; n == 1 {
+			w.Write([]byte(`{"status":"pending"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	d := &Daemon{Client: &Client{BaseURL: srv.URL, HTTP: srv.Client()}, Tenant: "t"}
+	start := time.Now()
+	_, err := d.Await(context.Background(), "i1", "poll", nil, 2*time.Millisecond, time.Now)
+	if !errors.Is(err, ErrNotFound) || got != 2*time.Millisecond || time.Since(start) < 62*time.Millisecond {
+		t.Errorf("err=%v jitter arg=%v elapsed=%v", err, got, time.Since(start))
+	}
+}
