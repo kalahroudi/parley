@@ -109,6 +109,7 @@ func run(profile, cfgPath, root string, out, errw io.Writer) int {
 			return 2
 		}
 		var t tally
+		var missed []block
 		for _, b := range byPkg[p] {
 			if ign.covers(b) {
 				continue
@@ -116,6 +117,8 @@ func run(profile, cfgPath, root string, out, errw io.Writer) int {
 			t.total += b.stmts
 			if b.count > 0 {
 				t.covered += b.stmts
+			} else {
+				missed = append(missed, b)
 			}
 		}
 		for _, e := range ign.list {
@@ -135,6 +138,18 @@ func run(profile, cfgPath, root string, out, errw io.Writer) int {
 			failed = true
 		}
 		fmt.Fprintf(out, "%s tier %s  %-26s %6.1f%%  (gate %.0f%%, %d/%d statements)\n", status, tier, p, pct, gate, t.covered, t.total)
+		if status == "FAIL" {
+			// Which statements, so a gate that fails on one OS only (a profile is per run) names its line.
+			sort.Slice(missed, func(i, j int) bool {
+				if missed[i].file != missed[j].file {
+					return missed[i].file < missed[j].file
+				}
+				return missed[i].startLine < missed[j].startLine
+			})
+			for _, b := range missed {
+				fmt.Fprintf(out, "     not covered: %s:%d-%d (%d statements)\n", b.file, b.startLine, b.endLine, b.stmts)
+			}
+		}
 	}
 	// A configured package with no statements in the profile was renamed,
 	// removed or left out of the test run; a silent pass would hide that.
