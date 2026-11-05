@@ -4,7 +4,7 @@
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { SEALED_MEDIA_TYPE } from "../src/a2a";
-import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, verifyBinding, verifyEd25519, type ConnectScope } from "../src/connect";
+import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "../src/connect";
 import type { Env } from "../src/index";
 import { CONNECT_TOKEN_TTL_MS, MAX_CHALLENGES_PER_DEVICE, MAX_CONNECT_TOKENS_PER_DEVICE } from "../src/tenant";
 import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
@@ -1090,5 +1090,28 @@ describe("the prekey relay", () => {
     await A.send(request("r1", b.id));
     expect(A.events()).toEqual([{ t: "prekey_refused", id: "r1", from: b.id, reason: "offline" }]);
     A.ws.close();
+  });
+});
+
+// Each byte is two hex digits, so a byte under 0x10 keeps its leading zero and a challenge is always 64 characters.
+describe("randomChallenge", () => {
+  it("zero-pads every byte", () => {
+    const spy = vi.spyOn(crypto, "getRandomValues").mockImplementation(((a: Uint8Array) => {
+      a.fill(0);
+      a[0] = 0x0a;
+      a[1] = 0x01;
+      a[31] = 0xff;
+      return a;
+    }) as any);
+    try {
+      expect(randomChallenge()).toBe("0a01" + "00".repeat(29) + "ff");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it("is 64 lowercase hex characters and fresh each time", () => {
+    const a = randomChallenge();
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(randomChallenge()).not.toBe(a);
   });
 });

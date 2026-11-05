@@ -9,6 +9,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -306,7 +308,140 @@ func TestLimitsAreExact(t *testing.T) {
 // Pinned so a changed limit is a deliberate, reviewed edit (these expressions have no statement for mutation
 // testing to cover; see tests/coverage/README.md).
 func TestConstantsArePinned(t *testing.T) {
-	if MaxNonce != 32 || MaxPrekeyBlob != 1024 || MaxEventBytes != 1048576 || SealedMediaType != "application/vnd.parley.sealed" {
+	if MaxNonce != 32 || MaxPrekeyBlob != 1024 || MaxEventBytes != 1048576 || MaxRetryAfterMS != 86400000 || SealedMediaType != "application/vnd.parley.sealed" {
 		t.Fatalf("%d %d %d %q", MaxNonce, MaxPrekeyBlob, MaxEventBytes, SealedMediaType)
+	}
+}
+
+// encoding/json keeps the last of duplicate keys and matches names without
+// regard to case; a frame with either has a second spelling, so it is refused.
+func TestParseEventRefusesDuplicateAndMiscasedKeys(t *testing.T) {
+	nonce := b64([]byte("n0n"))
+	req := func(extra string) string {
+		return `{"t":"prekey_request","id":"r1","from":"dev-a","nonce":"` + nonce + `","expires_at":1` + extra + `}`
+	}
+	if _, err := ParseEvent(req("")); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []string{
+		req(`,"id":"r2"`),
+		req(`,"ID":"r2"`),
+		`{"T":"prekey_request","id":"r1","from":"dev-a","nonce":"` + nonce + `","expires_at":1}`,
+		`{"t":"prekey_request","Id":"r1","from":"dev-a","nonce":"` + nonce + `","expires_at":1}`,
+		`{"t":"prekey_request","id":"r1","from":"dev-a","nonce":"` + nonce + `","Expires_At":1}`,
+		`{"a2a":"1.0","a2a":"2.0"}`,
+		`{"A2A":"1.0"}`,
+		`{"a2a":"1.0","task":{"status":{"message":{"parts":[{"raw":"c2VhbGVk","mediaType":"application/vnd.parley.sealed","Raw":"eA=="}]}}}}`,
+		`{"a2a":"1.0","task":{"status":{"message":{"parts":[{"raw":"c2VhbGVk","mediaType":"application/vnd.parley.sealed"}]},"Message":{}}}}`,
+		`{"a2a":"1.0","x":[{"y":1,"y":2}]}`,
+		`{"a2a":"1.0","x":{"k":1,"K":2}}`,
+		`{"t":"prekey_request",`,
+		`[`,
+		``,
+	} {
+		if _, err := ParseEvent(b); !errors.Is(err, ErrFormat) {
+			t.Errorf("%s: err=%v, want ErrFormat", b, err)
+		}
+	}
+	// Keys this package does not read may differ in case, and arrays nest.
+	ok := a2a(`[{"raw":"c2VhbGVk","mediaType":"application/vnd.parley.sealed"}]`)
+	ok = strings.Replace(ok, `{"a2a"`, `{"extra":[[{"Y":1,"y2":2}],{}],"a2a"`, 1)
+	if _, err := ParseEvent(ok); err != nil {
+		t.Errorf("benign extra keys refused: %v", err)
+	}
+}
+
+func TestParseEventNestingIsBounded(t *testing.T) {
+	deep := func(n int) string {
+		return strings.Replace(a2a(`[{"raw":"c2VhbGVk","mediaType":"application/vnd.parley.sealed"}]`), `{"a2a"`,
+			`{"x":`+strings.Repeat("[", n)+strings.Repeat("]", n)+`,"a2a"`, 1)
+	}
+	if _, err := ParseEvent(deep(maxDepth - 1)); err != nil {
+		t.Errorf("depth %d refused: %v", maxDepth-1, err)
+	}
+	if _, err := ParseEvent(deep(maxDepth)); !errors.Is(err, ErrFormat) {
+		t.Errorf("depth %d: err=%v, want ErrFormat", maxDepth, err)
+	}
+	if _, err := ParseEvent(deep(100000)); !errors.Is(err, ErrFormat) {
+		t.Errorf("very deep: err=%v, want ErrFormat", err)
+	}
+}
+
+// The base64 decoder skips CR and LF; the frame must still have one spelling.
+func TestBase64WithLineBreaksIsRefused(t *testing.T) {
+	for _, n := range []string{"AQID\n", "AQ\nID", "AQ\r\nID", "\nAQID"} {
+		b := `{"t":"prekey_request","id":"r1","from":"dev-a","nonce":"` + strings.NewReplacer("\n", `\n`, "\r", `\r`).Replace(n) + `","expires_at":1}`
+		if _, err := ParseEvent(b); !errors.Is(err, ErrFormat) {
+			t.Errorf("%q: err=%v, want ErrFormat", n, err)
+		}
+	}
+}
+
+// retry_after_ms becomes a Duration: a huge value must not wrap.
+func TestRetryAfterCannotOverflow(t *testing.T) {
+	refused := func(ms string) string {
+		return `{"t":"prekey_refused","id":"r1","from":"dev-b","reason":"rate_limited","retry_after_ms":` + ms + `}`
+	}
+	max := strconv.FormatInt(MaxRetryAfterMS, 10)
+	ev, err := ParseEvent(refused(max))
+	if err != nil || ev.Relay.RetryAfter != 24*time.Hour {
+		t.Fatalf("at the cap: %v %+v", err, ev.Relay)
+	}
+	for _, ms := range []string{strconv.FormatInt(MaxRetryAfterMS+1, 10), "9223372036854775807", "9223372036854"} {
+		if _, err := ParseEvent(refused(ms)); !errors.Is(err, ErrFormat) {
+			t.Errorf("%s: err=%v, want ErrFormat", ms, err)
+		}
+	}
+}
+
+func TestDecodePrekeyBoundsInputBeforeParsing(t *testing.T) {
+	if _, err := DecodePrekey(make([]byte, MaxPrekeyBlob+1)); !errors.Is(err, ErrFormat) {
+		t.Errorf("oversize blob: %v", err)
+	}
+	// A length prefix that wraps a 32-bit or 64-bit sum is only a short read.
+	for _, p := range [][]byte{{0xff, 0xff, 0xff, 0xff}, {0xff, 0xff, 0xff, 0xff, 1, 2, 3}, {0x80, 0, 0, 0}} {
+		if _, err := DecodePrekey(p); !errors.Is(err, ErrFormat) {
+			t.Errorf("% x: %v", p, err)
+		}
+		if _, _, err := UnpackInner(append([]byte{1}, p...)); !errors.Is(err, ErrFormat) {
+			t.Errorf("inner % x: %v", p, err)
+		}
+	}
+}
+
+// A prekey blob of exactly the cap is accepted; one byte more is not.
+func TestDecodePrekeyAtTheCap(t *testing.T) {
+	s := signedPrekey(t)
+	s.Tenant = strings.Repeat("t", len(s.Tenant)+MaxPrekeyBlob-len(EncodePrekey(s)))
+	blob := EncodePrekey(s)
+	if len(blob) != MaxPrekeyBlob {
+		t.Fatalf("setup: %d bytes", len(blob))
+	}
+	if _, err := DecodePrekey(blob); err != nil {
+		t.Fatalf("blob at the cap: %v", err)
+	}
+	if _, err := DecodePrekey(append(blob, 0)); !errors.Is(err, ErrFormat) {
+		t.Fatalf("one over the cap: %v", err)
+	}
+}
+
+// The wire-format doc and the code agree byte for byte: every vector in the doc
+// is what the code produces (and parses back).
+func TestDocVectorsMatchTheCode(t *testing.T) {
+	raw, err := os.ReadFile("../../specs/parley-mvp/message-pipeline.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	req, _ := RequestPrekey("r1", "dev-b", []byte{1, 2, 3}, time.UnixMilli(1800000900000))
+	rep, _ := ReplyPrekey("r1", "dev-a", []byte{9, 8})
+	ref, _ := RefusePrekey("r1", "dev-a")
+	for name, want := range map[string]string{"request": req, "reply": rep, "refuse": ref, "inner": "006869"} {
+		if !strings.Contains(doc, "<!-- vector:"+name+" -->\n`"+want) {
+			t.Errorf("doc vector %q is not %s", name, want)
+		}
+	}
+	if next, c, err := UnpackInner([]byte{0, 'h', 'i'}); err != nil || next != nil || string(c) != "hi" {
+		t.Errorf("inner vector: %v %v %q", err, next, c)
 	}
 }
