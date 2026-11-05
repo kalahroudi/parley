@@ -1,0 +1,16 @@
+{
+  "_source": "id-token-claims (see sources.json). The claim names a v2.0 id_token payload carries by default with the openid, profile and email scopes; values are made up.",
+  "v2_default": ["aud", "iss", "iat", "nbf", "exp", "name", "oid", "preferred_username", "rh", "sub", "tid", "uti", "ver"],
+  "never_present": ["email_verified", "hd", "unique_name"],
+  "formats": {
+    "ver": "2.0",
+    "tid": "guid",
+    "oid": "guid",
+    "iss": "{base}/{tid}/v2.0"
+  },
+  "overage": {
+    "_claim_names": { "groups": "src1" },
+    "_claim_sources": { "src1": { "endpoint": "https://graph.microsoft.com/v1.0/users/{oid}/getMemberObjects" } }
+  },
+  "personal_account_tenant": "9188040d-6c67-4c5b-b112-36a304b66dad"
+}
