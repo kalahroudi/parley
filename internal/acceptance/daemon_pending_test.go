@@ -4,12 +4,15 @@
 package acceptance
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kalahroudi/parley/internal/envelope"
+	"github.com/kalahroudi/parley/internal/outbox"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -180,6 +183,39 @@ func (m memKeys) Save(ed25519.PrivateKey) error { return errors.New("not expecte
 
 func TestPending_DaemonEnrollmentAndBindings(t *testing.T) {
 	pending(t, "T411", "the daemon core opens the binding tracker but has no enrollment flow; assert a fresh daemon enrolls, receives its root-signed binding and records it before serving")
+}
+
+// T414 completed the pending peer-binding test: it is now a real test (daemon_m1_test.go has the hostile cases).
+// A daemon with no injected directory fetches a peer's root-signed binding from the gateway, and the task then
+// goes through: the test bot of a second device of the same owner answers it, sealed, and nothing readable
+// crosses the gateway.
+func TestDaemonFindsPeerBindingsThroughTheGateway(t *testing.T) {
+	g := newPipeGW(t)
+	alice := g.startOK("alice1", nodeOpts{realDirectory: true, testBot: true, owner: "alice@acme.test"})
+	g.startOK("alice2", nodeOpts{realDirectory: true, testBot: true, owner: "alice@acme.test"})
+
+	canary := "CANARY-M1-" + time.Now().Format("150405.000000")
+	_, st := alice.submit("alice2", canary)
+	if st.State != outbox.Sent {
+		t.Fatalf("%+v", st)
+	}
+	g.waitFor("the echo", func() bool { alice.mu.Lock(); defer alice.mu.Unlock(); return finals(alice.ups) == 1 })
+	alice.mu.Lock()
+	last := alice.ups[len(alice.ups)-1]
+	alice.mu.Unlock()
+	if last.Type != envelope.TypeResult || string(last.Content) != daemon.TestBotPrefix+canary {
+		t.Fatalf("answer %v %q", last.Type, last.Content)
+	}
+	if g.dirCalls.Load() == 0 {
+		t.Fatal("the daemons never asked the gateway for a binding")
+	}
+	all := g.everything()
+	if bytes.Contains(all, []byte(canary)) {
+		t.Fatal("the task text crossed the gateway in the clear")
+	}
+	if !bytes.Contains(all, []byte(`{"device":"alice2"}`)) {
+		t.Fatal("the lookup did not name the device it wanted")
+	}
 }
 
 func TestPending_WindowsDaemonPeerRestriction(t *testing.T) {
