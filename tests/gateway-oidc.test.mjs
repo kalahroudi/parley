@@ -324,7 +324,7 @@ test("session logins: tenant and role live in the sealed flow, and the callback 
   withIdp(async (idp) => {
     const env = { FLOW_SECRET: "s", GOOGLE_CLIENT_ID: "cid", GOOGLE_ISSUER: idp.issuer };
     const seen = [];
-    const issue = async (tenant, role, email) => (seen.push([tenant, role, email]), Response.json({ role }, { status: 200, headers: { "set-cookie": "parley_session=x; Path=/" } }));
+    const issue = async (tenant, role, email, device) => (seen.push(device === undefined ? [tenant, role, email] : [tenant, role, email, device]), Response.json({ role }, { status: 200, headers: { "set-cookie": "parley_session=x; Path=/" } }));
     const start = (qs) => handle(new Request(`http://gw.test/auth/google/login?${qs}`), env, undefined, issue);
     const finish = async (login, { cookies, query = "" } = {}) => {
       const q = await browse(login.headers.get("location"));
@@ -337,6 +337,22 @@ test("session logins: tenant and role live in the sealed flow, and the callback 
       assert.equal((await start(qs)).status, 400, qs);
     }
     assert.equal((await handle(new Request("http://gw.test/auth/google/login?tenant=t1&role=user"), env)).status, 400); // no issuer wired
+
+    // A device login (parley-cli login): only for users, with a well-formed device id, and the id travels sealed in the flow.
+    const dev = "ab".repeat(16);
+    for (const qs of [`device=${dev}`, `tenant=t1&role=admin&device=${dev}`, "tenant=t1&role=user&device=short", `tenant=t1&role=user&device=${"AB".repeat(16)}`, "tenant=t1&role=user&device="]) {
+      assert.equal((await start(qs)).status, 400, qs);
+    }
+    const dl = await start(`tenant=t1&role=user&device=${dev}`);
+    assert.equal(dl.status, 302);
+    assert.deepEqual(unsealBody(dl.headers.getSetCookie()[0].split(";")[0].split("=")[1]).s, { tenant: "t1", role: "user", device: dev });
+    assert.equal((await finish(dl)).status, 200);
+    assert.deepEqual(seen, [["t1", "user", "alice@example.test", dev]]);
+    seen.length = 0;
+    const odd = { ...unsealBody(dl.headers.getSetCookie()[0].split(";")[0].split("=")[1]), s: { tenant: "t1", role: "user", device: 5 } };
+    const oddFlow = dl.headers.getSetCookie()[0].split(";")[0].split("=")[1];
+    const badDevice = await finish(dl, { cookies: `parley_flow=${Buffer.from(JSON.stringify(odd)).toString("base64url")}.${oddFlow.split(".")[1]}` });
+    assert.equal(badDevice.status, 401); // the signature no longer matches, whatever the edit
 
     const login = await start("tenant=t1&role=admin&login_hint=Root@example.test");
     assert.equal(login.status, 302);

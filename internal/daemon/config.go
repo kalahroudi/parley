@@ -11,9 +11,13 @@
 //     and, before each connection attempt, signs the gateway's challenge with
 //     the device key for a short-lived token (internal/connect). Deps.TunnelConfig
 //     replaces this (tests); it is called each time the tunnel (re)starts.
-//   - T411 (enrollment): Daemon.SigningKey and Daemon.Trust give the device key
-//     and a trust.Daemon (Enroll, binding tracker, revocation guard) already
-//     pinned to the configured root; New opens the rollback stores, so a
+//   - Enrollment (T411): internal/enroll is what `parley-cli login` and `enroll`
+//     run before any daemon exists. It pins the root by the fingerprint the admin
+//     shared, creates the device key once, requests approval, waits, records the
+//     root-signed binding and then writes config.json (key_account names the
+//     keychain entry). Its persisted state makes it resumable at every step.
+//     Daemon.SigningKey and Daemon.Trust give the device key and a trust.Daemon
+//     already pinned to the configured root; New opens the rollback stores, so a
 //     corrupt or rolled-back store stops startup.
 //   - T412 (message pipeline, internal/pipeline): every tunnel event goes to
 //     Daemon.Node().HandleEvent, in order (Deps.OnEvent is a tap that sees it
@@ -48,7 +52,7 @@ import (
 var ErrConfig = errors.New("daemon: invalid configuration")
 
 const (
-	configFormat = 1
+	ConfigFormat = 1
 	// DefaultRefresh is how often the revocation list is fetched (the plan asks for
 	// at least weekly; hourly keeps the 7-day warning from ever showing).
 	DefaultRefresh = time.Hour
@@ -74,8 +78,11 @@ type Config struct {
 	GatewayURL    string `json:"gateway_url"`
 	RootPublicKey []byte `json:"root_public_key"` // 32 bytes, base64 in JSON
 	KeyStore      string `json:"key_store,omitempty"`
-	Refresh       string `json:"refresh_interval,omitempty"` // Go duration, default 1h
-	LogLevel      string `json:"log_level,omitempty"`        // debug, info, warn, error
+	// KeyAccount names the keychain entry that holds the device key. Enrollment
+	// chooses it before the device id exists; it defaults to the device id.
+	KeyAccount string `json:"key_account,omitempty"`
+	Refresh    string `json:"refresh_interval,omitempty"` // Go duration, default 1h
+	LogLevel   string `json:"log_level,omitempty"`        // debug, info, warn, error
 
 	refresh time.Duration
 }
@@ -114,20 +121,20 @@ func ParseConfig(data []byte) (Config, error) {
 
 func (c *Config) validate() error {
 	bad := func(what string) error { return fmt.Errorf("%w: %s", ErrConfig, what) }
-	if c.Format != configFormat {
+	if c.Format != ConfigFormat {
 		return bad("unsupported format")
 	}
 	// Ids must be loggable as-is, or every log line about them would be redacted.
-	if !validID(c.Tenant) {
+	if !ValidID(c.Tenant) {
 		return bad("tenant must be 1-64 characters of A-Z a-z 0-9 - _")
 	}
-	if !validID(c.DeviceID) {
+	if !ValidID(c.DeviceID) {
 		return bad("device_id must be 1-64 characters of A-Z a-z 0-9 - _")
 	}
 	if len(c.RootPublicKey) != ed25519.PublicKeySize {
 		return bad("root_public_key must be a 32-byte Ed25519 key")
 	}
-	if err := validGatewayURL(c.GatewayURL); err != nil {
+	if err := ValidGatewayURL(c.GatewayURL); err != nil {
 		return err
 	}
 	switch c.KeyStore {
@@ -136,6 +143,11 @@ func (c *Config) validate() error {
 	case KeyStoreKeychain, KeyStoreFile:
 	default:
 		return bad("key_store must be keychain or file")
+	}
+	if c.KeyAccount == "" {
+		c.KeyAccount = c.DeviceID
+	} else if !ValidID(c.KeyAccount) {
+		return bad("key_account must be 1-64 characters of A-Z a-z 0-9 - _")
 	}
 	c.refresh = DefaultRefresh
 	if c.Refresh != "" {
@@ -161,7 +173,7 @@ func (c Config) RefreshEvery() time.Duration {
 	return c.refresh
 }
 
-func validID(s string) bool {
+func ValidID(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false
 	}
@@ -174,9 +186,9 @@ func validID(s string) bool {
 	return true
 }
 
-// validGatewayURL requires https. Plain http is allowed only to a loopback
+// ValidGatewayURL requires https. Plain http is allowed only to a loopback
 // host, for local development against `wrangler dev`.
-func validGatewayURL(s string) error {
+func ValidGatewayURL(s string) error {
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("%w: gateway_url must be an absolute URL without credentials, query or fragment", ErrConfig)

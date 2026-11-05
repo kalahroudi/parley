@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Env } from "./index";
+import { confirmPage } from "./login";
 import { SESSION_TTL_MS, type Role, tenantStub } from "./tenant";
 
 // Over HTTPS the cookie is `__Host-` prefixed: the browser then refuses it unless it is Secure, has Path=/ and no
@@ -46,11 +47,13 @@ function sessionCookie(req: Request, value: string, maxAgeS: number): string {
 
 // Called by the OIDC callback with a verified identity. The token goes only in
 // the HttpOnly cookie; the body carries what the page needs (the CSRF token).
-export async function issueSession(req: Request, env: Env, tenant: string, role: Role, email: string): Promise<Response> {
+export async function issueSession(req: Request, env: Env, tenant: string, role: Role, email: string, device?: string): Promise<Response> {
   if (!ID.test(tenant)) return json(400, { error: "bad_request" });
   // One answer for every refusal (no such tenant, not an admin, not an allowed user), so a login cannot probe which
   // exist. Admins come from ADMINS and users from USERS or USER_DOMAINS; with none of them set nobody gets a session.
   if (!(role === "admin" ? isAdmin(env, tenant, email) : isUser(env, tenant, email))) return json(403, { error: "not_admin" });
+  // A login started by a device (src/login.ts) ends in a confirmation page, not a cookie.
+  if (device !== undefined) return confirmPage(env, tenant, email, device);
   // Rotation: a login never reuses a session. The one this browser already presented, if any, ends now.
   const old = await principal(req, env);
   if (old) await tenantStub(env, old.tenant).endSession(old.secret);

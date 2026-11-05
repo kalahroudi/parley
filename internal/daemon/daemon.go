@@ -156,7 +156,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	}
 	ks := deps.Keys
 	if ks == nil {
-		ks = keyStoreFor(cfg, dirs)
+		ks = KeyStoreFor(cfg, dirs)
 	}
 	signer, created, err := keystore.LoadOrCreateLocked(ks, deps.Rand, instanceLock(dirs.State))
 	if err != nil {
@@ -221,11 +221,11 @@ func connectTunnel(cfg Config, hc *http.Client, version func() (uint64, bool)) f
 	}
 }
 
-func keyStoreFor(cfg Config, dirs Dirs) keystore.KeyStore {
+func KeyStoreFor(cfg Config, dirs Dirs) keystore.KeyStore {
 	if cfg.KeyStore == KeyStoreFile {
 		return keystore.FileStore{Dir: dirs.Config}
 	}
-	return &keystore.KeychainStore{Account: cfg.DeviceID, KR: osKeyring{}}
+	return &keystore.KeychainStore{Account: cfg.KeyAccount, KR: osKeyring{}}
 }
 
 // Handle registers a local socket method. Call it before Run.
@@ -265,7 +265,7 @@ func (d *Daemon) status(context.Context, json.RawMessage) (any, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	defer keystore.Zero(d.signer)
 	defer d.closeNode() // before the key is zeroed (defers run last in, first out): the pipeline signs with it until then
-	release, err := lockState(d.dirs.State)
+	release, err := LockState(d.dirs.State)
 	if err != nil {
 		return err
 	}
@@ -290,14 +290,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
-// instanceLock is lockState for a state directory, as a function value.
+// instanceLock is LockState for a state directory, as a function value.
 func instanceLock(stateDir string) func() (func(), error) {
-	return func() (func(), error) { return lockState(stateDir) }
+	return func() (func(), error) { return LockState(stateDir) }
 }
 
-// lockState takes the per-device instance lock; the lock file lives in the
+// LockState takes the per-device instance lock; the lock file lives in the
 // state directory and the kernel frees it when the process exits.
-func lockState(stateDir string) (func(), error) {
+func LockState(stateDir string) (func(), error) {
 	release, err := fsperm.Lock(filepath.Join(stateDir, "parleyd.lock"))
 	if errors.Is(err, fsperm.ErrLocked) {
 		return nil, ErrAlreadyRunning

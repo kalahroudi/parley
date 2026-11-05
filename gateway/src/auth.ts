@@ -55,7 +55,7 @@ export function providers(env: AuthEnv): Record<string, Provider> {
 }
 
 const COOKIE = "parley_flow";
-export type SessionIssuer = (tenant: string, role: "admin" | "user", email: string) => Promise<Response>;
+export type SessionIssuer = (tenant: string, role: "admin" | "user", email: string, device?: string) => Promise<Response>;
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
@@ -83,8 +83,12 @@ export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch,
       if (wantSession && (!issue || !tenant || !/^[A-Za-z0-9_-]{1,64}$/.test(tenant) || (role !== "admin" && role !== "user"))) {
         return json(400, { error: "bad_request" });
       }
+      // `device` marks a login started by `parley-cli login` (src/login.ts): the session goes to that device after the
+      // user confirms its code in the browser, not into a cookie. Only users have devices.
+      const device = url.searchParams.get("device");
+      if (device !== null && (!wantSession || role !== "user" || !/^[0-9a-f]{32}$/.test(device))) return json(400, { error: "bad_request" });
       const hint = url.searchParams.get("login_hint")?.slice(0, 254) || undefined;
-      const { url: to, flow } = await startLogin(ctx, p, redirectUri, hint, wantSession ? { tenant: tenant!, role: role as "admin" | "user" } : undefined);
+      const { url: to, flow } = await startLogin(ctx, p, redirectUri, hint, wantSession ? { tenant: tenant!, role: role as "admin" | "user", ...(device !== null && { device }) } : undefined);
       return new Response(null, { status: 302, headers: { location: to, "set-cookie": `${COOKIE}=${flow}; ${cookieAttrs}` } });
     }
     const cookies = req.headers.get("cookie") ?? "";
@@ -92,7 +96,7 @@ export async function handle(req: Request, env: AuthEnv, fetchFn?: typeof fetch,
     const id = await completeLogin(ctx, p, flow, url.searchParams);
     const clear = (name: string) => `${name}=; ${cookieAttrs.replace("Max-Age=600", "Max-Age=0")}`;
     const { session, ...who } = id;
-    const res = session ? (issue ? await issue(session.tenant, session.role, id.email) : json(400, { error: "bad_request" })) : json(200, who);
+    const res = session ? (issue ? await issue(session.tenant, session.role, id.email, session.device) : json(400, { error: "bad_request" })) : json(200, who);
     const out = new Response(res.body, res);
     out.headers.append("set-cookie", clear(COOKIE));
     out.headers.set("cache-control", "no-store");
