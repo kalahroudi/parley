@@ -360,3 +360,65 @@ func TestCloseRacesWithInbound(t *testing.T) {
 		h.Close()
 	}
 }
+
+func TestConstantsArePinned(t *testing.T) {
+	if bot.DefaultMaxRunning != 5 || bot.DefaultMaxQueued != 5 || bot.DefaultTimeout != 15*time.Minute ||
+		bot.DefaultGrace != 5*time.Second || bot.MaxFailure != 1024 {
+		t.Fatal("a limit changed")
+	}
+}
+
+func TestDefaultsFiveRunningFiveQueued(t *testing.T) {
+	rec := bottest.NewRecorder()
+	h, _ := bot.NewHost(bot.Config{Bot: &bottest.Fake{}, Responder: rec})
+	defer h.Close()
+	for i := byte(1); i <= 11; i++ {
+		h.Inbound(pipeline.Inbound{Type: envelope.TypeTask, TaskID: [16]byte{i}, Content: []byte("block")})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if m := rec.Wait(ctx, [16]byte{11}, 1); len(m) != 1 || m[0].Content != bot.TextBusy {
+		t.Fatalf("the 11th task: %v", m)
+	}
+	time.Sleep(50 * time.Millisecond)
+	for i := byte(1); i <= 10; i++ {
+		if m := rec.Messages([16]byte{i}); len(m) != 0 {
+			t.Fatalf("task %d was rejected: %v", i, m)
+		}
+	}
+}
+
+func TestLimitsAtTheBoundary(t *testing.T) {
+	big := make([]byte, pipeline.MaxContent)
+	rec, _ := runOne(t, bot.Config{Bot: scripted(func(context.Context, bot.Task, bot.Session) ([]byte, error) {
+		return big, nil
+	})}, "x", time.Time{})
+	if m := final(t, rec, 1); m[0].Type != envelope.TypeResult || len(m[0].Content) != pipeline.MaxContent {
+		t.Fatalf("a result of exactly the limit: %v", m[0].Type)
+	}
+	rec, _ = runOne(t, bot.Config{Bot: scripted(func(context.Context, bot.Task, bot.Session) ([]byte, error) {
+		return nil, &bot.Failure{Message: strings.Repeat("a", bot.MaxFailure)}
+	})}, "x", time.Time{})
+	if m := final(t, rec, 1); len(m[0].Content) != bot.MaxFailure {
+		t.Fatalf("a failure of exactly the limit is %d bytes", len(m[0].Content))
+	}
+}
+
+// A bot that returns within the grace period has its buffer zeroed before the
+// caller sees the final message (the default grace is long enough to wait).
+func TestSlowBotIsWaitedForWithinTheDefaultGrace(t *testing.T) {
+	var kept []byte
+	rec, _ := runOne(t, bot.Config{Timeout: 20 * time.Millisecond, Bot: scripted(func(_ context.Context, tk bot.Task, _ bot.Session) ([]byte, error) {
+		kept = tk.Content
+		time.Sleep(150 * time.Millisecond)
+		return nil, nil
+	})}, "secret", time.Time{})
+	if m := final(t, rec, 1); m[0].Content != bot.TextTimedOut {
+		t.Fatal(m)
+	}
+	for _, b := range kept {
+		if b != 0 {
+			t.Fatal("the final message was sent before the content was zeroed")
+		}
+	}
+}

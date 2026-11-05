@@ -224,34 +224,34 @@ func (h *Host) finish(ctx context.Context, r *run, id [16]byte, res []byte, err 
 	h.mu.Lock()
 	canceled := r.canceled
 	h.mu.Unlock()
-	var f *Failure
-	switch {
-	case canceled:
+	if canceled {
 		h.send(id, envelope.TypeCancel, nil)
-	case h.base.Err() != nil:
-		// Shutting down: the daemon is going away and the caller's task fails by expiry.
-	case err == nil && ctx.Err() == nil:
+		return
+	}
+	if h.base.Err() != nil {
+		return // shutting down: the daemon is going away and the caller's task fails by expiry
+	}
+	if err == nil && ctx.Err() == nil {
 		if len(res) > pipeline.MaxContent {
 			h.send(id, envelope.TypeError, []byte(TextTooLarge))
 		} else if h.send(id, envelope.TypeResult, res) != nil {
 			h.send(id, envelope.TypeError, []byte(TextFailed)) // a failed send leaves the task open: end it
 		}
-	case ctx.Err() == context.DeadlineExceeded:
-		h.send(id, envelope.TypeError, []byte(TextTimedOut))
-	default:
-		msg := TextFailed
-		if errors.As(err, &f) && f != nil && f.Message != "" {
-			msg = f.Message
-			if len(msg) > MaxFailure {
-				msg = msg[:MaxFailure]
-			}
-			msg = strings.ToValidUTF8(msg, "")
-			if msg == "" {
-				msg = TextFailed
-			}
-		}
-		h.send(id, envelope.TypeError, []byte(msg))
+		return
 	}
+	if ctx.Err() == context.DeadlineExceeded {
+		h.send(id, envelope.TypeError, []byte(TextTimedOut))
+		return
+	}
+	msg := TextFailed
+	var f *Failure
+	if errors.As(err, &f) && f != nil && f.Message != "" {
+		msg = strings.ToValidUTF8(f.Message[:min(len(f.Message), MaxFailure)], "")
+		if msg == "" {
+			msg = TextFailed
+		}
+	}
+	h.send(id, envelope.TypeError, []byte(msg))
 }
 
 func (h *Host) send(id [16]byte, typ envelope.Type, content []byte) error {
