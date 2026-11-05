@@ -16,7 +16,9 @@ export default defineConfig({
   test: {
     // Durable Object storage writes cost ~25 ms each on Windows runners (see the soak note in ci.yml);
     // the lifecycle tests make dozens, so the 5 s default is too tight there.
-    testTimeout: 30_000,
+    // Run in parallel on a 2-core runner, a test there has been seen to take 40 s that takes 3 s elsewhere (a
+    // different test on each run; main fails the same way), so Windows gets 120 s. Other OSes keep 30 s.
+    testTimeout: process.platform === "win32" ? 120_000 : 30_000,
     coverage: {
       // Workers code runs in workerd, where only the istanbul provider works.
       provider: "istanbul",
