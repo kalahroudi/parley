@@ -18,6 +18,7 @@ import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a
 import { TaskNotFoundError } from "@a2a-js/sdk/errors";
 import { SEALED_MEDIA_TYPE } from "../src/a2a";
 import type { SignedKind } from "../src/parts";
+import { NEXT } from "../src/task";
 import type { Task as TaskDO, TaskEvent, TaskRecord, TaskState as State } from "../src/task";
 import { b64, encodeWire, gw, header, taskBytes, taskHex } from "./wire";
 
@@ -36,11 +37,16 @@ const MODEL: Record<string, Record<string, State>> = {
   CANCELED: {},
   REJECTED: {},
 };
+const PATHS = 49;
 const EVENTS: TaskEvent[] = ["WORKING", "INPUT_REQUIRED", "COMPLETED", "FAILED", "REJECTED", "CANCEL", "REPLY"];
 const FROM_CALLER = new Set<TaskEvent>(["CANCEL", "REPLY"]);
 const terminal = (s: string) => Object.keys(MODEL[s]!).length === 0;
 
-// Every path of at most `depth` events. A path that reaches a terminal state gets
+// Every path of at most `depth` events. Two is the whole table: the machine's next state
+// depends on the current state and the event alone, so every (state, event) pair is the
+// second step of some path (each of the seven states is one event from SUBMITTED, or SUBMITTED
+// itself). Deeper paths repeat pairs already covered and only cost durable storage writes,
+// which are ~25 ms each on Windows runners and starve the other test files there. A path that reaches a terminal state gets
 // one more step (every event, all refused) and stops there: nothing after it can differ.
 function paths(depth: number, from = "SUBMITTED", prefix: TaskEvent[] = []): TaskEvent[][] {
   if (prefix.length === depth) return [prefix];
@@ -57,9 +63,21 @@ const fresh = async () => {
 };
 
 describe("the task state machine, over every event sequence", () => {
-  it("covers every path of up to three events, and each ends where the model says", async () => {
-    const all = paths(3);
-    expect(all.length).toBe(175);
+  it("the model here and the table in src/task.ts allow exactly the same edges, so drift in either fails", () => {
+    expect(Object.keys(MODEL).sort()).toEqual(Object.keys(NEXT).sort());
+    for (const [from, edges] of Object.entries(MODEL)) expect([...new Set(Object.values(edges))].sort(), from).toEqual([...NEXT[from as State]].sort());
+  });
+
+  it("covers every path of up to two events (every state with every event), and each ends where the model says", async () => {
+    const all = paths(2);
+    expect(all.length).toBe(PATHS);
+    // Every (state, event) pair of the model is the last step of some path.
+    const pairs = new Set<string>();
+    for (const p of all) {
+      let st = "SUBMITTED";
+      for (const ev of p) { pairs.add(`${st} ${ev}`); st = MODEL[st]![ev] ?? st; }
+    }
+    for (const st of Object.keys(MODEL)) for (const ev of EVENTS) expect(pairs.has(`${st} ${ev}`), `${st} ${ev} is exercised`).toBe(true);
     for (const path of all) {
       const s = await fresh();
       let st = "SUBMITTED";
@@ -82,7 +100,7 @@ describe("the task state machine, over every event sequence", () => {
       }
       expect(((await s.get("seq")) as TaskRecord).state, label).toBe(st);
     }
-  }, 300_000);
+  }, 120_000);
 
   it("a terminal state is final: no sequence of any party's events moves it", async () => {
     for (const end of ["COMPLETED", "FAILED", "REJECTED", "CANCELED"] as const) {
