@@ -1,0 +1,537 @@
+{
+  "name": "parley-test-r1-6d0c01",
+  "startedAt": "2026-11-02T23:04:16.234Z",
+  "plan": {},
+  "experiments": {
+    "limits": {
+      "results": [
+        {
+          "bytes": 1024,
+          "accepted": true,
+          "ms": 132
+        },
+        {
+          "bytes": 65536,
+          "accepted": true,
+          "ms": 253
+        },
+        {
+          "bytes": 524288,
+          "accepted": true,
+          "ms": 239
+        },
+        {
+          "bytes": 1048512,
+          "accepted": true,
+          "ms": 345
+        },
+        {
+          "bytes": 1048576,
+          "accepted": false,
+          "closeCode": 1009,
+          "ms": 334
+        },
+        {
+          "bytes": 1049600,
+          "accepted": false,
+          "closeCode": 1009,
+          "ms": 543
+        },
+        {
+          "bytes": 8388608,
+          "accepted": false,
+          "closeCode": 1009,
+          "ms": 5144
+        },
+        {
+          "bytes": 34603008,
+          "accepted": false,
+          "closeCode": 1009,
+          "ms": 3823
+        }
+      ],
+      "largestAccepted": 1048512,
+      "smallestRefused": 1048576
+    },
+    "hibernation": {
+      "ladder": [
+        {
+          "idle": 0,
+          "rtt": 26,
+          "boot": "8948885f-16fc-4c21-9ab7-c022604e56e6",
+          "boots": 1,
+          "ageMs": 80,
+          "woke": null
+        },
+        {
+          "idle": 2,
+          "rtt": 31,
+          "boot": "8948885f-16fc-4c21-9ab7-c022604e56e6",
+          "boots": 1,
+          "ageMs": 2113,
+          "woke": false,
+          "warmRtt": 28
+        },
+        {
+          "idle": 5,
+          "rtt": 36,
+          "boot": "8948885f-16fc-4c21-9ab7-c022604e56e6",
+          "boots": 1,
+          "ageMs": 7178,
+          "woke": false,
+          "warmRtt": 29
+        },
+        {
+          "idle": 8,
+          "rtt": 30,
+          "boot": "8948885f-16fc-4c21-9ab7-c022604e56e6",
+          "boots": 1,
+          "ageMs": 15240,
+          "woke": false,
+          "warmRtt": 27
+        },
+        {
+          "idle": 10,
+          "rtt": 36,
+          "boot": "96403e0e-e346-49c5-b048-172a6f06ba66",
+          "boots": 2,
+          "ageMs": 0,
+          "woke": true,
+          "warmRtt": 27
+        },
+        {
+          "idle": 12,
+          "rtt": 40,
+          "boot": "7c4b3c9c-1bfc-426a-bbe5-1adbd19d9325",
+          "boots": 3,
+          "ageMs": 0,
+          "woke": true,
+          "warmRtt": 26
+        },
+        {
+          "idle": 15,
+          "rtt": 39,
+          "boot": "5e9a8bdc-d725-476b-91ef-712944203053",
+          "boots": 4,
+          "ageMs": 0,
+          "woke": true,
+          "warmRtt": 33
+        },
+        {
+          "idle": 20,
+          "rtt": 364,
+          "boot": "d4fae119-0d77-4848-82de-35faef11da7c",
+          "boots": 5,
+          "ageMs": 0,
+          "woke": true,
+          "warmRtt": 102
+        },
+        {
+          "idle": 30,
+          "rtt": 36,
+          "boot": "a0846fd1-6845-4526-8a79-755ac6ef3f02",
+          "boots": 6,
+          "ageMs": 0,
+          "woke": true,
+          "warmRtt": 30
+        }
+      ],
+      "pings": {
+        "before": {
+          "rtt": 27,
+          "boot": "0eaa3f33-7ccd-4236-adf8-c2d5295dba57",
+          "boots": 1,
+          "ageMs": 76,
+          "woke": null
+        },
+        "after": {
+          "rtt": 38,
+          "boot": "63f81299-117c-4745-a166-c21b38206c74",
+          "boots": 2,
+          "ageMs": 0,
+          "woke": true
+        },
+        "pings": 20,
+        "bootsGained": 1
+      },
+      "longIdle": {
+        "quiet": {
+          "seconds": 600,
+          "heartbeat": false,
+          "survived": true,
+          "before": {
+            "rtt": 23,
+            "boot": "0b22ed74-c978-4ab5-aedb-31f4f6a77c84",
+            "boots": 1,
+            "ageMs": 82,
+            "woke": null
+          },
+          "after": {
+            "rtt": 89,
+            "boot": "445bcb3c-e68f-421c-bc1d-c3788a6f2af4",
+            "boots": 2,
+            "ageMs": 0,
+            "woke": true
+          }
+        },
+        "heartbeat": {
+          "seconds": 600,
+          "heartbeat": true,
+          "survived": true,
+          "before": {
+            "rtt": 22,
+            "boot": "b16d622e-41d3-40ed-a687-c29fbe222c09",
+            "boots": 1,
+            "ageMs": 71,
+            "woke": null
+          },
+          "after": {
+            "rtt": 175,
+            "boot": "4fdc3e95-9496-4b93-9a1c-e37c2588886d",
+            "boots": 2,
+            "ageMs": 0,
+            "woke": true
+          }
+        }
+      }
+    },
+    "deploy": {
+      "deployMs": 14241,
+      "idle": {
+        "closed": null,
+        "after": {
+          "rtt": 62,
+          "boot": "68be7a58-e861-45da-b041-7357faaf8d67",
+          "boots": 2,
+          "ageMs": 0,
+          "woke": true
+        }
+      },
+      "busy": {
+        "closed": null,
+        "framesSent": 87,
+        "after": {
+          "rtt": 21,
+          "boot": "cbc0d0f4-ce4e-4ff7-a9ef-ca6ea7f5f85c",
+          "boots": 2,
+          "ageMs": 17536,
+          "woke": true
+        }
+      }
+    },
+    "soak": {
+      "passed": false,
+      "goOutput": "--- FAIL: TestRealSoak (233.71s)\n    reality_test.go:324: only 17 connections for 20 forced reconnects\nFAIL\nFAIL\tgithub.com/kalahroudi/parley/internal/tunnel\t233.936s\nFAIL\n",
+      "detail": {
+        "actions": [
+          {
+            "kind": "close-1012",
+            "at_ms": 50,
+            "at_sent": 1852,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 676,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 1723,
+            "at_sent": 10000,
+            "closed": 2,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 2717,
+            "at_sent": 10000,
+            "closed": 3,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "deploy",
+            "at_ms": 4062,
+            "end_ms": 18826,
+            "at_sent": 10000,
+            "dropped_a_connection": false
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 79852,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 80741,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 81559,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 81919,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "deploy",
+            "at_ms": 82277,
+            "end_ms": 95508,
+            "at_sent": 10000,
+            "dropped_a_connection": false
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 156538,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 157030,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 157388,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 157748,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "deploy",
+            "at_ms": 158104,
+            "end_ms": 171003,
+            "at_sent": 10000,
+            "dropped_a_connection": false
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 232003,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 232390,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 232734,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 232980,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          },
+          {
+            "kind": "close-1012",
+            "at_ms": 233325,
+            "at_sent": 10000,
+            "closed": 1,
+            "dropped_a_connection": true
+          }
+        ],
+        "boots_after": 4,
+        "conn_log": [
+          {
+            "at_ms": 604,
+            "connected": true
+          },
+          {
+            "at_ms": 1017,
+            "connected": false
+          },
+          {
+            "at_ms": 1698,
+            "connected": true
+          },
+          {
+            "at_ms": 2013,
+            "connected": false
+          },
+          {
+            "at_ms": 2637,
+            "connected": true
+          },
+          {
+            "at_ms": 3154,
+            "connected": false
+          },
+          {
+            "at_ms": 3996,
+            "connected": true
+          },
+          {
+            "at_ms": 80028,
+            "connected": false
+          },
+          {
+            "at_ms": 80640,
+            "connected": true
+          },
+          {
+            "at_ms": 81154,
+            "connected": false
+          },
+          {
+            "at_ms": 81484,
+            "connected": true
+          },
+          {
+            "at_ms": 81615,
+            "connected": false
+          },
+          {
+            "at_ms": 81854,
+            "connected": true
+          },
+          {
+            "at_ms": 81972,
+            "connected": false
+          },
+          {
+            "at_ms": 82205,
+            "connected": true
+          },
+          {
+            "at_ms": 156726,
+            "connected": false
+          },
+          {
+            "at_ms": 156995,
+            "connected": true
+          },
+          {
+            "at_ms": 157083,
+            "connected": false
+          },
+          {
+            "at_ms": 157337,
+            "connected": true
+          },
+          {
+            "at_ms": 157443,
+            "connected": false
+          },
+          {
+            "at_ms": 157682,
+            "connected": true
+          },
+          {
+            "at_ms": 157801,
+            "connected": false
+          },
+          {
+            "at_ms": 158042,
+            "connected": true
+          },
+          {
+            "at_ms": 232084,
+            "connected": false
+          },
+          {
+            "at_ms": 232342,
+            "connected": true
+          },
+          {
+            "at_ms": 232433,
+            "connected": false
+          },
+          {
+            "at_ms": 232668,
+            "connected": true
+          },
+          {
+            "at_ms": 232775,
+            "connected": false
+          },
+          {
+            "at_ms": 232968,
+            "connected": true
+          },
+          {
+            "at_ms": 233019,
+            "connected": false
+          },
+          {
+            "at_ms": 233257,
+            "connected": true
+          },
+          {
+            "at_ms": 233368,
+            "connected": false
+          },
+          {
+            "at_ms": 233606,
+            "connected": true
+          },
+          {
+            "at_ms": 233673,
+            "connected": false
+          }
+        ],
+        "connections": 17,
+        "control_http_errors": 3,
+        "deploys": 3,
+        "elapsed_ms": 233713,
+        "events_duplicate_bodies_after_sender_retry": 0,
+        "events_duplicate_bodies_not_retried": 0,
+        "events_missing": 0,
+        "events_out_of_order_or_dup_seq": 0,
+        "events_retried": 0,
+        "forced": 20,
+        "gateway_rx_seq": 10000,
+        "push_calls": 104,
+        "sent": 10000,
+        "total": 10000,
+        "unacked_frames_at_end": 0
+      }
+    }
+  },
+  "stats": {
+    "wsMessages": 180,
+    "connections": 14,
+    "deploys": 2,
+    "httpRequests": 2
+  },
+  "versions": {},
+  "initialDeployMs": 11575,
+  "healthzReadyAfterMs": 3268,
+  "remainingAfterCleanup": [],
+  "finishedAt": "2026-11-02T23:19:34.401Z",
+  "failure": null
+}

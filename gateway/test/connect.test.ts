@@ -1052,14 +1052,20 @@ describe("the prekey relay", () => {
     const callers = [];
     for (let i = 0; i < 5; i++) {
       const c = await enr(x);
-      await lowerBudget(x.t, c.id, "2"); // the target's budget is 3 times this: 6
       callers.push({ c, D: await daemon(x, c) });
     }
+    // The override lives in the device object's memory, which is dropped when the object is evicted (a socket idle for
+    // seconds on a slow runner): so it is set right before each caller's sends, not once at the start. The target's budget is 3 times 2: 6.
+    const lower = (c: { id: string }) => lowerBudget(x.t, c.id, "2");
     // One caller floods: it passes 2, and the target has 4 left for everybody else.
+    await lower(callers[0]!.c);
     for (let i = 0; i < 10; i++) await callers[0]!.D.send(request(`a${i}`, t.id));
     expect(T.events()).toHaveLength(2);
     // Others are served up to what is left (4), then refused: the tradeoff of a per-target budget, bounded by it.
-    for (const [i, { D }] of callers.slice(1).entries()) for (let j = 0; j < 2; j++) await D.send(request(`b${i}${j}`, t.id));
+    for (const [i, { c, D }] of callers.slice(1).entries()) {
+      await lower(c);
+      for (let j = 0; j < 2; j++) await D.send(request(`b${i}${j}`, t.id));
+    }
     expect(T.events()).toHaveLength(6);
     expect(callers[4]!.D.events().filter((e) => e.reason === "rate_limited")).toHaveLength(2);
     expect(callers[4]!.D.events()[0]).toMatchObject({ from: t.id, retry_after_ms: expect.any(Number) });
@@ -1083,10 +1089,10 @@ describe("the prekey relay", () => {
     const callers = [];
     for (let i = 0; i < 4; i++) {
       const c = await enr(x);
-      await lowerBudget(x.t, c.id, "1"); // a target's budget would be 3: the fourth caller would be cut off
-      callers.push(await daemon(x, c));
+      callers.push({ c, D: await daemon(x, c) });
     }
-    for (const [i, D] of callers.entries()) {
+    for (const [i, { c, D }] of callers.entries()) {
+      await lowerBudget(x.t, c.id, "1"); // a target's budget would be 3: the fourth caller would be cut off; set just before use (see above: eviction drops it)
       await D.send(request(`j${i}`, "not-a-device"));
       expect(D.events()).toEqual([{ t: "prekey_refused", id: `j${i}`, from: "not-a-device", reason: "offline" }]);
       D.ws.close();

@@ -160,7 +160,8 @@ describe("device and tenant budgets", () => {
     expect(await lim(plain, t, "alice", "find")).not.toBeNull();
     for (let i = 0; i < 300; i++) expect(await lim({ ...plain, RATE_PREKEY_PER_MIN: undefined } as Env, t, "alice", "prekey")).toBeNull();
     expect(await lim({ ...plain, RATE_PREKEY_PER_MIN: undefined } as Env, t, "alice", "prekey")).not.toBeNull();
-  });
+  // ~1000 limiter calls, each a durable storage write (~25 ms on Windows runners): sized for that.
+  }, 180_000);
 
   it("fails closed when the limiter is unavailable", async () => {
     const broken = { ...env, RATE: { get: () => { throw new Error("down"); }, idFromName: () => ({}) } } as unknown as Env;

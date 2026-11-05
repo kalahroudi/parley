@@ -421,3 +421,57 @@ test("session logins: tenant and role live in the sealed flow, and the callback 
     assert.equal(who.session, undefined);
     assert.equal(seen.length, 0);
   }));
+
+// The `hd` parameter in the authorization request is only a hint to Google's account
+// chooser: the user can edit it away, and a personal account is never stopped by it. The
+// hosted-domain restriction is enforced on the `hd` claim of the verified id_token.
+test("google hosted domain: the hd request parameter is a hint, the verified token's hd claim decides", () =>
+  withIdp(async (idp) => {
+    const g = google({ clientId: "cid", issuer: idp.issuer, hostedDomain: "corp.test" });
+    const attempt = async (claims) => {
+      idp.tweak.claims = claims;
+      const r = await startLogin(ctx, g, REDIRECT, "alice@corp.test");
+      // The hint is always sent, and the mock IdP (like a personal account) ignores it.
+      assert.equal(new URL(r.url).searchParams.get("hd"), "corp.test");
+      return completeLogin(ctx, g, r.flow, await browse(r.url));
+    };
+    // An email on the right domain proves nothing without the claim: no hd claim, a personal account.
+    await rejects(attempt({ email: "alice@corp.test" }), "tenant_mismatch");
+    // Look-alikes, wrong case, wrong type and padding are all refused (exact match only).
+    for (const hd of ["corp.test.evil.test", "evil-corp.test", "CORP.TEST", "corp.test ", "", ["corp.test"], null]) {
+      await rejects(attempt({ hd }), "tenant_mismatch");
+    }
+    assert.equal((await attempt({ hd: "corp.test" })).provider, "google");
+  }));
+
+test("google hosted domain: a matching hd in a token whose signature fails is not trusted", () =>
+  withIdp(async (idp) => {
+    idp.tweak.claims = { hd: "corp.test" };
+    idp.tweak.badSignature = true;
+    const g = google({ clientId: "cid", issuer: idp.issuer, hostedDomain: "corp.test" });
+    const { url, flow } = await startLogin(ctx, g, REDIRECT);
+    await rejects(completeLogin(ctx, g, flow, await browse(url)), "bad_signature");
+  }));
+
+test("google hosted domain through the gateway: a refusal issues no identity and no cookie, a match does", () =>
+  withIdp(async (idp) => {
+    const env = { FLOW_SECRET: "s", GOOGLE_CLIENT_ID: "cid", GOOGLE_ISSUER: idp.issuer, GOOGLE_HOSTED_DOMAIN: "corp.test" };
+    const callback = async (claims) => {
+      idp.tweak.claims = claims;
+      const login = await handle(new Request("https://gw.test/auth/google/login"), env);
+      assert.equal(new URL(login.headers.get("location")).searchParams.get("hd"), "corp.test");
+      const q = await browse(login.headers.get("location"));
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      return handle(new Request(`https://gw.test/auth/google/callback?${q}`, { headers: { cookie } }), env);
+    };
+    const refused = await callback({}); // a personal account: no hd claim
+    assert.equal(refused.status, 401);
+    assert.deepEqual(await refused.json(), { error: "tenant_mismatch" }, "the refusal names a code and carries no identity");
+    assert.equal(refused.headers.get("set-cookie"), null, "no session or cookie is issued");
+    const wrong = await callback({ hd: "evil.test" });
+    assert.equal(wrong.status, 401);
+    assert.deepEqual(await wrong.json(), { error: "tenant_mismatch" });
+    const ok = await callback({ hd: "corp.test" });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).provider, "google");
+  }));
