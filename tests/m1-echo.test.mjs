@@ -11,15 +11,18 @@
 //     bot of the owner's other device never sees it.
 //  3. A device id the gateway does not know: the test fails at once.
 //  4. A daemon that is not running: the test says so.
+//  5. A device the root has revoked cannot be echoed to.
+//  6. The gateway's storage and log hold none of the plaintext (the canary scan), and both daemons shut down cleanly.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Scan } from "./canary/canary.mjs";
 import { registerRoot, signBinding, signRevocations, startGateway } from "./harness/gateway.mjs";
 
 const repo = join(fileURLToPath(import.meta.url), "..", "..");
@@ -55,6 +58,7 @@ function capture(child) {
 
 test("M1/T414: parley-cli test between two real daemons through the real gateway", opts, async (t) => {
   const bin = mkdtempSync(join(tmpdir(), "parley-bin-"));
+  const homes = [];
   const exe = (n) => join(bin, isWindows ? `${n}.exe` : n);
   for (const n of ["parley-cli", "parleyd"]) {
     const built = spawnSync("go", ["build", "-o", exe(n), `./cmd/${n}`], { cwd: repo, encoding: "utf8" });
@@ -81,6 +85,7 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
     // A pod enrolls with an admin-minted token; the admin (this test) approves it and posts its binding.
     const enroll = async (owner) => {
       const home = mkdtempSync(join(tmpdir(), "parley-home-"));
+      homes.push(home);
       const token = (await post(gw.url, "/v1/admin/enrollment-tokens", admin, { owner })).body.token;
       const run = cli(home, ["enroll", "-token", "-gateway", gw.url, "-tenant", "acme", "-root", fp, "-name", `pod-${owner}`, "-key-store", "file"], { PARLEY_ENROLL_TOKEN: token });
       const req = await waitFor("the enrollment request", async () => (await post(gw.url, "/v1/admin/enrollments", admin, {})).body.pending?.find((p) => p.owner === owner && !p.decided && !enrolled.has(p.id)));
@@ -103,6 +108,10 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
     const a = await enroll("svc-ci");
     const b = await enroll("svc-ci");
     const c = await enroll("svc-other");
+    const r = await enroll("svc-ci");
+    // The root revokes r before any daemon starts: every daemon's first revocation list names it.
+    const revoked = signRevocations(rootKey, { tenant: "acme", version: 2, revoked: [r.id] });
+    assert.equal((await post(gw.url, "/v1/admin/revocations", admin, { list: revoked })).status, 200);
 
     // 4. No daemon is running yet: the test says so, and does not hang.
     const down = await cli(a.home, ["test", "-to", b.id]).done;
@@ -132,14 +141,36 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
     assert.equal(unknown.code, 1, unknown.out);
     assert.match(unknown.out, /FAIL/);
 
+    // 5. A revoked device of the same owner is refused, and never echoes.
+    const gone = await cli(a.home, ["test", "-to", r.id, "-timeout", "30s"]).done;
+    assert.equal(gone.code, 1, gone.out);
+    assert.match(gone.out, /FAIL/);
+    assert.match(gone.out, /does not know that device/);
+    assert.doesNotMatch(gone.out, /PASS/);
+
     // Nothing the daemons log carries a task text or a key.
     for (const d of [da, db, dc]) assert.doesNotMatch(d.output(), /parley-test [0-9a-f]{32}|parley echo/);
+
+    // 6. Every task text starts "parley-test " and every answer "parley echo: ": neither may be anywhere the gateway
+    // keeps or says anything, in any encoding (a sealed message is random bytes; a plaintext leak is a hit).
+    const scan = new Scan({ task: "parley-test ", answer: "parley echo: " });
+    scan.path(gw.state);
+    scan.path(gw.log);
+    scan.bytes("the CLI output", pass.out); // control: the CLI itself does not print the text either
+    scan.assertClean();
+    const control = new Scan({ task: "parley-test " });
+    control.bytes("planted", "x parley-test y");
+    assert.equal(control.report().length, 1, "the scan can see the text it looks for");
   } finally {
+    // Clean shutdown: a daemon stops on SIGTERM within its own timeout (Windows has no such signal: it is killed).
+    const codes = [];
     for (const d of daemons) {
       d.child.kill("SIGTERM");
-      await Promise.race([d.done, sleep(5000)]);
+      codes.push(await Promise.race([d.done.then((r) => r.code), sleep(15000).then(() => "hung")]));
       d.child.kill("SIGKILL");
     }
     await gw.close();
+    for (const dir of [bin, ...homes, gw.state, gw.log]) rmSync(dir, { recursive: true, force: true });
+    if (!isWindows) assert.deepEqual(codes.filter((c) => c !== 0 && c !== null), [], "a daemon did not shut down cleanly");
   }
 });
