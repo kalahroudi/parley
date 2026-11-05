@@ -5,6 +5,8 @@ package bot
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,11 +15,13 @@ import (
 )
 
 // Defaults for Config: five running, five waiting (the plan's "queue 5 then
-// reject"), and the longest a bot may take.
+// reject"), the longest a bot may take, and how long a bot gets to return once
+// its context has ended before Host stops waiting for it.
 const (
 	DefaultMaxRunning = 5
 	DefaultMaxQueued  = 5
 	DefaultTimeout    = 15 * time.Minute
+	DefaultGrace      = 5 * time.Second
 	sendTimeout       = 30 * time.Second
 )
 
@@ -26,13 +30,15 @@ type Responder interface {
 	Respond(ctx context.Context, id [16]byte, typ envelope.Type, content []byte) error
 }
 
-// Config sets a Host's limits. Zero values take the defaults.
+// Config sets a Host's limits. Zero values take the defaults (MaxQueued: a
+// negative value means no queue).
 type Config struct {
 	Bot        Bot
 	Responder  Responder
 	MaxRunning int
 	MaxQueued  int
 	Timeout    time.Duration // longest a task may run, also bounded by its expiry
+	Grace      time.Duration // how long a bot may take to return after its context ended
 	Now        func() time.Time
 }
 
@@ -44,9 +50,10 @@ type Host struct {
 	sem  chan struct{}
 	wg   sync.WaitGroup
 
-	mu    sync.Mutex
-	tasks map[[16]byte]*run
-	live  int // running plus queued
+	mu     sync.Mutex
+	tasks  map[[16]byte]*run
+	live   int // running plus queued
+	closed bool
 }
 
 type run struct {
@@ -70,6 +77,9 @@ func NewHost(cfg Config) (*Host, error) {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
+	}
+	if cfg.Grace <= 0 {
+		cfg.Grace = DefaultGrace
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -112,7 +122,12 @@ func (h *Host) Inbound(in pipeline.Inbound) {
 
 func (h *Host) start(in pipeline.Inbound) {
 	h.mu.Lock()
-	if h.tasks[in.TaskID] != nil || h.live >= h.cfg.MaxRunning+h.cfg.MaxQueued || h.base.Err() != nil {
+	if h.tasks[in.TaskID] != nil {
+		// Already ours. An answer here would end the live task, so say nothing.
+		h.mu.Unlock()
+		return
+	}
+	if h.live >= h.cfg.MaxRunning+h.cfg.MaxQueued || h.closed {
 		h.mu.Unlock()
 		h.send(in.TaskID, envelope.TypeError, []byte(TextBusy))
 		return
@@ -141,29 +156,67 @@ func (h *Host) exec(ctx context.Context, r *run, t Task) {
 		h.mu.Unlock()
 		r.cancel()
 	}()
-	defer clear(t.Content)
 	select {
 	case h.sem <- struct{}{}:
-		defer func() { <-h.sem }()
 	case <-ctx.Done():
+		clear(t.Content)
 		h.finish(ctx, r, t.ID, nil, nil)
 		return
 	}
-	s := &session{h: h, id: t.ID, r: r}
-	res, err := h.call(ctx, t, s)
+	if ctx.Err() != nil { // both were ready: an ended task never reaches the bot
+		<-h.sem
+		clear(t.Content)
+		h.finish(ctx, r, t.ID, nil, nil)
+		return
+	}
+	s := &session{h: h, ctx: ctx, id: t.ID, r: r}
+	res, err, returned := h.call(ctx, t, s)
 	s.close()
-	clear(t.Content) // before the caller can see the final message
+	if returned { // otherwise the bot ignored its context and keeps its slot and buffer until it returns
+		<-h.sem
+		clear(t.Content) // before the caller can see the final message
+	}
 	h.finish(ctx, r, t.ID, res, err)
 }
 
-// call runs the bot and contains its panic: what it panicked with is dropped.
-func (h *Host) call(ctx context.Context, t Task, s Session) (res []byte, err error) {
-	defer func() {
-		if recover() != nil {
-			res, err = nil, &Failure{Message: TextFailed}
-		}
+// call runs the bot on its own goroutine and contains its panic or Goexit: what
+// it panicked with is dropped. When the context has ended and the bot has not
+// returned within Config.Grace, call stops waiting (returned is false) and the
+// slot and buffer are released by the goroutine that is still running the bot.
+func (h *Host) call(ctx context.Context, t Task, s Session) (res []byte, err error, returned bool) {
+	type outcome struct {
+		res []byte
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		o := outcome{err: &Failure{Message: TextFailed}} // what a panic or Goexit leaves
+		defer func() {
+			if recover() != nil {
+				o = outcome{err: &Failure{Message: TextFailed}}
+			}
+			done <- o
+		}()
+		o.res, o.err = h.cfg.Bot.Handle(ctx, t, s)
 	}()
-	return h.cfg.Bot.Handle(ctx, t, s)
+	select {
+	case o := <-done:
+		return o.res, o.err, true
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(h.cfg.Grace)
+	defer grace.Stop()
+	select {
+	case o := <-done:
+		return o.res, o.err, true
+	case <-grace.C:
+	}
+	go func() {
+		<-done
+		clear(t.Content)
+		<-h.sem
+	}()
+	return nil, nil, false
 }
 
 // finish sends the task's one final message.
@@ -171,23 +224,30 @@ func (h *Host) finish(ctx context.Context, r *run, id [16]byte, res []byte, err 
 	h.mu.Lock()
 	canceled := r.canceled
 	h.mu.Unlock()
+	var f *Failure
 	switch {
 	case canceled:
 		h.send(id, envelope.TypeCancel, nil)
 	case h.base.Err() != nil:
 		// Shutting down: the daemon is going away and the caller's task fails by expiry.
 	case err == nil && ctx.Err() == nil:
-		if h.send(id, envelope.TypeResult, res) != nil {
+		if len(res) > pipeline.MaxContent {
 			h.send(id, envelope.TypeError, []byte(TextTooLarge))
+		} else if h.send(id, envelope.TypeResult, res) != nil {
+			h.send(id, envelope.TypeError, []byte(TextFailed)) // a failed send leaves the task open: end it
 		}
 	case ctx.Err() == context.DeadlineExceeded:
 		h.send(id, envelope.TypeError, []byte(TextTimedOut))
 	default:
 		msg := TextFailed
-		if f, ok := err.(*Failure); ok && f.Message != "" {
+		if errors.As(err, &f) && f != nil && f.Message != "" {
 			msg = f.Message
 			if len(msg) > MaxFailure {
 				msg = msg[:MaxFailure]
+			}
+			msg = strings.ToValidUTF8(msg, "")
+			if msg == "" {
+				msg = TextFailed
 			}
 		}
 		h.send(id, envelope.TypeError, []byte(msg))
@@ -200,17 +260,22 @@ func (h *Host) send(id [16]byte, typ envelope.Type, content []byte) error {
 	return h.cfg.Responder.Respond(ctx, id, typ, content)
 }
 
-// Close cancels every task, waits for the bots to return and stops accepting
-// new ones. Tasks cut off this way send nothing: the caller's task expires.
+// Close cancels every task, waits for the bots to return (at most Config.Grace
+// for one that ignores its context) and stops accepting new ones. Tasks cut off
+// this way send nothing: the caller's task expires.
 func (h *Host) Close() {
+	h.mu.Lock()
+	h.closed = true
+	h.mu.Unlock()
 	h.stop()
 	h.wg.Wait()
 }
 
 type session struct {
-	h  *Host
-	id [16]byte
-	r  *run
+	h   *Host
+	ctx context.Context // the task's: ends on cancel, expiry, timeout and Close
+	id  [16]byte
+	r   *run
 
 	mu     sync.Mutex
 	closed bool
@@ -227,18 +292,27 @@ func (s *session) open() error {
 	return nil
 }
 
+// respond sends under a context that ends with the bot's, the task's or the
+// send timeout, whichever is first.
+func (s *session) respond(ctx context.Context, typ envelope.Type, content []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+	defer context.AfterFunc(s.ctx, cancel)()
+	return s.h.cfg.Responder.Respond(ctx, s.id, typ, content)
+}
+
 func (s *session) Status(ctx context.Context, text []byte) error {
 	if err := s.open(); err != nil {
 		return err
 	}
-	return s.h.cfg.Responder.Respond(ctx, s.id, envelope.TypeStatus, text)
+	return s.respond(ctx, envelope.TypeStatus, text)
 }
 
 func (s *session) Ask(ctx context.Context, question []byte) ([]byte, error) {
 	if err := s.open(); err != nil {
 		return nil, err
 	}
-	if err := s.h.cfg.Responder.Respond(ctx, s.id, envelope.TypeInputRequired, question); err != nil {
+	if err := s.respond(ctx, envelope.TypeInputRequired, question); err != nil {
 		return nil, err
 	}
 	select {
@@ -246,5 +320,7 @@ func (s *session) Ask(ctx context.Context, question []byte) ([]byte, error) {
 		return a, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	}
 }

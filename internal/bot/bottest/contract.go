@@ -5,6 +5,7 @@ package bottest
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -153,11 +154,35 @@ func Contract(t *testing.T, f Factory) {
 		r.task(4, "echo y") // capacity is free again
 		r.final(4, 1, envelope.TypeResult, "echo y")
 	})
-	t.Run("a repeated task id is not run twice", func(t *testing.T) {
+	t.Run("a repeated task id is not run twice and does not end the live task", func(t *testing.T) {
 		r := newRig(t, f, bot.Config{})
 		r.task(1, "block")
 		r.task(1, "echo again")
-		r.final(1, 1, envelope.TypeError, bot.TextBusy)
+		time.Sleep(50 * time.Millisecond)
+		if m := r.rec.Messages(id(1)); len(m) != 0 {
+			t.Fatalf("a repeat answered for the live task: %v", m)
+		}
+		r.h.Inbound(pipeline.Inbound{Type: envelope.TypeCancel, TaskID: id(1)})
+		r.final(1, 1, envelope.TypeCancel, "")
+	})
+	t.Run("no goroutines are left behind", func(t *testing.T) {
+		base := runtime.NumGoroutine()
+		for i := 0; i < 3; i++ {
+			r := newRig(t, f, bot.Config{})
+			r.task(1, "echo x")
+			r.final(1, 1, envelope.TypeResult, "echo x")
+			r.task(2, "block")
+			r.task(3, "ask q")
+			r.await(3, 1)
+			r.h.Close()
+		}
+		deadline := time.Now().Add(wait)
+		for runtime.NumGoroutine() > base && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if n := runtime.NumGoroutine(); n > base {
+			t.Fatalf("%d goroutines before, %d after", base, n)
+		}
 	})
 	t.Run("close cancels running bots and waits for them", func(t *testing.T) {
 		r := newRig(t, f, bot.Config{})
