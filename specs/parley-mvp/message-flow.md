@@ -1,6 +1,6 @@
-# Message pipeline (T412)
+# Message flow (T412)
 
-How a daemon moves a task in both directions, and what the gateway does for it. Code: `internal/pipeline` (wiring and the per-task chain), `internal/frames` (parsers of untrusted input), `internal/receive` (the at-most-once order), `gateway/src/device.ts` (the prekey relay). The guarantees are in [plan.md](plan.md); this file only records the wire formats and the decisions the code makes.
+How a daemon moves a task in both directions, and what the gateway does for it. Code: `internal/pipeline` (wiring and the per-task chain), `internal/frames` (parsers of untrusted input), `internal/receive` (the at-most-once order), `gateway/src/device.ts` (the prekey relay). The guarantees are in [plan.md](plan.md); the frame and payload formats are in [message-pipeline.md](message-pipeline.md); this file records the relay frames and the decisions the code makes.
 
 ## Prekey relay (tunnel frames)
 
