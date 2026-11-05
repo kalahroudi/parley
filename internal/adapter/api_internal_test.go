@@ -48,3 +48,24 @@ func TestAPIOverTLSVerifiesTheServer(t *testing.T) {
 		t.Fatalf("%q %v", res, err)
 	}
 }
+
+// The dial of a plain-http bot service is refused unless the resolved address is loopback.
+func TestLoopbackOnlyRefusesOtherAddresses(t *testing.T) {
+	for addr, ok := range map[string]bool{"127.0.0.1:80": true, "[::1]:80": true, "10.0.0.5:80": false, "[2001:db8::1]:80": false,
+		"localhost:80": false, "nonsense": false} {
+		if err := loopbackOnly("tcp", addr, nil); (err == nil) != ok {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+}
+
+func TestAPIRefusesANilContext(t *testing.T) {
+	a, err := NewAPI(APIConfig{URL: "https://example.com/bot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ctx context.Context // the request cannot be built without one
+	if _, err := a.Handle(ctx, bot.Task{}, nil); err == nil {
+		t.Fatal("no error")
+	}
+}

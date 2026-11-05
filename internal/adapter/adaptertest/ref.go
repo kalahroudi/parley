@@ -8,6 +8,7 @@
 package adaptertest
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -111,4 +112,36 @@ func Start(b bot.Bot, in InLine) *Conv {
 func WriteLine(w io.Writer, o OutLine) {
 	b, _ := json.Marshal(o)
 	w.Write(append(b, '\n'))
+}
+
+// ServeStdio runs b as a CLI bot: it reads the task line from in, writes the bot's lines to out and hands the
+// answer lines that follow to the bot. The task is canceled when in ends, as when the adapter closes the pipe. It
+// returns when the task is over; its reader goroutine ends when in does.
+func ServeStdio(b bot.Bot, in io.Reader, out io.Writer) {
+	r := bufio.NewReaderSize(in, 1<<20)
+	var first InLine
+	line, err := r.ReadBytes('\n')
+	if err != nil || json.Unmarshal(line, &first) != nil {
+		return
+	}
+	c := Start(b, first)
+	defer c.Cancel()
+	go func() {
+		for {
+			line, err := r.ReadBytes('\n')
+			var a InLine
+			if err != nil || json.Unmarshal(line, &a) != nil {
+				c.Cancel()
+				return
+			}
+			select {
+			case c.Answers <- a.Content:
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}()
+	for o := range c.Out {
+		WriteLine(out, o)
+	}
 }

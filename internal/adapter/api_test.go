@@ -95,17 +95,19 @@ func TestAPISendsTheTaskAndTheTokenToTheConfiguredURLOnly(t *testing.T) {
 }
 
 func TestAPIDoesNotFollowRedirects(t *testing.T) {
-	var hits atomic.Int32
-	target := serve(t, func(http.ResponseWriter, *http.Request) { hits.Add(1) })
-	redir := serve(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
-	})
-	_, err := api(t, redir.URL, "tok").Handle(context.Background(), task, &stub{})
-	if err == nil || !strings.Contains(err.Error(), "307") {
-		t.Fatalf("%v", err)
-	}
-	if hits.Load() != 0 {
-		t.Fatal("the redirect was followed")
+	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		var hits atomic.Int32
+		target := serve(t, func(http.ResponseWriter, *http.Request) { hits.Add(1) })
+		redir := serve(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL, code)
+		})
+		_, err := api(t, redir.URL, "tok").Handle(context.Background(), task, &stub{})
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprint(code)) {
+			t.Fatalf("%d: %v", code, err)
+		}
+		if hits.Load() != 0 {
+			t.Fatalf("%d: the redirect was followed", code)
+		}
 	}
 }
 
@@ -232,4 +234,16 @@ func TestAPIDeadlineEndsAStalledService(t *testing.T) {
 	if _, err := api(t, srv.URL, "").Handle(ctx, task, &stub{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("%v", err)
 	}
+}
+
+// A service that answers before it has read the task (an 8 MB one) leaves the transport writing it. The adapter's
+// scrub waits for the transport to let go of the line, so it never clears a buffer that is still being sent.
+func TestAPIServiceThatAnswersWithoutReadingTheTask(t *testing.T) {
+	srv := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"type":"result","content":"b2s="}`+"\n")
+	})
+	big := task
+	big.Content = make([]byte, 8<<20)
+	// Either the response wins or the transport reports the broken write; what matters is that nothing races or hangs.
+	_, _ = api(t, srv.URL, "").Handle(context.Background(), big, &stub{})
 }

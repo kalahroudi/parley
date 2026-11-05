@@ -5,6 +5,7 @@ package adaptertest_test
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -84,4 +85,24 @@ func TestWriteLine(t *testing.T) {
 	if !strings.HasSuffix(b.String(), "\n") || !strings.Contains(b.String(), `"message":"m"`) {
 		t.Fatal(b.String())
 	}
+}
+
+// ServeStdio plays the line protocol over pipes: a question gets the answer line that follows the task, and the end of
+// the input cancels a task that is still running.
+func TestServeStdio(t *testing.T) {
+	var out bytes.Buffer
+	pr, pw := io.Pipe() // stays open until the task is over, as the adapter's pipe does
+	defer pw.Close()
+	go pw.Write([]byte(`{"type":"task","id":"` + id + `","content":"YXNrIHE="}` + "\n" + `{"type":"answer","id":"` + id + `","turn":1,"content":"Ymx1ZQ=="}` + "\n"))
+	adaptertest.ServeStdio(&bottest.Fake{}, pr, &out)
+	want := `{"type":"question","content":"cQ=="}` + "\n" + `{"type":"result","content":"YW5zd2VyOiBibHVl"}` + "\n"
+	if out.String() != want {
+		t.Fatalf("%q", out.String())
+	}
+	out.Reset()
+	adaptertest.ServeStdio(&bottest.Fake{}, strings.NewReader(`{"type":"task","id":"`+id+`","content":"YmxvY2s="}`+"\n"), &out)
+	if out.Len() != 0 {
+		t.Fatalf("a canceled task wrote %q", out.String())
+	}
+	adaptertest.ServeStdio(&bottest.Fake{}, strings.NewReader("garbage\n"), &out)
 }

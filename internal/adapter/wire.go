@@ -5,6 +5,7 @@ package adapter
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -111,8 +112,11 @@ func readMessage(r *bufio.Reader) (message, error) {
 			break
 		}
 	}
+	// Strict: unknown fields, trailing data and a second value are protocol errors, not ignored input.
 	var m message
-	if json.Unmarshal(line, &m) != nil {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&m) != nil || dec.More() {
 		return message{}, errProtocol
 	}
 	switch m.Type {

@@ -94,3 +94,16 @@ func TestEncodedLinesScrub(t *testing.T) {
 		t.Fatal("answer turn")
 	}
 }
+
+func TestReadMessageIsStrict(t *testing.T) {
+	for name, line := range map[string]string{
+		"unknown field":    `{"type":"result","content":"b2s=","tool":"rm"}`,
+		"second value":     `{"type":"result"} {"type":"result"}`,
+		"trailing text":    `{"type":"result"} x`,
+		"wrong field type": `{"type":"error","message":5}`,
+	} {
+		if _, err := readMessage(bufio.NewReader(strings.NewReader(line + "\n"))); err != errProtocol {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

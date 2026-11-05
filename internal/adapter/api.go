@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kalahroudi/parley/internal/bot"
@@ -59,8 +61,13 @@ func NewAPI(cfg APIConfig) (*API, error) {
 	default:
 		return nil, ErrAPIConfig
 	}
+	var dialer net.Dialer
+	if u.Scheme == "http" {
+		dialer.Control = loopbackOnly // the name "localhost" must not lead anywhere else, whatever resolves it
+	}
 	return &API{url: u.String(), token: cfg.Token, client: &http.Client{
 		Transport: &http.Transport{
+			DialContext:        dialer.DialContext,
 			Proxy:              nil, // the plaintext task must not detour through an environment proxy
 			TLSClientConfig:    &tls.Config{MinVersion: tls.VersionTLS12},
 			DisableCompression: true,
@@ -70,6 +77,15 @@ func NewAPI(cfg APIConfig) (*API, error) {
 		// A redirect would send the task, and the token, somewhere else: the 3xx is the answer, and it fails.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}, nil
+}
+
+// loopbackOnly refuses a connection to an address that is not loopback; it runs after name resolution.
+func loopbackOnly(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+		return ErrAPIConfig
+	}
+	return nil
 }
 
 func loopback(host string) bool {
@@ -84,9 +100,7 @@ func loopback(host string) bool {
 func (a *API) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, error) {
 	p := &apiPeer{a: a, id: t.ID}
 	defer p.close()
-	line := taskLine(t)
-	p.scrub = append(p.scrub, line)
-	if err := p.post(ctx, line); err != nil {
+	if err := p.post(ctx, taskLine(t)); err != nil {
 		return nil, err
 	}
 	return converse(ctx, p, s)
@@ -98,7 +112,33 @@ type apiPeer struct {
 	body  io.Closer
 	r     *bufio.Reader
 	final bool // the bot sent its result or error
-	scrub [][]byte
+	scrub []*sent
+}
+
+// sent is a request body that reports when the transport is done with it. The transport may still be writing a body
+// after the response (a service that answers without reading) and Close is its signal that it is not: the line is
+// cleared only after that, never under a write in progress.
+type sent struct {
+	*bytes.Reader
+	line []byte
+	done chan struct{}
+	once sync.Once
+}
+
+func newSent(line []byte) *sent {
+	return &sent{Reader: bytes.NewReader(line), line: line, done: make(chan struct{})}
+}
+
+func (s *sent) Close() error { s.once.Do(func() { close(s.done) }); return nil }
+
+// scrubbed clears the line once the transport has let go of it, or leaves it if the transport has not within the
+// time a cancel notice is given (clearing it then could corrupt a send in progress).
+func (s *sent) scrubbed() {
+	select {
+	case <-s.done:
+		clear(s.line)
+	case <-time.After(cancelTimeout):
+	}
 }
 
 func (p *apiPeer) post(ctx context.Context, line []byte) error {
@@ -106,10 +146,13 @@ func (p *apiPeer) post(ctx context.Context, line []byte) error {
 		p.body.Close()
 		p.body = nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.a.url, bytes.NewReader(line))
+	body := newSent(line)
+	p.scrub = append(p.scrub, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.a.url, body)
 	if err != nil {
 		return err
 	}
+	req.ContentLength = int64(len(line)) // known, not chunked: a body of unknown length is not what a service expects
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	if p.a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.a.token)
@@ -138,9 +181,7 @@ func (p *apiPeer) next() (message, error) {
 }
 
 func (p *apiPeer) answer(ctx context.Context, turn int, content []byte) error {
-	line := answerLine(p.id, turn, content)
-	p.scrub = append(p.scrub, line)
-	return p.post(ctx, line)
+	return p.post(ctx, answerLine(p.id, turn, content))
 }
 
 // close ends the exchange. A task that ended without the bot's final message
@@ -153,13 +194,11 @@ func (p *apiPeer) close() {
 	if !p.final && p.r != nil { // nothing was started if the service never answered
 		ctx, cancel := context.WithTimeout(context.Background(), cancelTimeout)
 		defer cancel()
-		line := cancelLine(p.id)
-		p.scrub = append(p.scrub, line)
-		if p.post(ctx, line) == nil {
+		if p.post(ctx, cancelLine(p.id)) == nil {
 			p.body.Close()
 		}
 	}
-	for _, l := range p.scrub {
-		clear(l)
+	for _, b := range p.scrub {
+		b.scrubbed()
 	}
 }

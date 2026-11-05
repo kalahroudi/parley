@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package adapter connects the daemon to the bot a customer brings. Adapters
-// implement bot.Bot. This change has the API adapter (the bot is an HTTP
-// service; each task is a POST to one configured URL); the CLI and ACP adapters
-// come as separate changes and speak the same line protocol.
+// implement bot.Bot. There are two: the API adapter (the bot is an HTTP service;
+// each task is a POST to one configured URL) and the CLI adapter (the bot is a
+// program run once per task). The ACP adapter comes as a separate change and
+// speaks the same line protocol.
 //
 // Host (package bot) owns everything the daemon promises about a task: limits,
 // the one final message, timeouts, redaction of errors. The adapters only
@@ -15,8 +16,23 @@
 //     at most MaxStatuses status messages and MaxQuestions questions per task);
 //   - nothing the bot or its transport says becomes the caller's error text
 //     unless the bot sent it as an explicit error message (and Host cuts that);
-//   - the API adapter follows no redirect, uses no proxy and sends its bearer
-//     token only to the configured URL.
+//   - the API adapter follows no redirect, uses no proxy, sends its bearer
+//     token only to the configured URL and, for plain http, dials only a
+//     loopback address (checked after name resolution);
+//   - the CLI adapter runs an absolute path directly (no shell, no PATH lookup),
+//     puts nothing from a task on its command line or in its environment (which
+//     is only what the configuration lists, never the daemon's), discards its
+//     standard error, and kills and reaps it, with everything it started (a
+//     process group on Unix, a job object on Windows), when the task ends for
+//     any reason, the final message included;
+//   - lines are parsed strictly: unknown fields, a second value or trailing text
+//     are protocol errors.
+//
+// Everything in a task line is data from a remote caller (content, context, and
+// the caller and owner names from its binding): a bot that gives it to a model
+// must treat it as untrusted data and never as instructions or tool calls. The
+// adapters pass it as JSON string and base64 fields only, never mixed into text
+// that a bot would read as its own instructions.
 //
 // # Line protocol "parley-bot/1"
 //
@@ -43,7 +59,13 @@
 // status fails the task. Canceling a task closes the connection; if no request
 // is open the adapter sends the cancel line.
 //
+// CLI: the task line, then each answer line, go to the program's standard input;
+// its standard output carries the bot's lines. There is no cancel line: the end
+// of the task is the end of the process.
+//
 // What this package cannot do: the bot receives the plaintext and keeps what it
 // likes; it is outside Parley's guarantees. Scrubbing of the buffers this
-// package builds is best effort (Go gives no guarantee).
+// package builds is best effort (Go gives no guarantee). On Windows a
+// grandchild started in the instant between the start of the command and its
+// assignment to the job object is not contained.
 package adapter
