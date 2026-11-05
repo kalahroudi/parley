@@ -650,6 +650,42 @@ describe("retention", () => {
     expect(await s.drain(T, "alice")).toEqual([]);
   });
 
+  it("the earliest of the events still held is the record's deadline after others are deleted", async () => {
+    const s = stub();
+    await s.create({ tenant: T, id: "abc", caller: "alice", target: "bob", retention: "queued", ttl_ms: TASK_TTL_MAX_MS });
+    const t0 = Date.now();
+    await hold(s, "short", QUEUE_TTL_MIN_MS);
+    await hold(s, "long", 2 * HOUR);
+    await hold(s, "mid", HOUR);
+    vi.setSystemTime(t0 + QUEUE_TTL_MIN_MS);
+    await deliverAlarm(s);
+    expect(await heldKeys(s)).toEqual(["q:000000000002", "q:000000000003"]);
+    expect((await rec(s)).queue_until).toBe(t0 + HOUR);
+  });
+
+  it("a task that holds nothing never records a deletion, when read or when canceled", async () => {
+    const s = await queued();
+    expect(await s.drain(T, "alice")).toEqual([]);
+    expect((await rec(s)).ciphertext_deleted_at).toBeUndefined();
+    await s.apply(T, "alice", "CANCEL", 1);
+    expect((await rec(s)).ciphertext_deleted_at).toBeUndefined();
+  });
+
+  it("canceling deletes only the held events, never the task record or anything else", async () => {
+    const s = await queued();
+    await hold(s, "one");
+    const deleted: string[] = [];
+    await runInDurableObject(s, (_, ctx) => {
+      const del = ctx.storage.delete.bind(ctx.storage) as (k: string | string[]) => Promise<unknown>;
+      (ctx.storage as unknown as { delete: unknown }).delete = (k: string | string[]) => {
+        deleted.push(...[k].flat());
+        return del(k);
+      };
+    });
+    await s.apply(T, "alice", "CANCEL", 1);
+    expect(deleted).toEqual(["q:000000000001"]);
+  });
+
   it("canceling the task deletes every held event at once", async () => {
     const s = await queued();
     await hold(s, "one");

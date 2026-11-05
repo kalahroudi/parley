@@ -228,10 +228,10 @@ export class Task extends DurableObject<Env> {
 
   // Deletes the held events that are due, plus those in `drop`, and keeps the
   // record's facts about what is held true. Returns what is still held.
-  private async settle(rec: TaskRecord, drop: readonly string[] = []): Promise<[string, Queued][]> {
+  private async settle(rec: TaskRecord, drop?: readonly string[]): Promise<[string, Queued][]> {
     const now = Date.now();
     const all = [...(await this.ctx.storage.list<Queued>({ prefix: QP }))];
-    const dead = all.filter(([k, e]) => e.exp <= now || drop.includes(k)).map(([k]) => k);
+    const dead = all.filter(([k, e]) => e.exp <= now || drop?.includes(k)).map(([k]) => k);
     if (!dead.length) return all;
     const live = all.filter(([k]) => !dead.includes(k));
     if (live.length) rec.queue_until = Math.min(...live.map(([, e]) => e.exp));

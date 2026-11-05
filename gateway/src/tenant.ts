@@ -619,6 +619,22 @@ export class Tenant extends DurableObject<Env> {
     return c && owner && canSee(c, owner, viewer, await this.viewerGroups(viewer)) ? { ...c, owner } : null;
   }
 
+  // May `caller` relay a prekey frame to `target`? Both must be enrolled (approved, bound, not revoked) now, which
+  // is rechecked per frame because a socket outlives a revocation. A request also needs one of the target's cards
+  // visible to the caller when it has cards (hidden and not-permitted are the same answer as unknown, like
+  // resolve); a device that published none says nothing the directory could hide, so only enrollment counts.
+  // Advisory: the target daemon still decides, and the gateway grants nothing.
+  async mayRelay(caller: string, target: string, request: boolean): Promise<boolean> {
+    const viewer = await this.ownerOf(caller);
+    const owner = viewer && (await this.ownerOf(target));
+    if (!viewer || !owner) return false;
+    if (!request) return true;
+    const cards = await this.ctx.storage.list<DirectoryEntry>({ prefix: `card:${target}:`, limit: MAX_CARDS_PER_DEVICE });
+    if (cards.size === 0) return true;
+    const groups = await this.viewerGroups(viewer);
+    return [...cards.values()].some((c) => canSee(c, owner, viewer, groups));
+  }
+
   // Groups are managed by the admin; membership is by identity (email or named
   // service owner). Names are plaintext metadata. Each edit is one atomic commit.
   async putGroup(name: unknown, members: unknown): Promise<{ name: string; members: string[] } | { error: DirectoryError }> {
