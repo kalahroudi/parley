@@ -364,3 +364,21 @@ func TestLimitsOfThePostHelperAreExact(t *testing.T) {
 		}
 	}
 }
+
+func TestJitterStaysWithinAQuarterAndVaries(t *testing.T) {
+	d := 8 * time.Second
+	seen := map[time.Duration]bool{}
+	for range 2000 {
+		j := jitter(d)
+		if j < 6*time.Second || j > 10*time.Second {
+			t.Fatalf("jitter(%v) = %v, outside 6s..10s", d, j)
+		}
+		seen[j] = true
+	}
+	if len(seen) < 100 {
+		t.Errorf("only %d distinct values: no jitter", len(seen))
+	}
+	if j := jitter(time.Nanosecond); j < 0 || j > 2 {
+		t.Errorf("tiny interval: %v", j)
+	}
+}

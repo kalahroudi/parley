@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/root"
@@ -21,7 +22,7 @@ var version = "dev"
 
 //cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := execute(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.UserConfigDir, os.Getenv, defaultTools())
 	stop()
 	os.Exit(code)

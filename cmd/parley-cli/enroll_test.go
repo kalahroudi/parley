@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -154,13 +155,19 @@ func TestErrorsAreReportedForTheOperator(t *testing.T) {
 		err  error
 		want string
 	}{
-		"interrupted": {context.Canceled, "interrupted: run parley-cli enroll"},
+		"interrupted": {context.Canceled, "interrupted: run parley-cli %s"},
 		"anything":    {errors.New("boom"), "error: boom"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newCLI(t)
 			c.enrollErr, c.loginErr = tc.err, tc.err
 			for _, args := range [][]string{{"enroll", "-tenant", "a", "-root", "x"}, {"login", "-tenant", "a"}} {
+				c = newCLI(t)
+				c.enrollErr, c.loginErr = tc.err, tc.err
+				tc := tc
+				if strings.Contains(tc.want, "%s") {
+					tc.want = fmt.Sprintf(tc.want, args[0])
+				}
 				if code := c.run(args...); code != 1 || !strings.Contains(c.errw.String(), tc.want) || strings.Contains(c.out.String(), "Enrolled") || strings.Contains(c.out.String(), "Signed in") {
 					t.Errorf("%v: %d %q", args, code, c.errw.String())
 				}

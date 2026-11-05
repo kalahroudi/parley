@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -145,7 +146,7 @@ func Login(ctx context.Context, o LoginOptions) error {
 			o.Log.Info("signed in", logx.ID("tenant", o.Tenant))
 			return nil
 		}
-		if err := wait(ctx, poll); err != nil {
+		if err := wait(ctx, jitter(poll)); err != nil {
 			if timedOut(err) {
 				return ErrLoginExpired
 			}
@@ -189,6 +190,12 @@ func post(ctx context.Context, hc *http.Client, base, path string, in, out any) 
 
 // nextPoll backs the poll interval off by half each time, up to maxLoginPoll.
 func nextPoll(d time.Duration) time.Duration { return min(d+d/2, maxLoginPoll) }
+
+// jitter spreads d by up to a quarter either way, so clients that started together do not poll in step.
+// It is not secret material, so the unseeded math/rand generator is the right one.
+func jitter(d time.Duration) time.Duration {
+	return d - d/4 + time.Duration(mrand.Int64N(int64(d/2)+1))
+}
 
 // wait sleeps for d or until ctx ends.
 func wait(ctx context.Context, d time.Duration) error {

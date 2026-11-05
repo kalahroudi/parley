@@ -75,7 +75,7 @@ func login(ctx context.Context, args []string, out, errw io.Writer, dirs daemon.
 		Log: logx.New(errw), Progress: func(s string) { fmt.Fprintln(out, s) },
 	})
 	if err != nil {
-		return report(errw, err)
+		return report(errw, "login", err)
 	}
 	fmt.Fprintln(out, "Signed in. Next: parley-cli enroll -tenant", *tenant, "-root <fingerprint from your admin>")
 	return 0
@@ -116,7 +116,7 @@ func enrollCmd(ctx context.Context, args []string, in io.Reader, out, errw io.Wr
 	}
 	res, err := t.enroll(ctx, o)
 	if err != nil {
-		return report(errw, err)
+		return report(errw, "enroll", err)
 	}
 	fmt.Fprintf(out, "Enrolled as device %s in tenant %s. Start parleyd to bring this device online.\n", res.Config.DeviceID, res.Config.Tenant)
 	if len(res.Replaced) > 0 {
@@ -126,10 +126,14 @@ func enrollCmd(ctx context.Context, args []string, in io.Reader, out, errw io.Wr
 }
 
 // report prints an error for the operator: the cause, and what to do where there is a standard next step.
-func report(errw io.Writer, err error) int {
+func report(errw io.Writer, cmd string, err error) int {
 	switch {
 	case errors.Is(err, context.Canceled):
-		fmt.Fprintln(errw, "interrupted: run parley-cli enroll to continue where this stopped")
+		if cmd == "login" {
+			fmt.Fprintln(errw, "interrupted: run parley-cli login again to sign in")
+		} else {
+			fmt.Fprintln(errw, "interrupted: run parley-cli enroll to continue where this stopped")
+		}
 	default:
 		fmt.Fprintln(errw, "error:", err)
 	}
