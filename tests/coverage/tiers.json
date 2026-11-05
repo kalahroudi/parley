@@ -6,11 +6,11 @@
     },
     "2": {
       "line": 95,
-      "packages": ["internal/daemon", "internal/root", "internal/trust", "internal/tunnel", "internal/release"]
+      "packages": ["internal/daemon", "internal/bot", "internal/root", "internal/trust", "internal/tunnel", "internal/release"]
     },
     "3": {
       "line": 85,
-      "packages": ["cmd/parley-cli", "cmd/parley-release", "cmd/parleyd", "scripts/covergate"]
+      "packages": ["cmd/parley-cli", "cmd/parley-release", "cmd/parleyd", "scripts/covergate", "internal/bot/bottest"]
     }
   }
 }
