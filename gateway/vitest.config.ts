@@ -44,6 +44,8 @@ export default defineConfig({
         "src/ratelimit.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         // Tier 1 for device authentication (challenge, token, and what each connection must present).
         "src/connect.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        // Tier 1 for the device sign-in confirmation (the page that shows the code, and the form that confirms it).
+        "src/login.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },
     },
   },

@@ -211,7 +211,7 @@ export class Tenant extends DurableObject<Env> {
   async loginStart(sessionHash: string, pollHash: string): Promise<{ id: string; code: string; expires_at: number } | { error: "bad_request" | "too_many" }> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const hex64 = /^[0-9a-f]{64}$/;
-      if (!hex64.test(sessionHash) || !hex64.test(pollHash)) return { error: "bad_request" as const };
+      if (typeof sessionHash !== "string" || typeof pollHash !== "string" || !hex64.test(sessionHash) || !hex64.test(pollHash)) return { error: "bad_request" as const };
       const now = Date.now();
       const live = [...(await this.ctx.storage.list<StoredLogin>({ prefix: "lgn:" })).values()].filter((l) => l.exp > now);
       if (live.length >= MAX_PENDING_LOGINS) return { error: "too_many" as const };
