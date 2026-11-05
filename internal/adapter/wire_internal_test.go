@@ -6,6 +6,7 @@ package adapter
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -105,5 +106,64 @@ func TestReadMessageIsStrict(t *testing.T) {
 		if _, err := readMessage(bufio.NewReader(strings.NewReader(line + "\n"))); err != errProtocol {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// scripted is a peer that says what a test lists, then ends the stream, with no network and no clock.
+type scripted struct {
+	say      []message
+	answered []int
+}
+
+func (p *scripted) next() (message, error) {
+	if len(p.say) == 0 {
+		return message{}, io.EOF
+	}
+	m := p.say[0]
+	p.say = p.say[1:]
+	return m, nil
+}
+
+func (p *scripted) answer(_ context.Context, turn int, _ []byte) error {
+	p.answered = append(p.answered, turn)
+	return nil
+}
+
+type counting struct{ statuses, asked int }
+
+func (c *counting) Status(context.Context, []byte) error { c.statuses++; return nil }
+func (c *counting) Ask(context.Context, []byte) ([]byte, error) {
+	c.asked++
+	return []byte("a"), nil
+}
+
+// A bot that asks forever is served exactly MaxQuestions times, numbered from 1, and then fails: not one more, not one
+// fewer. Likewise for status messages.
+func TestConverseBoundsQuestionsAndStatuses(t *testing.T) {
+	repeat := func(typ string, n int) []message {
+		out := make([]message, n)
+		for i := range out {
+			out[i] = message{Type: typ}
+		}
+		return out
+	}
+	p, s := &scripted{say: repeat(typeQuestion, MaxQuestions+5)}, &counting{}
+	if _, err := converse(context.Background(), p, s); err != errProtocol {
+		t.Fatalf("%v", err)
+	}
+	if s.asked != MaxQuestions || len(p.answered) != MaxQuestions || p.answered[0] != 1 || p.answered[MaxQuestions-1] != MaxQuestions {
+		t.Fatalf("asked %d, answered %v", s.asked, p.answered)
+	}
+	p, s = &scripted{say: repeat(typeQuestion, MaxQuestions)}, &counting{}
+	if _, err := converse(context.Background(), p, s); err != io.EOF || s.asked != MaxQuestions {
+		t.Fatalf("exactly the limit is allowed: %v, asked %d", err, s.asked)
+	}
+	p, s = &scripted{say: repeat(typeStatus, MaxStatuses+5)}, &counting{}
+	if _, err := converse(context.Background(), p, s); err != errProtocol || s.statuses != MaxStatuses {
+		t.Fatalf("%v, %d statuses", err, s.statuses)
+	}
+	p, s = &scripted{say: repeat(typeStatus, MaxStatuses)}, &counting{}
+	if _, err := converse(context.Background(), p, s); err != io.EOF || s.statuses != MaxStatuses {
+		t.Fatalf("exactly the limit is allowed: %v, %d statuses", err, s.statuses)
 	}
 }

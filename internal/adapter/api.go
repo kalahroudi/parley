@@ -162,7 +162,13 @@ func (p *apiPeer) post(ctx context.Context, line []byte) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("adapter: the bot service is unreachable") // the transport's text names the URL: keep it out
+		// The transport's text names the URL: keep it out. The operating system's own reason (refused, reset, ...) names
+		// nothing and is what tells an operator which it was.
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			return fmt.Errorf("adapter: the bot service is unreachable (%v)", errno)
+		}
+		return errors.New("adapter: the bot service is unreachable")
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()

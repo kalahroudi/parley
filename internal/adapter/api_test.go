@@ -155,19 +155,6 @@ func TestAPIHostileStreams(t *testing.T) {
 	}
 }
 
-func TestAPIQuestionFlood(t *testing.T) {
-	srv := serve(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"type":"question","content":"cQ=="}`+"\n")
-	})
-	s := &stub{answer: "a"}
-	if _, err := api(t, srv.URL, "").Handle(context.Background(), task, s); err == nil {
-		t.Fatal("a bot that asks forever was served")
-	}
-	if len(s.asked) != adapter.MaxQuestions {
-		t.Fatalf("%d questions put to the caller", len(s.asked))
-	}
-}
-
 func TestAPISessionFailuresEndTheTask(t *testing.T) {
 	srv := serve(t, func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"type":"status","content":"aGk="}`+"\n"+`{"type":"question","content":"cQ=="}`+"\n")
