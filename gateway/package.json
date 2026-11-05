@@ -7,7 +7,7 @@
   "description": "Parley gateway Worker (A2A transport, Durable Objects, admin API)",
   "scripts": {
     "test": "vitest run --exclude test/soak.test.ts",
-    "test:oidc-coverage": "node --test --experimental-test-coverage --test-coverage-include=src/oidc.ts --test-coverage-include=src/auth.ts --test-coverage-lines=95 --test-coverage-branches=90 --test-coverage-functions=95 ../tests/gateway-oidc.test.mjs",
+    "test:oidc-coverage": "node --test --experimental-test-coverage --test-coverage-include=src/oidc.ts --test-coverage-include=src/auth.ts --test-coverage-lines=95 --test-coverage-branches=90 --test-coverage-functions=95 ../tests/gateway-oidc.test.mjs ../tests/gateway-entra.test.mjs",
     "test:coverage": "vitest run --exclude test/soak.test.ts --coverage",
     "test:mutation": "stryker run",
     "test:soak": "vitest run test/soak.test.ts",

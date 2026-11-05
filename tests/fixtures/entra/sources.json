@@ -1,0 +1,21 @@
+{
+  "note": "Where each Entra fixture and simulator behaviour comes from. Retrieved 2026-11-05. Microsoft's pages are the reference; nothing here was captured from a live tenant (no free Entra tenant is available), so real-tenant quirks stay unverified (see T109).",
+  "sources": [
+    {
+      "id": "id-token-claims",
+      "url": "https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference",
+      "used_for": ["claims.json: claim names and formats (aud, iss, iat, nbf, exp, name, oid, preferred_username, sub, tid, uti, rh, ver, email)", "preferred_username and email are mutable and must not be used for authorization", "sub is pairwise per application id; oid is the same across applications", "iss carries the tenant GUID and ends in /v2.0; the personal-account tenant is 9188040d-6c67-4c5b-b112-36a304b66dad", "the groups overage pointer: _claim_names.groups = src1 and _claim_sources.src1.endpoint"]
+    },
+    {
+      "id": "discovery-common",
+      "url": "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+      "used_for": ["discovery.json: key set and endpoint paths (oauth2/v2.0/authorize, oauth2/v2.0/token, discovery/v2.0/keys)", "the multi-tenant document's issuer is the literal template https://login.microsoftonline.com/{tenantid}/v2.0", "subject_types_supported is pairwise; ID tokens are RS256"]
+    },
+    {
+      "id": "aadsts-errors",
+      "url": "https://learn.microsoft.com/en-us/entra/identity-platform/reference-error-codes",
+      "used_for": ["AADSTS54005: authorization code already redeemed (replayed code)", "AADSTS90002: tenant not found (unknown tenant in the path)"]
+    }
+  ],
+  "not_from_microsoft": ["claim values (names, ids, email addresses) are made up", "the claim-overage endpoint host is the Graph URL from the claims reference; the gateway must never fetch it"]
+}

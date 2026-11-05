@@ -1,0 +1,38 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Entra cross-check
+
+# Optional (T111): the gateway's Entra login scenarios against node-oidc-provider, an OIDC server written
+# independently of this repository. Deliberately outside ci.yml, so a flaky registry or an upstream release
+# can never fail a required check. The dependency is pinned in tests/crosscheck/package-lock.json and
+# installed with `npm ci --ignore-scripts`; nothing from it reaches any shipped artifact.
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - tests/entra-crosscheck.test.mjs
+      - tests/crosscheck/**
+      - gateway/src/oidc.ts
+      - .github/workflows/entra-crosscheck.yml
+
+permissions:
+  contents: read
+
+jobs:
+  crosscheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the independent server (pinned, no install scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix tests/crosscheck
+      - name: Cross-check
+        env:
+          ENTRA_CROSSCHECK_DIR: ${{ github.workspace }}/tests/crosscheck
+        run: node --test tests/entra-crosscheck.test.mjs
