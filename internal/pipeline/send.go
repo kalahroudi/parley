@@ -315,9 +315,24 @@ func (n *Node) Respond(ctx context.Context, id [16]byte, typ envelope.Type, cont
 	inner := frames.PackInner(next, content)
 	m, err := envelope.SealPadded(n.cfg.Signer, reply.PublicKey, h, inner)
 	clear(inner)
-	if err == nil {
-		err = n.cfg.Gateway.Send(ctx, Outgoing{Wire: m.Marshal(), Task: taskHex(id), Kind: kindName[typ], Target: peer, Seq: h.Seq})
+	if err != nil {
+		n.mu.Lock()
+		c.busy = false
+		n.mu.Unlock()
+		if next != nil {
+			_ = n.cfg.Pool.Consume(next.ID)
+		}
+		return err
 	}
+	// The caller can answer the moment the gateway has the message, before Send
+	// returns here, and its follow-up is sealed to the fresh key: so the chain
+	// already expects that key while the message is on its way. The old key stays
+	// in the pool until the send is known to have worked.
+	n.mu.Lock()
+	old, hadOld, wasAsked, wasLast := c.follow, c.hasOwn, c.asked, c.last
+	c.follow, c.hasOwn, c.asked, c.last = next, next != nil, typ == envelope.TypeInputRequired, typ
+	n.mu.Unlock()
+	err = n.cfg.Gateway.Send(ctx, Outgoing{Wire: m.Marshal(), Task: taskHex(id), Kind: kindName[typ], Target: peer, Seq: h.Seq})
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	c.busy = false
@@ -327,13 +342,13 @@ func (n *Node) Respond(ctx context.Context, id [16]byte, typ envelope.Type, cont
 		if next != nil {
 			_ = n.cfg.Pool.Consume(next.ID)
 		}
+		c.follow, c.hasOwn, c.asked, c.last = old, hadOld, wasAsked, wasLast
 		return err
 	}
-	if c.hasOwn {
-		_ = n.cfg.Pool.Consume(c.follow.ID) // the caller now holds the new key
+	if hadOld {
+		_ = n.cfg.Pool.Consume(old.ID) // the caller now holds the new key
 	}
-	c.sendSeq, c.sendLast, c.last = h.Seq, hashOf(h), typ
-	c.follow, c.hasOwn, c.asked = next, next != nil, typ == envelope.TypeInputRequired
+	c.sendSeq, c.sendLast = h.Seq, hashOf(h)
 	if isFinal(typ) {
 		c.done = true
 	}

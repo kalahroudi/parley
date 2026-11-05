@@ -65,7 +65,7 @@ internal/pipeline/pipeline.go@@h.PrekeyID != receive.PrekeyID(c.follow.ID)@@fals
 internal/pipeline/send.go@@Nonce: nonce, BindingVersion@@Nonce: sp.Nonce, BindingVersion@@pipeline: prekey answer not bound to our nonce
 internal/pipeline/send.go@@w != nil \&\& w.target == r.Peer@@w != nil@@pipeline: prekey answer from a device other than the one asked
 internal/pipeline/send.go@@if err := n.cfg.Trust.AuthorizeSend(tb, now); err != nil {@@if err := error(nil); err != nil {@@pipeline: send without the trust check
-internal/pipeline/send.go@@!ok || v != n.cfg.Version@@false@@pipeline: device standing not checked before sending
+internal/pipeline/send.go@@!ok || v != n.cfg.Version@@!ok || v < 0@@pipeline: device standing not checked before sending
 internal/pipeline/send.go@@errors.Is(err, prekey.ErrRateLimited) ||@@false ||@@pipeline: too many outstanding reply keys fails the task'
 
 # A mutant that does not compile is not a kill: start from a suite that builds.

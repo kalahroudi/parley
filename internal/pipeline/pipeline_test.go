@@ -760,3 +760,34 @@ func TestForeignAndMisdirectedFollowUpsBurnNothing(t *testing.T) {
 		t.Fatal("the genuine follow-up did not arrive")
 	}
 }
+
+// The caller's follow-up can reach the target before the target's own send has
+// returned (the gateway already has the question). The chain must expect the
+// fresh key by then, or the follow-up is refused and its one-time key is lost.
+func TestFollowUpThatOvertakesTheSendReturn(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.devs["alice"], w.devs["bob"]
+	id := w.run("alice", "bob", "x")
+	w.onWire = func(to string, wire []byte) [][]byte {
+		if to != "alice" {
+			return [][]byte{wire}
+		}
+		w.deliver("alice", event(wire))
+		w.settle() // alice has read the question
+		if err := alice.node.Follow(bg, id, envelope.TypeReply, []byte("answer")); err != nil {
+			t.Error(err)
+		}
+		w.settle() // and bob has handled her answer, while his send is still in progress
+		return nil
+	}
+	if err := bob.node.Respond(bg, id, envelope.TypeInputRequired, []byte("q?")); err != nil {
+		t.Fatal(err)
+	}
+	w.onWire = nil
+	if bob.inboxLen() != 2 || string(bob.inbox[1].Content) != "answer" {
+		t.Fatalf("inbox %d: the follow-up was lost to the race (%v)", bob.inboxLen(), bob.lastErr())
+	}
+	if bob.pool.Outstanding() != 0 {
+		t.Fatalf("%d keys left", bob.pool.Outstanding())
+	}
+}
