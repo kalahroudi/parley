@@ -59,10 +59,11 @@ elif [ -z "$mutate" ]; then
 	echo "== mutation: gateway tier 1 files (none affected by this change)"
 else
 	echo "== mutation: gateway tier 1 files:$mutate"
-	args=
-	for f in $mutate; do args="$args --mutate $f"; done
+	# One comma-separated --mutate: Stryker keeps only the last of repeated --mutate flags, which would
+	# mutate one file and report the rest as clean.
+	list=$(printf '%s' "$mutate" | tr ' ' ',')
+	(cd gateway && npx stryker run --mutate "$list") || status=1
 	# shellcheck disable=SC2086
-	(cd gateway && npx stryker run $args) || status=1
-	node scripts/stryker-gate.mjs gateway/reports/mutation/mutation.json || status=1
+	node scripts/stryker-gate.mjs gateway/reports/mutation/mutation.json $mutate || status=1
 fi
 exit $status

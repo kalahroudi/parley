@@ -687,6 +687,104 @@ describe("held events (Queued)", () => {
     expect((await c.next()).t).not.toBe("event");
   });
 
+  const heldList = () => runInDurableObject(stubFor(), (_, ctx) => ctx.storage.get<Held[]>("held"));
+  const inflight = () => runInDurableObject(stubFor(), (_, ctx) => ctx.storage.get<{ seq: number; task: string }[]>("inflight"));
+  const settled = async <T,>(read: () => Promise<T>, want: T) => {
+    await until(async () => JSON.stringify(await read()) === JSON.stringify(want));
+    expect(await read()).toEqual(want);
+  };
+
+  it("notes a task per tenant and per id: the same id in another tenant, or another id in the same tenant, is another note", async () => {
+    const d = stubFor();
+    const far = Date.now() + 3600_000;
+    const h = (tenant: string, task: string): Held => ({ tenant, device: dev, task, until: far });
+    expect(await d.hold(h("t1", "x"))).toBe("ok");
+    expect(await heldList()).toEqual([h("t1", "x")]); // and nothing else is in the list
+    for (const [tenant, task] of [["t2", "x"], ["t1", "y"], ["t1", "x"]] as const) expect(await d.hold(h(tenant, task))).toBe("ok");
+    expect(await heldList()).toEqual([h("t1", "x"), h("t2", "x"), h("t1", "y")]);
+  });
+
+  it("forgets a note at the instant of its deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const d = stubFor();
+      const now = Date.now();
+      const h = (task: string, until: number): Held => ({ tenant: "t1", device: dev, task, until });
+      await d.hold(h("a", now));
+      await d.hold(h("b", now + 1));
+      expect(await heldList()).toEqual([h("b", now + 1)]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an in-flight record until the daemon acknowledges that event, then only the later ones", async () => {
+    await seed(`a${n}`, ["one", "two"]);
+    await seed(`b${n}`, ["three"]);
+    const { c } = await open();
+    for (let i = 0; i < 3; i++) await c.next();
+    const seqs = async () => (await inflight())?.map((i) => i.seq);
+    await settled(seqs, [1, 2, 3]);
+    c.send({ t: "ack", seq: 1 });
+    await settled(seqs, [2, 3]);
+    expect(await heldKeys(`a${n}`)).toHaveLength(1); // only the first event of the task was acknowledged
+    c.send({ t: "ack", seq: 2 });
+    await settled(seqs, [3]);
+    c.send({ t: "ack", seq: 3 });
+    await settled(seqs, []);
+  });
+
+  it("drops in-flight records past their deadline when the daemon reconnects, at the instant of the deadline too", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const now = Date.now();
+      const rec = (seq: number, until: number) => ({ tenant: "t1", device: "srv", task: "x", until, id: seq, seq });
+      await runInDurableObject(stubFor(), (_, ctx) => ctx.storage.put("inflight", [rec(5, now - 1), rec(6, now), rec(7, now + 1000)]));
+      await open();
+      await settled(inflight, [rec(7, now + 1000)]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes only what a connection changed: unchanged held notes are not written again, and no session row unless events were sent", async () => {
+    await seed(`a${n}`, ["one"]);
+    const spy = async () => {
+      const puts: string[] = [];
+      await runInDurableObject(stubFor(), (_, ctx) => {
+        const put = ctx.storage.put.bind(ctx.storage) as (...a: unknown[]) => Promise<void>;
+        (ctx.storage as unknown as { put: unknown }).put = (k: unknown, ...rest: unknown[]) => {
+          puts.push(...(typeof k === "object" && k !== null ? (Object.keys(k).length ? Object.keys(k) : ["(empty)"]) : [String(k)]));
+          return put(k, ...rest);
+        };
+      });
+      return puts;
+    };
+    const first = await open();
+    await first.c.next();
+    first.c.ws.close(1000, "bye");
+    const puts = await spy();
+    const second = await open(first.welcome.session, 0);
+    expect(await second.c.next()).toMatchObject({ t: "event", seq: 2 });
+    await settled(async () => (await inflight())?.length, 2);
+    expect(puts).not.toContain("held"); // the held list did not change
+    expect(puts).toContain("inflight");
+    second.c.ws.close(1000, "bye");
+    // Everything acknowledged and gone: a connection that sends nothing writes no session row of its own beyond what hello does.
+    const third = await open(first.welcome.session, 2);
+    await until(async () => (await heldKeys(`a${n}`)).length === 0);
+    third.c.send("ping");
+    expect(await third.c.next()).toEqual({ t: "pong" });
+    await settled(inflight, []);
+    await settled(heldList, []);
+    const before = puts.length;
+    third.c.ws.close(1000, "bye");
+    const quiet = await open(first.welcome.session, 2);
+    quiet.c.send("ping");
+    expect(await quiet.c.next()).toEqual({ t: "pong" });
+    expect(puts.slice(before)).toEqual(["session"]); // hello's own, and nothing from the flush
+  });
+
   it("notes a task once, keeps the later deadline, and stops at MAX_HELD tasks", async () => {
     // A frozen clock: on a slow disk the 256 writes below outlast a real one-second deadline.
     vi.useFakeTimers({ toFake: ["Date"] });

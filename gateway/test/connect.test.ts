@@ -1078,6 +1078,21 @@ describe("the prekey relay", () => {
     O.ws.close();
   });
 
+  it("gives a name that cannot be a device no budget of its own, so junk targets make no buckets and are all just offline", async () => {
+    const x = tenant();
+    const callers = [];
+    for (let i = 0; i < 4; i++) {
+      const c = await enr(x);
+      await lowerBudget(x.t, c.id, "1"); // a target's budget would be 3: the fourth caller would be cut off
+      callers.push(await daemon(x, c));
+    }
+    for (const [i, D] of callers.entries()) {
+      await D.send(request(`j${i}`, "not-a-device"));
+      expect(D.events()).toEqual([{ t: "prekey_refused", id: `j${i}`, from: "not-a-device", reason: "offline" }]);
+      D.ws.close();
+    }
+  });
+
   it("treats a target that cannot be reached as offline, and does not fail the sender's frame", async () => {
     const x = tenant();
     const a = await enr(x);

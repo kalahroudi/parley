@@ -116,6 +116,10 @@ export const TENANT_FACTOR = 10;
 // spent after the caller's. Tradeoff: one caller is stopped by its own budget, so it takes TARGET_FACTOR callers
 // flooding one target to use the target's up and lock its other callers out until the window ends; the budget
 // bounds what any set of callers can make one device do. It is advisory: the device's own per-caller limit decides.
+// Accepted, not mitigated (reviewed): the callers are enrolled, approved, visible-to-the-target devices of one tenant, the
+// lockout ends with the window (one minute) and only delays requests (the requester is told when to retry), and the target's
+// own per-caller limit is the real defence. A reserved share for known peers would need the gateway to remember who talked
+// to whom, which it must not store.
 export const TARGET_FACTOR = 3;
 
 export async function limitDevice(env: Env, tenant: string, device: string, scope: Scope, target?: string): Promise<number | null> {
