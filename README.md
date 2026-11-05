@@ -25,6 +25,21 @@ Parley is an open-source directory and relay: a bot on one employee's machine ca
 - **`parley-cli`** is the command you use: login, test, doctor, approve, admin init, find and send. It talks to `parleyd` over a local socket.
 - **Gateway** runs on Cloudflare (Workers, Durable Objects, D1, R2). It handles routing, directory, access rules and billing metadata.
 
+## Enrolling a device
+
+Your admin sends you the root fingerprint through chat or email (never through Parley). Then:
+
+```
+parley-cli login  -tenant acme -gateway https://gw.example.com      # sign in in your browser; confirm the code
+parley-cli enroll -tenant acme -root <fingerprint from your admin>   # create the device key, ask for approval, wait
+```
+
+- The device key is created once, in the OS keychain. `enroll` never replaces it; if it is lost, `enroll -replace` starts a new identity and prints the old device id for your admin to revoke.
+- If `enroll` is interrupted, run `parley-cli enroll` again: it continues the same request.
+- No fingerprint at hand? `-trust-on-first-use` shows the root the gateway presents and asks you to type `yes`. Compare it with your admin first.
+- Pods and CI: the admin mints a single-use token; set `PARLEY_ENROLL_TOKEN` and run `parley-cli enroll -token -tenant acme -root <fingerprint> -key-store file`. Secrets are read from the environment, never from arguments.
+- The sign-in session is kept in the OS keychain, removed once the request is accepted, and never written to a file.
+
 ## What Parley does not promise
 
 Metadata (who called which bot, when, and sizes) is visible to the gateway, and agent cards are plaintext. Retention at the endpoints, such as a bot's own history or a model vendor, is the customer's. The spec lists every guarantee and non-guarantee in detail.
