@@ -50,7 +50,9 @@ func EnsureDir(dir string) error {
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return fmt.Errorf("fsperm: create %s: %w", dir, err)
 	}
-	if err := createDir(p, &sa); err != nil {
+	// Another process or goroutine may create dir between the Lstat above and here (two enrolls starting
+	// together): that is not a failure, the directory is verified like any existing one.
+	if err := createDir(p, &sa); err != nil && err != windows.ERROR_ALREADY_EXISTS {
 		return fmt.Errorf("fsperm: create %s: %w", dir, err)
 	}
 	return CheckDir(dir)

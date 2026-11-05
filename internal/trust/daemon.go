@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
@@ -73,6 +74,10 @@ const maxEnrollWait = 24 * time.Hour
 // maxPoll caps the backoff between status polls: an admin may take hours, and every poll costs the gateway a request.
 const maxPoll = 30 * time.Second
 
+// jitter spreads the polls of devices that started together (a fleet restarted at once) so they do not
+// arrive at the gateway in step: up to a quarter of the interval is added. A variable so tests can pin it.
+var jitter = func(poll time.Duration) time.Duration { return rand.N(poll/4 + 1) }
+
 // RunRefresh refreshes every interval until ctx ends, reporting failures to onErr.
 func (d *Daemon) RunRefresh(ctx context.Context, every time.Duration, clock func() time.Time, onErr func(error)) {
 	if every <= 0 {
@@ -137,7 +142,7 @@ func (d *Daemon) Await(ctx context.Context, id, secret string, key ed25519.Publi
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(poll):
+		case <-time.After(poll + jitter(poll)):
 		}
 		// Back off by half each time, up to maxPoll.
 		poll = min(poll+poll/2+1, maxPoll)
