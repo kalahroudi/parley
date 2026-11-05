@@ -10,7 +10,9 @@
     "src/parts.ts",
     "src/acl.ts",
     "src/ratelimit.ts",
-    "src/connect.ts"
+    "src/connect.ts",
+    "src/protocol.ts",
+    "src/login.ts"
   ],
   "coverageAnalysis": "off",
   "reporters": [
@@ -24,6 +26,6 @@
   },
   "timeoutMS": 30000,
   "concurrency": 2,
-  "disableTypeChecks": "src/{task,device,parts,acl,ratelimit,connect}.ts",
+  "disableTypeChecks": "src/{task,device,parts,acl,ratelimit,connect,protocol,login}.ts",
   "tsconfigFile": "tsconfig.stryker-none.json"
 }

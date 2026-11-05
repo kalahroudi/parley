@@ -13,3 +13,6 @@
 ./internal/receive    FuzzReceive        10s
 ./internal/envelope   FuzzUnpadShaped  5s
 ./internal/connect    FuzzReplies      5s
+./internal/frames     FuzzParseEvent     10s
+./internal/frames     FuzzDecodePrekey   5s
+./internal/frames     FuzzUnpackInner    5s

@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"t\":\"prekey_refused\",\"id\":\"r1\",\"from\":\"dev-b\",\"reason\":\"offline\"}")

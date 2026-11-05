@@ -54,6 +54,8 @@ test("stryker gate: a mutant whose run crashed is not verified", () => {
   assert.deepEqual(checkStryker(rep("Timeout")), []);
   for (const s of ["Survived", "NoCoverage", "RuntimeError", "CompileError", "Ignored", "Pending"]) assert.equal(checkStryker(rep(s)).length, 1, s);
   assert.equal(checkStryker({ files: {} }).length, 1, "an empty report proves nothing");
+  assert.deepEqual(checkStryker(rep("Killed"), ["src/parts.ts"]), []);
+  assert.equal(checkStryker(rep("Killed"), ["src/parts.ts", "src/device.ts"]).length, 1, "a file that was asked for and not mutated is not clean");
 });
 
 test("the Go mutation run enables every mutator, gates through the allowlist and has a scope for pull requests", () => {
