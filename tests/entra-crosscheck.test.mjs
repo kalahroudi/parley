@@ -6,9 +6,10 @@
 // repository), configured Entra-shaped: issuer `<base>/<tenant guid>/v2.0`, tid, oid and preferred_username claims
 // in the id_token. It stops us testing only against our own assumptions about what an OIDC server does.
 //
-// It is skipped unless ENTRA_CROSSCHECK_DIR names a directory whose node_modules holds oidc-provider (install it
-// into a temp directory with `npm install --prefix "$DIR" oidc-provider@9.13.3`; nothing is added to this
-// repository's dependencies). Once the variable is set, a missing module or a failing scenario fails the run.
+// It is skipped unless ENTRA_CROSSCHECK_DIR names a directory whose node_modules holds oidc-provider (CI:
+// .github/workflows/entra-crosscheck.yml, an optional workflow outside the required checks, installs the version pinned in
+// tests/crosscheck/package-lock.json; locally, `npm ci --ignore-scripts --prefix tests/crosscheck`; nothing is added to
+// the gateway's or the daemon's dependencies). Once the variable is set, a missing module or a failing scenario fails the run.
 //
 // What it does not cover: Entra's path layout (/oauth2/v2.0/authorize ...) and the multi-tenant `{tenantid}` issuer,
 // AADSTS errors and key rollover; node-oidc-provider has none of these, so tests/gateway-entra.test.mjs covers them

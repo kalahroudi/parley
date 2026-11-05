@@ -1,0 +1,9 @@
+{
+  "name": "parley-entra-crosscheck",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Independent OIDC server for the optional Entra cross-check (tests/entra-crosscheck.test.mjs). Not part of any shipped artifact.",
+  "dependencies": {
+    "oidc-provider": "9.13.3"
+  }
+}
