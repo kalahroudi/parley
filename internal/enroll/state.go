@@ -77,13 +77,16 @@ func (s *state) save(dir string) error {
 	return fsperm.WriteAtomic(filepath.Join(dir, stateFile), data)
 }
 
+// openState opens the state file; tests replace it, because making a file unreadable is not possible the same way on every OS.
+var openState = func(path string) (*os.File, error) { return os.Open(path) }
+
 // loadState returns os.ErrNotExist (wrapped) when there is no state.
 func loadState(dir string) (*state, error) {
 	path := filepath.Join(dir, stateFile)
 	if err := fsperm.CheckFile(path); err != nil {
 		return nil, err // a missing file satisfies errors.Is(err, os.ErrNotExist)
 	}
-	f, err := os.Open(path)
+	f, err := openState(path)
 	if err != nil {
 		return nil, err
 	}

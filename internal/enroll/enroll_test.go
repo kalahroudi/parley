@@ -1066,11 +1066,19 @@ func TestLoadStateRejectsDamagedState(t *testing.T) {
 	if _, err := loadState(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("missing: %v", err)
 	}
+	if err := good.save(dir); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("cannot open")
+	oldOpen := openState
+	openState = func(string) (*os.File, error) { return nil, boom }
+	_, err := loadState(dir)
+	openState = oldOpen
+	if !errors.Is(err, boom) {
+		t.Errorf("a file that cannot be opened must fail, not read as missing: %v", err)
+	}
 	if runtime.GOOS != "windows" {
 		p := filepath.Join(dir, stateFile)
-		if err := good.save(dir); err != nil {
-			t.Fatal(err)
-		}
 		if err := os.Chmod(p, 0o644); err != nil {
 			t.Fatal(err)
 		}
