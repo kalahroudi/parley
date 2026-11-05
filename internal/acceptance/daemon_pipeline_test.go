@@ -572,6 +572,10 @@ func TestDaemonProcessesTunnelEvents(t *testing.T) {
 			}()
 		}
 		wg.Wait()
+		// A caller's reply key is held until the final reply, and a target issues at most 8 unused prekeys per caller:
+		// the next batch starts when this one is finished, however slow the machine is.
+		want := (b + 1) * perBatch
+		g.waitFor("the batch's results", func() bool { alice.mu.Lock(); defer alice.mu.Unlock(); return finals(alice.ups) == want })
 	}
 	g.waitFor("every result", func() bool { alice.mu.Lock(); defer alice.mu.Unlock(); return finals(alice.ups) == batches*perBatch })
 
