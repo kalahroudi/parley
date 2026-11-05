@@ -69,7 +69,7 @@ func (f *Failure) Error() string { return f.Message }
 
 // Fixed texts the caller sees when the bot gave none, and the limits on them.
 const (
-	MaxFailure   = 1 << 10
+	MaxFailure   = 1024
 	TextBusy     = "rejected: the bot is busy"
 	TextFailed   = "the bot failed"
 	TextTimedOut = "the bot timed out"
