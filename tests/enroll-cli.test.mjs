@@ -107,7 +107,15 @@ test("T411: parley-cli enroll against the real gateway: pod token, wrong fingerp
     const home2 = mkdtempSync(join(tmpdir(), "parley-home-"));
     const first = podEnroll(home2, [], { PARLEY_ENROLL_TOKEN: await mint() });
     const req2 = await pendingRequest();
-    await waitFor("the saved enrollment state", () => existsSync(join(home2, "enrollment.json")));
+    // The gateway has the request before the daemon has recorded it; killing in between leaves phase "keyed", where a
+    // resume needs a credential again (slow on Windows). Wait for the recorded request: that is "killed while waiting".
+    await waitFor("the saved enrollment state with the request recorded", () => {
+      try {
+        return JSON.parse(readFileSync(join(home2, "enrollment.json"), "utf8")).phase === "requested";
+      } catch {
+        return false;
+      }
+    });
     first.child.kill("SIGKILL");
     await first.done;
     const key = readFileSync(join(home2, "device.key"));
