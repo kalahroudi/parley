@@ -12,6 +12,7 @@ import { SEALED_MEDIA_TYPE } from "../src/a2a";
 import { CLOSE_REVOKED } from "../src/protocol";
 import type { SignedKind } from "../src/parts";
 import { TASK_METADATA_RETENTION_MS } from "../src/task";
+import type { Env } from "../src/index";
 import { CASCADE_CALLS, CSV_PAGE_MAX, MAX_TASK_LOG, PURGE_CALLS, SESSION_TTL_MS, type TaskLogRow } from "../src/tenant";
 import { adminRow, csvCell, csvRow, taskRow } from "../src/export";
 import { b64, encodeWire, gw, header, taskBytes, taskHex } from "./wire";
@@ -645,7 +646,7 @@ describe("tenant deletion", () => {
     expect(await w.taskStorage("gone1")).toEqual({});
     expect(await w.taskStorage("gone2")).toEqual({});
     expect(await w.deviceStorage(b.id)).toEqual({});
-    expect(await w.inTenant(async (_i, ctx) => [Object.keys(Object.fromEntries(await ctx.storage.list())), await ctx.storage.getAlarm()])).toEqual([[], null]);
+    expect(await w.inTenant(async (_i, ctx) => [Object.keys(Object.fromEntries(await ctx.storage.list())), await ctx.storage.getAlarm()])).toEqual([["deleted"], null]); // only the tombstone is left
     expect((await w.post("/v1/admin/export", { section: "audit" }, w.admin)).status).toBe(401); // the session went with it
     expect(await w.get(a.id, "gone1")).toBeUndefined(); // the task is not there for its caller either
   });
@@ -684,7 +685,7 @@ describe("tenant deletion", () => {
     expect(await w.inTenant(async (_i, ctx) => ctx.storage.get("deleting"))).toBeDefined(); // not finished: the alarm is armed
     expect(await w.inTenant(async (_i, ctx) => ctx.storage.getAlarm())).not.toBeNull();
     for (let i = 0; i < 6 && (await w.inTenant(async (_i, ctx) => ctx.storage.get("deleting"))); i++) await runDurableObjectAlarm(w.stub);
-    expect(await w.inTenant(async (_i, ctx) => Object.keys(Object.fromEntries(await ctx.storage.list())))).toEqual([]);
+    expect(await w.inTenant(async (_i, ctx) => Object.keys(Object.fromEntries(await ctx.storage.list())))).toEqual(["deleted"]);
     expect(wiped).toHaveLength(PURGE_CALLS + 11);
     expect(new Set(wiped).size).toBe(PURGE_CALLS + 11);
   });
@@ -702,6 +703,63 @@ describe("tenant deletion", () => {
     expect(await w.inTenant(async (_i, ctx) => (await ctx.storage.get(`enr:${a.id}`)) !== undefined)).toBe(true); // nothing is forgotten before it is wiped
     down = false;
     await runDurableObjectAlarm(w.stub);
-    expect(await w.inTenant(async (_i, ctx) => Object.keys(Object.fromEntries(await ctx.storage.list())))).toEqual([]);
+    expect(await w.inTenant(async (_i, ctx) => Object.keys(Object.fromEntries(await ctx.storage.list())))).toEqual(["deleted"]);
+  });
+
+  it("leaves a tombstone with the time, the number of audit events and their SHA-256, and no payload", async () => {
+    const w = world();
+    const a = await enrolled(w, "alice@example.test");
+    await w.post("/v1/admin/groups/put", { name: "eng", members: ["alice@example.test"] }, w.admin);
+    await w.stub.publishCard(a.id, { name: "Reviewer", description: "d", tags: [], examples: [] });
+    const aud = await w.inTenant(async (_i, ctx) => [...(await ctx.storage.list({ prefix: "aud:" }))]);
+    const want = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(aud)))), (x) => x.toString(16).padStart(2, "0")).join("");
+    const before = Date.now();
+    await w.post("/v1/admin/tenant/delete", { confirm: w.T }, w.admin);
+    const left = await w.inTenant(async (_i, ctx) => Object.fromEntries(await ctx.storage.list()));
+    expect(Object.keys(left)).toEqual(["deleted"]);
+    expect(left.deleted).toEqual({ at: expect.any(Number), audit_events: aud.length, audit_sha256: want });
+    expect((left.deleted as any).at).toBeGreaterThanOrEqual(before);
+    expect(JSON.stringify(left)).not.toMatch(/alice|Reviewer|eng/);
+    // The tenant's name is usable again as a blank tenant, and the export shows the tombstone to its next admin.
+    const settings = (await (await w.post("/v1/admin/export", { section: "settings" }, (await w.session("admin")).auth)).json()) as any;
+    expect(settings.items[0].deleted).toEqual(left.deleted);
+  });
+
+  it("keeps the tombstone of a resumed deletion, and makes a new one for a later deletion", async () => {
+    const w = world();
+    await enrolled(w, "alice@example.test");
+    await w.post("/v1/admin/groups/put", { name: "g", members: ["a@example.test"] }, w.admin);
+    const audits = () => w.inTenant(async (_i, ctx) => (await ctx.storage.list({ prefix: "aud:" })).size);
+    const n = await audits();
+    expect(n).toBeGreaterThan(0);
+    await w.inTenant(async (inst) => {
+      inst.deviceStub = () => ({ revoke: () => Promise.reject(new Error("down")) });
+    });
+    await w.stub.deleteTenant(); // cannot finish: the device cannot be wiped
+    const first = await w.inTenant(async (_i, ctx) => ctx.storage.get("deleted"));
+    expect(first).toMatchObject({ audit_events: n });
+    await w.inTenant(async (_i, ctx) => ctx.storage.delete([...(await ctx.storage.list({ prefix: "aud:", limit: 1 })).keys()])); // a change after the first pass must not change it
+    await w.stub.deleteTenant(); // a second call while under way only continues
+    expect(await w.inTenant(async (_i, ctx) => ctx.storage.get("deleted"))).toEqual(first);
+    await w.inTenant(async (_i, ctx) => ctx.storage.delete("enr:" + [...(await ctx.storage.list({ prefix: "enr:" })).keys()][0]!.slice(4)));
+    await runDurableObjectAlarm(w.stub); // finished now
+    expect(await w.inTenant(async (_i, ctx) => ctx.storage.get("deleting"))).toBeUndefined();
+    await w.stub.deleteTenant(); // a deletion of a tenant that was deleted before
+    expect(await w.inTenant(async (_i, ctx) => ctx.storage.get("deleted"))).toMatchObject({ audit_events: 0 });
+  });
+
+  it("limits the tries: the typed name cannot be guessed at speed, and the bulk routes are limited per tenant", async () => {
+    const w = world();
+    const e = { ...env, RATE_DELETE_PER_MIN: "2", RATE_ADMIN_PER_MIN: "2" } as Env;
+    const { default: worker } = await import("../src/index");
+    const call = async (path: string, body: object) => (await worker.fetch(new Request(`https://gw${path}`, { method: "POST", headers: { Authorization: await w.admin }, body: JSON.stringify(body) }), e)).status;
+    expect([await call("/v1/admin/tenant/delete", { confirm: "x" }), await call("/v1/admin/tenant/delete", { confirm: "y" })]).toEqual([400, 400]);
+    expect(await call("/v1/admin/tenant/delete", { confirm: w.T })).toBe(429); // even the right name waits
+    expect(await w.inTenant(async (_i, ctx) => ctx.storage.get("deleting"))).toBeUndefined();
+    expect([await call("/v1/admin/export", { section: "audit" }), await call("/v1/admin/audit/csv", { kind: "admin" })]).toEqual([200, 200]);
+    expect(await call("/v1/admin/export", { section: "audit" })).toBe(429);
+    // Another tenant has its own budget, and a user (refused before the limiter) spends none.
+    const other = world();
+    expect(await (async () => (await worker.fetch(new Request("https://gw/v1/admin/export", { method: "POST", headers: { Authorization: await other.admin }, body: JSON.stringify({ section: "audit" }) }), e)).status)()).toBe(200);
   });
 });

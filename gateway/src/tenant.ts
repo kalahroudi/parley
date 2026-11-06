@@ -753,7 +753,7 @@ export class Tenant extends DurableObject<Env> {
     if (section === "settings") {
       return {
         section,
-        items: [{ retention: await this.retention(), root_public_key: (await this.rootKey()) ?? null, revocations: await this.revocations() }],
+        items: [{ retention: await this.retention(), root_public_key: (await this.rootKey()) ?? null, revocations: await this.revocations(), deleted: (await this.ctx.storage.get("deleted")) ?? null }],
       };
     }
     const prefix = SECTION_PREFIX[section];
@@ -793,13 +793,28 @@ export class Tenant extends DurableObject<Env> {
   // Task and Device DO the tenant knows of is wiped, and last the tenant's own storage. A pass that cannot finish
   // (budget, or a failed call) is continued by the alarm, so a deletion that was started is completed.
   async deleteTenant(): Promise<void> {
-    await this.ctx.storage.put("deleting", Date.now());
+    // A deletion already under way is only continued; a new one on a tenant that was deleted before replaces the old tombstone.
+    if (!(await this.isDeleting())) {
+      await this.ctx.storage.delete("deleted");
+      await this.ctx.storage.put("deleting", Date.now());
+    }
     await this.purge();
+  }
+
+  // What remains of a deleted tenant: when it was deleted, how many audit events it had and a SHA-256 over them
+  // (their stored form, in order). No names, no payload; anyone holding an earlier audit export can check it against
+  // this. Stored before anything is deleted, once, so a resumed pass does not change it.
+  private async tombstone(): Promise<void> {
+    if ((await this.ctx.storage.get("deleted")) !== undefined) return;
+    const aud = [...(await this.ctx.storage.list<AuditEvent>({ prefix: "aud:", limit: MAX_AUDIT }))];
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(aud))));
+    await this.ctx.storage.put("deleted", { at: Date.now(), audit_events: aud.length, audit_sha256: Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("") });
   }
 
   private async purge(): Promise<void> {
     let calls = 0;
     try {
+      await this.tombstone();
       // Credentials and half-finished sign-ins first.
       for (const prefix of ["ses:", "tok:", "dtk:", "chal:", "lgn:"]) {
         for (;;) {
@@ -822,7 +837,13 @@ export class Tenant extends DurableObject<Env> {
         }
       }
       await this.ctx.storage.deleteAlarm();
-      await this.ctx.storage.deleteAll();
+      // Everything but the tombstone, and the marker last: a crash before that leaves the deletion to be resumed.
+      for (;;) {
+        const keys = [...(await this.ctx.storage.list({ limit: 128 })).keys()].filter((k) => k !== "deleted" && k !== "deleting");
+        if (!keys.length) break;
+        await Promise.all(this.deleteAll(keys));
+      }
+      await this.ctx.storage.delete("deleting");
     } catch {
       await this.schedule(Date.now() + CASCADE_RETRY_MS);
     }

@@ -4,6 +4,7 @@
 import { readBounded } from "./a2a";
 import { validatePage } from "./acl";
 import type { Env } from "./index";
+import { limitAdmin } from "./ratelimit";
 import { csrfOk, principal, sessionCookie } from "./session";
 import { CSV_PAGE_DEFAULT, CSV_PAGE_MAX, EXPORT_SECTIONS, tenantStub, type CsvKind, type ExportSection } from "./tenant";
 
@@ -27,6 +28,8 @@ export async function handleAdmin(req: Request, env: Env): Promise<Response> {
   if (!p) return json(401, { error: "unauthorized" });
   if (!csrfOk(req, p)) return json(403, { error: "csrf" });
   if (p.role !== "admin") return json(403, { error: "forbidden" });
+  const refused = await limitAdmin(env, p.tenant, pathname === "/v1/admin/tenant/delete" ? "delete" : "read");
+  if (refused) return refused;
 
   let b: unknown;
   try {

@@ -1,6 +1,6 @@
 # Offboarding, audit CSV, tenant export and deletion (T503)
 
-Journeys I and L. Code: `gateway/src/tenant.ts` (`putRevocations`, `cascade`, `logTask`, `exportSection`, `auditCsv`, `deleteTenant`), `gateway/src/admin.ts` (the three admin routes), `gateway/src/export.ts` (CSV cells), `Task.revoke` and `Task.wipe` (`gateway/src/task.ts`), `Device.revoke` (`gateway/src/device.ts`). Tests: `gateway/test/offboarding.test.ts`.
+Journeys I and L. Group memberships are by identity (an email), not by device, so revoking one device does not touch them (the person may have other devices); an admin removes a person with the group routes and by taking them off the user list, which ends their sessions at once. Code: `gateway/src/tenant.ts` (`putRevocations`, `cascade`, `logTask`, `exportSection`, `auditCsv`, `deleteTenant`), `gateway/src/admin.ts` (the three admin routes), `gateway/src/export.ts` (CSV cells), `Task.revoke` and `Task.wipe` (`gateway/src/task.ts`), `Device.revoke` (`gateway/src/device.ts`). Tests: `gateway/test/offboarding.test.ts`.
 
 ## Offboarding cascade
 
@@ -45,7 +45,9 @@ The CSV is plaintext metadata, as the spec says (who called which bot, when, sta
 1. A `deleting` marker is stored. From then on the tenant admits nothing: no session (the admin's own included), no connect challenge or token, no enrollment, no device sign-in.
 2. Credentials and half-finished sign-ins are deleted.
 3. Every Task DO in the task log is wiped (record, held events, alarm), then every Device DO of an enrolled device (sockets closed, storage deleted), `PURGE_CALLS` (200) at a time. A pass that cannot finish is continued by the alarm until it does, so a deletion that was started is completed.
-4. Last, the Tenant DO's own storage and alarm are deleted. The response clears the session cookie.
+4. Last, the Tenant DO's own storage and alarm are deleted, except a **tombstone** (`deleted`): the time, the number of audit events the tenant had and a SHA-256 over them in stored form. It holds no names and no payload; whoever kept an earlier audit export can check it. It is written once, before anything is deleted, so a resumed pass does not change it, and the `deleting` marker is removed only after everything else is gone. The tenant's next admin sees it in the `settings` export section (`deleted`). The response clears the session cookie.
+
+The tombstone is evidence, not an immutable ledger: the gateway operator could in principle remove it, as with any record held by the party it is about. The deletion is **rate limited per tenant** (`RATE_DELETE_PER_MIN`, default 3 a minute, counting wrong names too, so the typed name cannot be guessed at speed); export and the audit CSV have `RATE_ADMIN_PER_MIN` (default 60). The limiter runs after the admin session is verified.
 
 **What is left, and what it is.** Task DOs that are no longer in the log (it keeps the newest 10,000 tasks, and only expired ones leave it) are not reachable from the tenant. They hold metadata only (ids, state, times: the Task DO deletes itself 90 days after the task ended), and no ciphertext: an expired task has had its held events deleted. Rate-limit counters (device ids, one minute) delete themselves. Deleted ciphertext and records may persist in Cloudflare's 30-day recovery history, as in the spec's non-guarantees. Files in R2 are not held by the gateway yet (named pending test `tests/pending-t307.test.mjs`).
 

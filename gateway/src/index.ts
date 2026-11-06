@@ -25,6 +25,9 @@ export interface Env extends AuthEnv {
   RATE_AUTH_PER_MIN?: string;
   RATE_TENANT_LOGIN_PER_MIN?: string;
   RATE_SESSION_PER_MIN?: string;
+  // Per-minute limits for a tenant's admin export and audit CSV (RATE_ADMIN_PER_MIN) and its deletion tries (RATE_DELETE_PER_MIN).
+  RATE_ADMIN_PER_MIN?: string;
+  RATE_DELETE_PER_MIN?: string;
   // Per-minute limits per device for new tasks, other task messages and directory searches (the tenant's are ten times these).
   RATE_TASK_PER_MIN?: string;
   RATE_MESSAGE_PER_MIN?: string;
