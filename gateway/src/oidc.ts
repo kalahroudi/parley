@@ -6,7 +6,7 @@
 // in Node. Login state is stateless: a signed `flow` value (kept by the browser
 // in an HttpOnly cookie) carries the state, nonce and PKCE verifier.
 
-import { fold } from "./text";
+import { fold } from "./text.ts";
 
 export type Provider = {
   name: string;
