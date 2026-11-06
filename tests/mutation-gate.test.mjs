@@ -84,6 +84,26 @@ test("CI runs mutation on changed tier 1 code per pull request and in full on ma
   assert.ok(!/MUTATION_SCOPE/.test(nightly), "the nightly run must be the full one");
 });
 
+// The three mutation parts are jobs of their own (one job holding them all ran into the 90 minute job limit), each with
+// its own limit, and nothing is left in the test job, so no part can be dropped or can starve another.
+test("CI runs the mutation parts as separate jobs with their own time limits", () => {
+  const ci = read(".github/workflows/ci.yml");
+  const jobs = Object.fromEntries([...ci.slice(ci.indexOf("\njobs:\n")).matchAll(/^  ([a-z-]+):\n((?:(?:    .*)?\n)+)/gm)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(Object.keys(jobs).sort(), ["mutation-changed", "mutation-crash-points", "mutation-os", "test", "workflows"]);
+  assert.ok(!/mutation\.sh|malgw-mutations\.sh/.test(jobs.test), "the test job must not run mutation");
+  const want = {
+    "mutation-changed": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /runs-on: ubuntu-latest/, /npm ci/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
+    "mutation-os": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /MUTATION_TS: "0"/, /os: \[macos-latest, windows-latest\]/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
+    "mutation-crash-points": [/scripts\/malgw-mutations\.sh/, /runs-on: ubuntu-latest/],
+  };
+  for (const [name, res] of Object.entries(want)) {
+    assert.match(jobs[name], /timeout-minutes: 90\n/, `${name} needs its own time limit`);
+    for (const re of res) assert.match(jobs[name], re, `${name} lacks ${re}`);
+  }
+  // Linux keeps TypeScript (the default MUTATION_TS), the other OSes switch it off, as before.
+  assert.ok(!/MUTATION_TS/.test(jobs["mutation-changed"]));
+});
+
 const [linux, darwin, windows] = RUNNERS;
 
 test("mutation gate: each Go file is judged on the runner that builds it, OS-specific code on its own OS", () => {
