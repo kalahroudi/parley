@@ -24,11 +24,19 @@
 //     task text cannot rewrite the owner's terminal. The preview is held in memory
 //     until the decision and zeroed.
 //
-// What it does not guarantee: the socket is open to every process of the same OS
-// user (see internal/localsock), so a bot that runs as the owner and can reach the
-// socket can approve its own tasks. Keeping tool-using skills away from the socket
-// is the sandbox's job (T507; T406 only tests what a bot is handed); until then the approval is a confirmation
-// for the owner, not a boundary against code running as the owner.
+// Who may approve (the methods "approve" and "deny" below are registered as
+// sensitive in the daemon, see internal/localsock):
+//
+//   - parley-cli asks the owner on the controlling terminal and nowhere else
+//     (internal/ttyconfirm), so a process without a terminal cannot answer.
+//   - The daemon reads the pid of the caller from the operating system and
+//     refuses a caller that belongs to a bot it started, or whose pid it cannot
+//     read (internal/botproc); bots start in a session of their own.
+//
+// What it does not guarantee: a process of the owner's OS user that Parley did
+// not start is in no bot's tree, and one that makes itself a pseudo-terminal can
+// type the answer. Only an operating-system sandbox keeps those away from the
+// socket (docs/sandbox); the README gives the exact per-OS statement.
 package approval
 
 import (
