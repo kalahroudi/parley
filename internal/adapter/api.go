@@ -159,6 +159,7 @@ func (p *apiPeer) post(ctx context.Context, line []byte) error {
 	p.scrub = append(p.scrub, body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.a.url, body)
 	if err != nil {
+		body.Close() // never handed to the transport: nothing is writing it, so it can be cleared at once
 		return err
 	}
 	req.ContentLength = int64(len(line)) // known, not chunked: a body of unknown length is not what a service expects

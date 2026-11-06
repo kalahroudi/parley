@@ -108,3 +108,21 @@ func TestConstantsArePinned(t *testing.T) {
 		t.Fatalf("MaxLine %d", MaxLine)
 	}
 }
+
+// A request that could not even be built releases its line at once (the transport never had it).
+func TestPostThatCannotBuildTheRequestReleasesItsLine(t *testing.T) {
+	a, err := NewAPI(APIConfig{URL: "https://example.com/bot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &apiPeer{a: a}
+	var ctx context.Context
+	if p.post(ctx, []byte("x\n")) == nil {
+		t.Fatal("no error")
+	}
+	select {
+	case <-p.scrub[0].done:
+	default:
+		t.Fatal("the line was not released")
+	}
+}
