@@ -1,0 +1,39 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Queued TTL (real daemons)
+
+# T405: Queued retention with a real daemon whose connection drops (tests/slow/queued-ttl.mjs). The shortest tenant TTL
+# is 15 minutes, so the test takes about 17 minutes of real time: too slow for every pull request, so it runs nightly
+# and on demand. It is not a required check; a red run means the held-result deletion or the reconnect path regressed.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  queued-ttl:
+    name: queued-ttl (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      # CI is set by Actions, so the test fails instead of skipping when a toolchain is missing.
+      - name: Queued TTL
+        run: make queued-ttl

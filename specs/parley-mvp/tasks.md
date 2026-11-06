@@ -93,7 +93,7 @@ Milestone M1 (after T414): `parley-cli test` sends an encrypted echo between two
 - [ ] T402 API and CLI adapters, adapter contract tests with a fake bot needs: T413
 - [ ] T403 Approval flow (`parley-cli approve`)
 - [ ] T404 Hostile-input tests
-- [ ] T405 Acceptance: the walking-skeleton journey passes on macOS and Linux
+- [x] T405 Acceptance: the walking-skeleton journey passes on macOS and Linux
 - [ ] T406 Acceptance: sandboxed bots cannot reach the local socket; hostile inputs stay within limits
 
 ## Phase 5: Product shell (about 3 to 4 weeks)
