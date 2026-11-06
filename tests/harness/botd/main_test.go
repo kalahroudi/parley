@@ -77,15 +77,24 @@ func TestRunRefusesBadStartups(t *testing.T) {
 	if err := run(ctx, []string{"-command", "relative/bot"}, env, io.Discard); err == nil {
 		t.Fatal("a relative bot command was accepted")
 	}
+	if err := run(ctx, []string{"-approval", "sometimes", "-command", self(t)}, env, io.Discard); err == nil {
+		t.Fatal("an unknown approval mode was accepted")
+	}
 }
 
 func TestRunServesUntilCanceled(t *testing.T) {
+	for _, mode := range []string{"none", "owner"} {
+		t.Run(mode, func(t *testing.T) { serveUntilStarted(t, mode) })
+	}
+}
+
+func serveUntilStarted(t *testing.T, mode string) {
 	dir := shortDir(t)
 	writeConfig(t, dir, "http://127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	log := &syncLog{started: cancel}
-	err := run(ctx, []string{"-owner", "svc-ci", "-command", self(t)}, func(k string) string {
+	err := run(ctx, []string{"-owner", "svc-ci", "-approval", mode, "-command", self(t)}, func(k string) string {
 		if k == "PARLEY_HOME" {
 			return dir
 		}

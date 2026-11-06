@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kalahroudi/parley/internal/adapter"
+	"github.com/kalahroudi/parley/internal/approval"
 	"github.com/kalahroudi/parley/internal/bot"
 	"github.com/kalahroudi/parley/internal/connect"
 	"github.com/kalahroudi/parley/internal/daemon"
@@ -69,6 +70,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, logw io
 	owner := fs.String("owner", "", "the only owner whose devices may call the bot")
 	command := fs.String("command", "", "absolute path of the bot program")
 	name := fs.String("name", "walking-skeleton-bot", "the card's name")
+	mode := fs.String("approval", string(approval.None), "approval mode: none, or owner (each task waits for `parley-cli approve`)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -84,8 +86,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, logw io
 	if err != nil {
 		return err
 	}
+	gate, err := approval.New(approval.Config{Bot: cli, Mode: approval.Mode(*mode)})
+	if err != nil {
+		return err
+	}
 	resp := &responder{} // gets its daemon below, before anything runs
-	host, err := bot.NewHost(bot.Config{Bot: cli, Responder: resp})
+	host, err := bot.NewHost(bot.Config{Bot: gate, Responder: resp})
 	if err != nil {
 		return err
 	}
@@ -99,6 +105,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, logw io
 		return err
 	}
 	resp.d = d
+	for name, m := range gate.Methods() {
+		d.Handle(name, m)
+	}
 	version := func() (uint64, bool) { return d.Trust().Tracker.Version(cfg.Tenant, cfg.DeviceID) }
 	go publish(ctx, cfg, d.SigningKey(), version, *name)
 	return d.Run(ctx)

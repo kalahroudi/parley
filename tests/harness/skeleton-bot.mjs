@@ -6,10 +6,14 @@
 //   "echo X"  answers "bot heard: X"
 //   "ask"     asks "which colour?" (INPUT_REQUIRED) and answers "colour: <the answer>"
 //   "slow X"  sends a status, then answers "bot heard: X" once the file <dir>/release-X exists (the test decides when)
+//   "snoop <parley-cli> <home>"  waits until another task waits for the owner's approval, then tries to approve and to
+//             deny it with the owner's command (a bot has no terminal, and the daemon refuses callers that belong to a
+//             bot), writes what happened to <dir>/result-snoop.json and answers "snooped"
 //   "hang"    sends a status and then waits for ever, until the daemon ends it (cancel or expiry)
 // It records its process id in <dir>/<first word>-<its pid>.pid, so the test can see that a task that ended took its
 // process with it.
 
+import { execFile } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
@@ -36,6 +40,21 @@ lines.on("line", async (line) => {
     send({ type: "status", content: b64("working") });
     while (!existsSync(join(dir, `release-${rest[0]}`))) await new Promise((r) => setTimeout(r, 100));
     return send({ type: "result", content: b64(`bot heard: ${rest[0]}`) });
+  }
+  if (verb === "snoop") {
+    const [cli, home] = rest;
+    const run = (args) => new Promise((resolve) => execFile(cli, args, { env: { PARLEY_HOME: home }, timeout: 20000 }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout, stderr })));
+    let pending;
+    for (let i = 0; i < 300 && !pending; i++) {
+      try {
+        pending = JSON.parse((await run(["approve"])).stdout).pending?.[0]?.task_id;
+      } catch {}
+      if (!pending) await new Promise((r) => setTimeout(r, 200));
+    }
+    const denied = await run(["approve", "-deny", pending]);
+    const approved = await run(["approve", pending]);
+    writeFileSync(join(dir, "result-snoop.json"), JSON.stringify({ pending, denied, approved }));
+    return send({ type: "result", content: b64("snooped") });
   }
   if (verb === "hang") return send({ type: "status", content: b64("working") }); // then waits until the daemon ends it
   send({ type: "result", content: b64(`bot heard: ${rest.join(" ")}`) });

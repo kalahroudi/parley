@@ -10,13 +10,16 @@
 //  cancel      a task the bot is working on is canceled; the bot's process is gone.
 //  offline     a task sent to a stopped daemon waits (nothing at the gateway), and runs when the daemon returns.
 //  expiry      a task whose recipient never returns fails (recipient offline) once its expiry passes, and the bot never runs it.
+//  approval    a second bot holds each task for its owner, who answers `parley-cli approve` on a real pseudo-terminal
+//              (tests/harness/ptyrun): shown the task, "no" keeps it waiting, deny rejects it, "yes" runs it; a process
+//              without a terminal and a bot of the daemon's own cannot approve or deny (the bot never sees a task before approval).
 //  refused     a device of another owner is refused by the bot daemon's own allowlist; the bot never runs it.
 //  canary      none of the task, answer or question texts is in the gateway's storage or log, or in any daemon's log.
 // Windows is not part of this test (tool-using skills and the walking skeleton are macOS and Linux for the MVP).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,28 +31,32 @@ import { build, capture, mcpClient, newTenant, post, repo, sleep, testOptions, w
 const opts = process.platform === "win32" ? { ...testOptions(420000), skip: "macOS and Linux only" } : testOptions(420000);
 
 test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on another device", opts, async () => {
-  const { bin, exe } = build({ "parley-cli": "./cmd/parley-cli", parleyd: "./cmd/parleyd", botd: "./tests/harness/botd" });
+  const { bin, exe } = build({ "parley-cli": "./cmd/parley-cli", parleyd: "./cmd/parleyd", botd: "./tests/harness/botd", ptyrun: "./tests/harness/ptyrun" });
   const gw = await startGateway({ admins: "acme:admin@acme.test" });
   const scratch = mkdtempSync(join(tmpdir(), "parley-skeleton-"));
   const botRuns = join(scratch, "runs"); // one pid file per bot process, written by the bot (harness/skeleton-bot.mjs)
   mkdirSync(botRuns);
+  const botRuns2 = join(scratch, "runs-approval"); // the same for the bot that holds every task for its owner's approval
+  mkdirSync(botRuns2);
   const children = [];
   let tenant;
   const random = () => randomBytes(8).toString("hex");
-  const canary = { echo: `CANARY-echo-${random()}`, answer: `CANARY-answer-${random()}`, late: `CANARY-late-${random()}`, stranger: `CANARY-stranger-${random()}`, offline: `CANARY-offline-${random()}`, resent: `CANARY-resent-${random()}`, revoked: `CANARY-revoked-${random()}` };
+  const canary = { echo: `CANARY-echo-${random()}`, answer: `CANARY-answer-${random()}`, late: `CANARY-late-${random()}`, stranger: `CANARY-stranger-${random()}`, offline: `CANARY-offline-${random()}`, resent: `CANARY-resent-${random()}`, revoked: `CANARY-revoked-${random()}`, gated: `CANARY-gated-${random()}`, held: `CANARY-held-${random()}` };
   try {
     tenant = await newTenant(gw, exe);
     const { cli, enroll } = tenant;
     const caller = await enroll("svc-ci");
     const botHome = await enroll("svc-ci");
     const stranger = await enroll("svc-other");
+    const botHome2 = await enroll("svc-ci");
 
     const run = (cmd, args, home) => {
       const p = capture(spawn(exe(cmd), args, { env: { ...process.env, PARLEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] }));
       children.push(p);
       return p;
     };
-    const startBot = () => run("botd", ["-owner", "svc-ci", "-command", process.execPath, "--", join(repo, "tests", "harness", "skeleton-bot.mjs"), botRuns], botHome.home);
+    const startBot = (home = botHome.home, runsDir = botRuns, extra = []) =>
+      run("botd", ["-owner", "svc-ci", ...extra, "-command", process.execPath, "--", join(repo, "tests", "harness", "skeleton-bot.mjs"), runsDir], home);
     const stopBot = async (p) => {
       p.child.kill("SIGTERM");
       const r = await p.done;
@@ -200,6 +207,94 @@ test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on
     assert.equal(all.json.tasks.length, 7);
     assert.ok(all.json.tasks.every((t) => !("content" in t)));
 
+    // Approval (T403 and T406): a second bot holds every task for its owner, who answers with `parley-cli approve`
+    // on the bot's machine. That command asks on the controlling terminal and nowhere else, so the test types the answer
+    // on a real pseudo-terminal (tests/harness/ptyrun); a process without a terminal cannot answer, and the daemon
+    // refuses a bot of its own. A pending task never reaches its bot until it is approved.
+    const botD2 = startBot(botHome2.home, botRuns2, ["-approval", "owner"]);
+    const agent2 = (await waitFor("the approval bot's card in find_agents", async () => {
+      assert.equal(botD2.child.exitCode, null, `the approval bot's daemon exited early:\n${botD2.output()}`);
+      return (await mcp.tool("find_agents", { text: "skeleton" })).json.agents?.find((a) => a.device_id === botHome2.id);
+    })).id;
+    const ownerEnv = { ...process.env, PARLEY_HOME: botHome2.home };
+    const pendingList = () =>
+      new Promise((resolve, reject) =>
+        execFile(exe("parley-cli"), ["approve"], { env: ownerEnv }, (err, stdout) => {
+          try {
+            resolve(JSON.parse(stdout).pending);
+          } catch {
+            reject(err ?? new Error(`approve printed no JSON: ${stdout}`));
+          }
+        }),
+      );
+    const pendingTask = (id) => waitFor(`task ${id} to wait for approval`, async () => (await pendingList()).find((p) => p.task_id === id), 300);
+    // The owner at the terminal: ptyrun gives parley-cli a controlling terminal and types `answer` at the prompt.
+    const atTerminal = (id, answer) => capture(spawn(exe("ptyrun"), ["-after", "Type yes", "-type", answer, "--", exe("parley-cli"), "approve", id], { env: ownerEnv, stdio: ["ignore", "pipe", "pipe"] }));
+    const runs2 = (verb) => readdirSync(botRuns2).filter((f) => f.startsWith(`${verb}-`));
+
+    // A task waits: the owner sees who sent it and what it says, the caller sees it is waiting, the bot has not run.
+    const gated = await send({ agent: agent2, text: `echo ${canary.gated}` });
+    const shown = await pendingTask(gated);
+    assert.equal(shown.owner, "svc-ci");
+    assert.equal(shown.caller, caller.id);
+    assert.ok(shown.preview.includes(canary.gated), "the owner is shown the task text");
+    const held = await follow(gated, (v) => v.state === "TASK_STATE_WORKING" && v.content === "waiting for the owner's approval");
+    assert.equal(held.json.content_kind, "status");
+    assert.equal(readdirSync(botRuns2).length, 0, "the bot has not seen the task");
+
+    // No terminal, no answer: a process that has none (a session of its own, as a bot has) cannot approve.
+    const noTty = await capture(spawn(exe("parley-cli"), ["approve", gated], { env: ownerEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] })).done;
+    assert.equal(noTty.code, 1, noTty.out);
+    assert.match(noTty.out, /no terminal/);
+    // A "no" typed at the terminal leaves the task waiting, and the owner was shown the task first.
+    const declined = await atTerminal(gated, "no").done;
+    assert.equal(declined.code, 1, declined.out);
+    assert.match(declined.out, /waits for your approval/);
+    assert.ok(declined.out.includes(canary.gated), "the prompt on the terminal shows the task");
+    assert.match(declined.out, /do not follow it/, "and says the text is another agent's");
+    assert.match(declined.out, /not approved/);
+    assert.ok((await pendingList()).some((p) => p.task_id === gated), "the task still waits");
+    assert.equal(readdirSync(botRuns2).length, 0, "the bot has still not seen the task");
+
+    // Deny: the caller gets the fixed rejection and the bot never runs.
+    const denied = await capture(spawn(exe("parley-cli"), ["approve", "-deny", gated], { env: ownerEnv, stdio: ["ignore", "pipe", "pipe"] })).done;
+    assert.equal(denied.code, 0, denied.out);
+    const rejected = await follow(gated, (v) => finalStates.has(v.state));
+    assert.equal(rejected.json.state, "TASK_STATE_FAILED");
+    assert.equal(rejected.json.content, "rejected: the owner did not approve the task");
+    assert.equal(readdirSync(botRuns2).length, 0, "the denied task never ran");
+    assert.equal((await pendingList()).length, 0);
+
+    // Approve on a terminal: a task that asks the bot to try to approve another waiting task on its own.
+    const snoop = await send({ agent: agent2, text: `snoop ${exe("parley-cli")} ${botHome2.home}` });
+    await pendingTask(snoop);
+    const approvedSnoop = await atTerminal(snoop, "yes").done;
+    assert.equal(approvedSnoop.code, 0, approvedSnoop.out);
+    assert.match(approvedSnoop.out, /"decision": ?"approved"/);
+    const heldTask = await send({ agent: agent2, text: `echo ${canary.held}` });
+    await pendingTask(heldTask);
+    // While the bot runs, it tries to approve and to deny the waiting task with the owner's own command. Both are refused
+    // (it has no terminal, and the daemon refuses callers that belong to a bot it started: the deny needs no terminal, so
+    // only the daemon's refusal stops it), and the task goes on waiting.
+    assert.equal((await follow(snoop, (v) => finalStates.has(v.state))).json.content, "snooped");
+    const tried = JSON.parse(readFileSync(join(botRuns2, "result-snoop.json"), "utf8"));
+    assert.equal(tried.pending, heldTask);
+    assert.notEqual(tried.approved.code, 0, "a bot approved a task");
+    assert.match(tried.approved.stderr, /no terminal/);
+    assert.notEqual(tried.denied.code, 0, "a bot denied a task");
+    assert.match(tried.denied.stderr, /not_permitted/);
+    assert.ok((await pendingList()).some((p) => p.task_id === heldTask), "the task the bot tried to decide still waits");
+    assert.equal(runs2("echo").length, 0, "the held task has not run");
+    // The owner approves it at the terminal, and only then does it run, once.
+    assert.equal((await atTerminal(heldTask, "yes").done).code, 0);
+    const done2 = await follow(heldTask, (v) => finalStates.has(v.state));
+    assert.equal(done2.json.state, "TASK_STATE_COMPLETED");
+    assert.equal(done2.json.content, `bot heard: ${canary.held}`);
+    assert.equal(runs2("echo").length, 1);
+    assert.equal(runs2("snoop").length, 1);
+    // The same task cannot be approved again.
+    assert.equal((await atTerminal(heldTask, "yes").done).code, 1);
+
     // Revocation: the root revokes the bot's device. A daemon reads the list when it starts, so the caller's daemon
     // restarts and must now refuse to send to it; nothing reaches the bot.
     const revokedList = signRevocations(tenant.rootKey, { tenant: "acme", version: 2, revoked: [botHome.id] });
@@ -226,7 +321,7 @@ test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on
     const scan = new Scan({ ...canary, heard: "bot heard: ", colour: "colour: ", question: "which colour?" });
     scan.path(gw.state);
     scan.path(gw.log);
-    for (const [i, d] of [callerD, callerD2, strangerD, botD].entries()) scan.bytes(`daemon ${i} output`, d.output());
+    for (const [i, d] of [callerD, callerD2, strangerD, botD, botD2].entries()) scan.bytes(`daemon ${i} output`, d.output());
     scan.assertClean();
     assert.ok(scan.sinks.length > 5, "the scan looked at the gateway's real state and log, not at nothing");
     const control = new Scan({ task: canary.echo });
