@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -26,7 +27,17 @@ func deadPID(t *testing.T) int {
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
-	return cmd.Process.Pid
+	// The process object lives on while any handle to it is open (the system's own, a scanner's); wait until it is gone.
+	for i := 0; i < 500; i++ {
+		h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
+		if err != nil {
+			return cmd.Process.Pid
+		}
+		windows.CloseHandle(h)
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the process object of an exited process never went away")
+	return 0
 }
 
 // startBot starts this binary in the given mode as the CLI adapter starts a bot (assigned to a job object that is
