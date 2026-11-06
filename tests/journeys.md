@@ -32,9 +32,9 @@ Status is `planned` until the test exists and passes, then `passing`. Update thi
 Not covered by this journey, and why:
 
 - Admin init and the recovery code: JA-01 (`acceptance.test.mjs`); the journey's admin is the test itself, which holds the root key.
-- Replay refused: the journey sends no replayed frame (that needs a gateway that replays), so removing the replay check does not turn it red. The Go replay tests and the malicious-gateway mutations (`scripts/malgw-mutations.sh`, "replay table skipped") hold it.
-- The daemon's own revocation checks (send side `Guard.CheckSend`, receive side `Revoked`): the gateway already hides a revoked device, so the journey cannot reach them; they are held by the same mutation script and the trust tests.
+- Replay refused: the journey sends no replayed frame (that needs a gateway that replays), so removing the replay check does not turn it red. It is covered by the Go replay tests (`internal/replay`, `TestReplay` in `internal/acceptance`) and `scripts/malgw-mutations.sh` ("receive: replay table skipped"), not by this journey.
+- The daemon's own revocation checks (send side `Guard.CheckSend`, receive side `Revoked`): the gateway already hides a revoked device, so the journey cannot reach them; they are covered by the Go tests (`internal/receive`, `internal/revocation`, `internal/trust`, `internal/acceptance`) and `scripts/malgw-mutations.sh` ("receive: revocation ignored"), not by this journey.
 - A revocation reaching a running daemon by its hourly refresh: the minimum interval is one minute, too slow for CI; the journey restarts the daemon, which reads the list at start.
 - A task in flight when its recipient restarts: the caller is not told; the task stays WORKING until it expires or is canceled (the journey cancels it). Whether the caller should be told is a product question for the author.
 - Approval (`none` or `owner`, JG-01): T403 tests; the bot host in the journey has no approval policy.
-- Queued retention with a dropped connection: `make queued-ttl` (about 17 minutes, no CI workflow runs it yet).
+- Queued retention with a dropped connection: `make queued-ttl` (about 17 minutes; `.github/workflows/queued-ttl.yml` runs it nightly and on demand on macOS and Linux, not as a required check).
