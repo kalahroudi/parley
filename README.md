@@ -66,7 +66,7 @@ A bot whose approval mode is `owner` (tool-using skills) does not see a task unt
 
 ```
 parley-cli approve                 # list the tasks waiting: id, caller, owner, expiry and a short preview
-parley-cli approve <task id>       # let the task run
+parley-cli approve <task id>       # show the task, ask you at the terminal, then let it run
 parley-cli approve -deny <task id> # reject it
 ```
 
@@ -77,7 +77,7 @@ A task you deny, or do not answer within 5 minutes, ends with a fixed "rejected"
 Approval is not an MCP tool and has no flag that answers for you. Three layers, each attacked from real child processes in the tests (`internal/acceptance/t406_*_test.go`):
 
 1. **You must be at a terminal.** `parley-cli approve <id>` shows you the task (who sent it, the preview) and asks on the controlling terminal (`/dev/tty` on Linux and macOS, the console on Windows) and nowhere else: not standard input, arguments or the environment. With no terminal it refuses ("no terminal to ask on"). `approve -deny` needs no terminal, since rejecting is always safe.
-2. **The daemon knows who is asking.** For `approve` and `deny` the daemon reads the process id of the program at the other end of the socket from the operating system and refuses (`not_permitted`) any program that belongs to a bot it started: the bot, its children (also in another process group), and on Windows everything in the bot's job object. If it cannot tell who is calling, it refuses.
+2. **The daemon knows who is asking.** For `approve` and `deny` the daemon reads the process id of the program at the other end of the socket from the operating system and refuses (`not_permitted`) any program that belongs to a bot it started: the bot, its children (also in another process group), and on Windows everything in the bot's job object. If it cannot tell who is calling, it refuses (on a Windows build without `SIO_AF_UNIX_GETPEERPID`, `approve` is therefore refused for everyone).
 3. **A bot is started with nothing to work with.** In a session of its own with no terminal (Linux and macOS) or detached from any console (Windows), with only the environment you configured (no socket path), with no inherited file descriptors, in a directory that is not the daemon's. The socket's directory is `0700` (a protected access list on Windows).
 
 | | Linux | macOS | Windows |
