@@ -607,13 +607,10 @@ func TestBotsStartedByTheDaemonCannotApproveTheirOwnTasks(t *testing.T) {
 	}
 }
 
-// On Windows the real daemon's control socket serves its own user (the peer's token user is read from its pid) and
+// The real daemon's control socket serves its own user on every OS (on Windows through the token check: the peer's token user is read from its pid) and
 // its directory passes the DACL check; the refusal of another user's token and of an unreadable peer is in
 // internal/localsock's Windows tests, and the DACL refusal of Everyone, Users and Authenticated Users in internal/fsperm's.
 func TestWindowsDaemonServesOnlyItsUser(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("the Windows peer check")
-	}
 	g := newPipeGW(t)
 	n := g.startOK("win-peer", nodeOpts{})
 	if err := fsperm.CheckDir(filepath.Dir(n.dirs.SocketPath())); err != nil {
