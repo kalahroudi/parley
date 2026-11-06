@@ -43,9 +43,11 @@ func dialFrom(t *testing.T, sock string, prefix ...string) string {
 	args := append(prefix[1:], exe)
 	cmd := exec.CommandContext(ctx, prefix[0], args...)
 	cmd.Env = append(os.Environ(), t406Env+"=dial", "PARLEY_T406_SOCK="+sock)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("%v: %v", prefix, err)
+		t.Fatalf("%v: %v: %s", prefix, err, stderr.String())
 	}
 	var line struct{ Content []byte }
 	if err := json.Unmarshal(out, &line); err != nil {

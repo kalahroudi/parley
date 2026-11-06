@@ -1,3 +1,6 @@
+;; Copyright 2026 The Parley Authors
+;; SPDX-License-Identifier: Apache-2.0
+;;
 ;; Parley: keep a bot away from the daemon's local socket (macOS).
 ;; Run the bot as:  sandbox-exec -f macos.sb <bot command> [args...]
 ;; The bot can still do everything else (files, network); it cannot connect to, or create, a Unix-domain socket.

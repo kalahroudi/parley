@@ -8,6 +8,8 @@ package adapter
 import (
 	"os/exec"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // A command that has already been reaped cannot be put in a job: containment fails rather than being skipped.
@@ -18,5 +20,14 @@ func TestContainTreeFailsForAProcessThatIsGone(t *testing.T) {
 	}
 	if kill, err := containTree(cmd); err == nil || kill != nil {
 		t.Fatalf("contained a reaped process: %v", err)
+	}
+}
+
+// A bot gets no console, so it cannot ask the owner's terminal.
+func TestPrepareDetachesTheBotFromAnyConsole(t *testing.T) {
+	cmd := exec.Command("cmd")
+	prepare(cmd)
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.CreationFlags&windows.DETACHED_PROCESS == 0 {
+		t.Error("the command would share the daemon's console")
 	}
 }

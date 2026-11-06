@@ -8,6 +8,7 @@ package adapter
 import (
 	"errors"
 	"os/exec"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -15,7 +16,11 @@ import (
 	"github.com/kalahroudi/parley/internal/botproc"
 )
 
-func prepare(*exec.Cmd) {}
+// prepare starts the command with no console: it has nothing to read the owner's answer from (see ttyconfirm), and it
+// does not share the daemon's console.
+func prepare(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
+}
 
 // containTree puts the command in a job object that kills everything in it when terminated or closed (so also if the
 // daemon dies), and returns the function that does so. Each step runs even if an earlier one failed (a bad handle
