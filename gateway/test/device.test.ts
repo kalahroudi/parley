@@ -4,6 +4,7 @@
 import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_HELD, type Device, type Held } from "../src/device";
+import { CLOSE_REVOKED } from "../src/protocol";
 import type { Task } from "../src/task";
 
 // Sockets outlive a test's storage isolation, so each test gets its own device name.
@@ -112,6 +113,19 @@ describe("handshake", () => {
     expect((await a.closed())?.code).toBe(4409);
     b.send(hello());
     expect((await b.next()).t).toBe("welcome");
+  });
+
+  it("closes every socket with the revoked code and its reason, keeps nothing, and can be repeated (T503)", async () => {
+    const c = await connect();
+    c.send(hello());
+    expect((await c.next()).t).toBe("welcome");
+    await runInDurableObject(stubFor(), async (_i, ctx) => ctx.storage.put("held", [{ tenant: "t1", device: dev, task: "x", until: Date.now() + 1000 }]));
+    expect(await runInDurableObject(stubFor(), async (_i, ctx) => Object.keys(Object.fromEntries(await ctx.storage.list())).sort())).toEqual(["held", "session"]);
+    await stubFor().revoke();
+    expect(await c.closed()).toMatchObject({ code: CLOSE_REVOKED, reason: "revoked" });
+    expect(await runInDurableObject(stubFor(), async (_i, ctx) => Object.fromEntries(await ctx.storage.list()))).toEqual({});
+    expect((await stubFor().status()).connected).toBe(false);
+    await stubFor().revoke(); // nothing left, nothing to close
   });
 
   it("isolates devices by tenant", async () => {
