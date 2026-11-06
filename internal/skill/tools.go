@@ -105,12 +105,13 @@ func decide(b *toolgate.Broker, approve bool) localsock.Method {
 			return nil, &localsock.RPCError{Code: approval.CodeBadParams}
 		}
 		err := b.Decide(id, p.Call, p.Digest, approve, toolgate.Scope(p.Scope))
-		switch {
-		case errors.Is(err, toolgate.ErrDigest):
+		if errors.Is(err, toolgate.ErrDigest) {
 			return nil, &localsock.RPCError{Code: CodeDigest}
-		case errors.Is(err, toolgate.ErrScope):
+		}
+		if errors.Is(err, toolgate.ErrScope) {
 			return nil, &localsock.RPCError{Code: CodeScope}
-		case err != nil:
+		}
+		if err != nil {
 			return nil, &localsock.RPCError{Code: approval.CodeNotFound}
 		}
 		return struct {

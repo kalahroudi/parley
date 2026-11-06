@@ -19,6 +19,7 @@ import (
 
 	"github.com/kalahroudi/parley/internal/adapter"
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/botproc"
 )
 
 // recordingTools is the Tools a CLI gets in these tests.
@@ -206,5 +207,27 @@ func TestRunContainedRefusesWhatCannotStartOrBeContained(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if fi, _ = os.Stat(beat); fi != nil && fi.Size() != was {
 		t.Fatal("the command that could not be contained is still running")
+	}
+}
+
+// A tool process is registered with the daemon's registry from the moment it starts until it is reaped, exactly like a bot,
+// so the daemon refuses it the commands that change what it trusts.
+func TestRunContainedRegistersTheCommandWhileItRuns(t *testing.T) {
+	pids := make(chan int, 1)
+	restore := adapter.SetContain(func(cmd *exec.Cmd) (func(), error) {
+		pids <- cmd.Process.Pid
+		return func() { _ = cmd.Process.Kill() }, nil
+	})
+	defer restore()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go run(t, ctx, 10, "deaf")
+	pid := <-pids
+	own, err := botproc.Default.Owns(pid)
+	if !own && !errors.Is(err, botproc.ErrUnknown) { // on Windows the job is not tracked by the stand-in, which is refused too
+		t.Errorf("the running command is not registered: %v %v", own, err)
+	}
+	if runtime.GOOS != "windows" && (!own || err != nil) {
+		t.Errorf("the running command is not taken for a bot: %v %v", own, err)
 	}
 }
