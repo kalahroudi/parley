@@ -114,9 +114,13 @@ not a boundary against the user's own processes:
 | | Another standard local user | Same user's other processes | Administrator / root |
 |---|---|---|---|
 | Linux, macOS | cannot connect (0700 directory, 0600 socket, kernel-checked uid) | can connect and call every method | can connect |
-| Windows | cannot open the directory (protected DACL) | can connect and call every method | can connect |
+| Windows | cannot open the directory (protected DACL); the connecting process's token user is checked too | can connect and call every method | can open the directory but is refused unless running as the daemon's user |
 
-On Windows nothing re-checks the caller once the directory is reachable (AF_UNIX
-there carries no peer credentials); a named pipe with a current-user ACL, or an
-equivalent peer check, is task T505 (`TestPending_WindowsDaemonPeerRestriction`
-fails CI once T505 is ticked).
+On Windows AF_UNIX carries no peer credentials, so the daemon reads the pid of
+each connecting process (`SIO_AF_UNIX_GETPEERPID`), opens its token and refuses
+the connection unless the token's user SID is the daemon's own (anything that
+cannot be read is refused). The pid is looked up after accept, so a peer that
+exits and whose pid is reused before the lookup is judged as the new process;
+the directory's protected DACL still keeps other users out of the socket.
+Administrators and SYSTEM can still open the directory but are refused unless
+they are the daemon's user.

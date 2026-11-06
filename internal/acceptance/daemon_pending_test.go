@@ -217,7 +217,3 @@ func TestDaemonFindsPeerBindingsThroughTheGateway(t *testing.T) {
 		t.Fatal("the lookup did not name the device it wanted")
 	}
 }
-
-func TestPending_WindowsDaemonPeerRestriction(t *testing.T) {
-	pending(t, "T505", "on Windows the control socket is AF_UNIX in a protected-DACL directory with no peer-credential check (see internal/localsock). Assert the Windows daemon uses a named pipe with a current-user-only ACL, or an equivalent peer check, and that a process of another local user cannot connect, while the same user can; also that the DACL check refuses a pipe or directory open to Everyone, Users or Authenticated Users")
-}
