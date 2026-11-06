@@ -4,6 +4,7 @@
 package adapter_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +54,16 @@ func helper(mode string) {
 				return
 			}
 		}
+	case "emit": // PARLEY_N copies of PARLEY_OUT, then it leaves
+		for i, _ := strconv.Atoi(os.Getenv("PARLEY_N")); i > 0; i-- {
+			os.Stdout.WriteString(os.Getenv("PARLEY_OUT"))
+		}
+	case "bigerror": // an error message far larger than the caller may be shown
+		fmt.Printf(`{"type":"error","message":"%s"}`+"\n", strings.Repeat("é", 100000))
+		time.Sleep(time.Minute)
+	case "firstline": // answers with the raw first line it was sent
+		line, _ := bufio.NewReaderSize(os.Stdin, 1<<22).ReadBytes('\n')
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: line})
 	case "deaf": // never reads its input, never answers
 		time.Sleep(time.Minute)
 	case "env":
