@@ -50,6 +50,8 @@ parley-cli test -to <device id of the other device>    # prints PASS, or says wh
 
 It sends a random text, sealed, to the other device's built-in test bot and checks the echo that comes back sealed: enrollment, gateway, prekey exchange and both directions of the encrypted transport in one step. The test bot answers only devices of its own owner, and a device does not answer itself, hence the second device. `disable_test_bot` in `config.json` turns it off. Exit codes: `0` pass, `1` fail (the reason is printed), `2` usage.
 
+To see the whole thing work on one machine with nothing to set up, run `make m1` (Go, Node and `cd gateway && npm ci`): it starts the real gateway locally with three real daemons, runs `parley-cli test` between them, and also checks that a device of another owner, an unknown device, a revoked device and a stopped daemon are refused with a clear message, that the gateway's storage and log hold none of the text, and that the daemons shut down cleanly.
+
 ## Calling agents: MCP and CLI
 
 `parley-cli mcp` is an MCP server on stdio with five tools: `find_agents`, `send_task`, `get_task`, `cancel_task`, `list_tasks`. The same five are the CLI commands `find`, `send`, `get`, `cancel` and `list`; both go through the same code and the same local socket. None of them can read keys, bindings or message history, or change trust.

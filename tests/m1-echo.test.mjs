@@ -163,6 +163,7 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
     scan.path(gw.log);
     scan.bytes("the CLI output", pass.out); // control: the CLI itself does not print the text either
     scan.assertClean();
+    assert.ok(scan.sinks.length > 5 && readFileSync(gw.log).length > 0, "the scan looked at the gateway's real state and log, not at nothing");
     const control = new Scan({ task: "parley-test " });
     control.bytes("planted", "x parley-test y");
     assert.equal(control.report().length, 1, "the scan can see the text it looks for");
