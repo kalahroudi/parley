@@ -23,9 +23,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Daemon lifecycle (CTRL_BREAK, single instance, restart)
         run: go test -count=1 -v -run 'TestWindowsDaemonLifecycle' ./internal/acceptance
       - name: Key-memory scan (in-process scan, kernel lock state, minidump of the child)
         run: go test -count=1 -v -run 'TestWindowsKeyMemoryScan' ./internal/acceptance
       - name: Per-user install, autostart and uninstall (docs/windows/install.ps1)
         run: go test -count=1 -v -run 'TestWindowsInstall' ./internal/acceptance
+      # M1 (T414) on Windows: two real parleyd.exe and the real parley-cli.exe, a real gateway (wrangler dev with real
+      # Durable Objects), `parley-cli test` between the daemons. It must have run, not been skipped.
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      - name: M1 echo between two Windows daemons through the real gateway
+        shell: bash
+        run: |
+          node --test tests/m1-echo.test.mjs | tee m1.out
+          grep -q "^# pass 1$" m1.out && grep -q "^# skipped 0$" m1.out && grep -q "^# fail 0$" m1.out

@@ -41,6 +41,20 @@ backs. The plan calls erasure best effort, and it is.
   "the daemon hardens crash dumps on Windows" from this page. `VirtualLock` is
   also subject to the process working-set size; Windows may write locked pages
   at hibernation.
+- **Windows scan (T505, `TestWindowsKeyMemoryScan`).** A child holds live and erased
+  prekeys. It scans its own committed memory, the kernel's working-set information
+  (`QueryWorkingSetEx`) must say the key region is locked, and then another
+  process writes a full-memory minidump of the child (`MiniDumpWriteDump`) and the
+  file is scanned for each key by fingerprint. Measured on `windows-latest`: no
+  erased key in the locked region, at most `maxWinHeapResidue` (2) copies of an erased key in
+  the whole address space and in the minidump (the same count from both views),
+  none of a live key in the region after Close and at most `maxWinLiveAfterClose` (3)
+  in the heap, a planted key and every live key found by both scans (so the scans
+  can see). A dump tool, or anything with `PROCESS_VM_READ`, therefore finds the
+  Go-heap residue and the live keys while the daemon runs; it does not find an erased
+  key in the locked region. What it does not show: a crash dump written by WER (the
+  daemon does not prevent it, see above) and the registers and stacks of
+  other threads (the signal-frame guard is Linux only, below).
 - **Erasure.** The raw scalar slots are zeroed on use. Go's `crypto/ecdh` key
   objects copy the scalar (at Issue, deriving the public key, and at each HPKE
   open) and cannot be zeroed, so up to `maxHeapResidue` copies of a used key can
