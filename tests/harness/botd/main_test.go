@@ -32,13 +32,19 @@ func self(t *testing.T) string {
 	return p
 }
 
+// shortDir is a directory with a short path: the daemon's socket lives in it and its path is limited to 100 characters
+// (t.TempDir would put the test's name in the path, which on Windows is too long for the longer test names).
 func shortDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "botd")
 	if err != nil {
-		dir = t.TempDir()
-	} else {
-		t.Cleanup(func() { os.RemoveAll(dir) })
+		if dir, err = os.MkdirTemp("", "botd"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if len(dir) > 60 {
+		t.Fatalf("the test directory %q is too long for the daemon's socket path", dir)
 	}
 	return dir
 }
