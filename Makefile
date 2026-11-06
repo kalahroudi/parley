@@ -1,4 +1,4 @@
-.PHONY: m1 fuzz-smoke fuzz-long malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
+.PHONY: m1 queued-ttl fuzz-smoke fuzz-long malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
 
 test: test-layout test-go test-gateway
 
@@ -38,6 +38,11 @@ test-go:
 # three real daemons, and checks `parley-cli test` end to end (needs Go, Node and `cd gateway && npm ci`).
 m1:
 	node --test tests/m1-echo.test.mjs
+
+# T405: Queued retention with a real daemon whose connection drops. The shortest tenant TTL is 15 minutes, so this takes
+# about 17 (macOS and Linux; needs Go, Node and `cd gateway && npm ci`). Not part of `make test`; the Queued TTL workflow runs it.
+queued-ttl:
+	node --test tests/slow/queued-ttl.mjs
 
 # Boot the gateway, a mock OIDC server and N daemons (default 2): make dev N=3
 dev:

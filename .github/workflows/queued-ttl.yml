@@ -1,0 +1,53 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Queued TTL (real daemons)
+
+# T405: a real daemon loses its connection while a task runs, the bot's result is held for the tenant's Queued TTL,
+# and a daemon that comes back after the TTL receives nothing. The shortest TTL a tenant can set is 15 minutes, so
+# the test takes about 17 minutes of real time per OS; it is its own workflow so the main CI run stays fast.
+# It runs on pull requests that touch what it exercises, on every push to main and nightly.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "gateway/src/**"
+      - "internal/**"
+      - "cmd/**"
+      - "tests/slow/**"
+      - "tests/harness/**"
+      - ".github/workflows/queued-ttl.yml"
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: queued-ttl-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  queued-ttl:
+    name: queued TTL (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      - name: Queued TTL with a real daemon
+        run: make queued-ttl

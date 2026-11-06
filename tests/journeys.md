@@ -12,9 +12,9 @@ Status is `planned` until the test exists and passes, then `passing`. Update thi
 | B Employee enrollment | JB-02 | 5 | planned | Install from each channel with checksum and signature verified, service starts on boot, batch approval, `parley-cli test` succeeds |
 | C Publish a bot | JC-01 | 3 | planned | Publish a card with visibility, groups and allowlist; the secrets lint rejects a secret; several bots on one daemon |
 | D Discover and call | JD-01 | 3 | planned | `find_agents` and `send_task` / `get_task` between two daemons; binding and revocation verified before send |
-| D Discover and call | JD-02 | 4 | planned | A real MCP client finds and calls a bot across two machines; results marked untrusted (T405) |
+| D Discover and call | JD-02 | 4 | passing | A real MCP client finds and calls a bot across two machines; results marked untrusted (T405) |
 | E Long tasks | JE-01 | 3 | planned | Full lifecycle SUBMITTED, WORKING, COMPLETED with encrypted status text; FAILED, CANCELED, REJECTED terminals |
-| E Long tasks | JE-02 | 4 | planned | INPUT_REQUIRED question and reply on the same task through the MCP client |
+| E Long tasks | JE-02 | 4 | passing | INPUT_REQUIRED question and reply on the same task through the MCP client |
 | F Not-happy paths | JF-01 | 3 | planned | Offline target (wait then FAILED at expiry), busy (queue 5 then REJECTED), not permitted (REJECTED, bot hidden), timeout |
 | F Not-happy paths | JF-02 | 4 | planned | Recipient restart loses keys and resend succeeds; caller disconnected in Strict; revocation list too old refuses send |
 | G Approval | JG-01 | 4 | planned | `none` runs tool-less skills; `owner` waits for `parley-cli approve <id>`; no answer in 5 min is REJECTED |
