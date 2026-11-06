@@ -27,7 +27,7 @@
 // What it does not guarantee: the socket is open to every process of the same OS
 // user (see internal/localsock), so a bot that runs as the owner and can reach the
 // socket can approve its own tasks. Keeping tool-using skills away from the socket
-// is the sandbox's job (T406, T507); until then the approval is a confirmation
+// is the sandbox's job (T507; T406 only tests what a bot is handed); until then the approval is a confirmation
 // for the owner, not a boundary against code running as the owner.
 package approval
 
