@@ -3,6 +3,7 @@
 
 import type { Env } from "./index";
 import { confirmPage } from "./login";
+import { fold } from "./text";
 import { SESSION_TTL_MS, type Role, tenantStub } from "./tenant";
 
 // Over HTTPS the cookie is `__Host-` prefixed: the browser then refuses it unless it is Secure, has Path=/ and no
@@ -21,8 +22,8 @@ const token = (tenant: string, secret: string) => `ps_${tenant}.${secret}`;
 // ADMINS is a comma-separated list of `tenant:email` pairs. Anyone not listed
 // for the tenant is refused an admin session, whatever the IdP says.
 export function isAdmin(env: Env, tenant: string, email: string): boolean {
-  const want = `${tenant}:${email.toLowerCase()}`;
-  return (env.ADMINS ?? "").split(",").some((e) => e.trim().toLowerCase() === want);
+  const want = `${tenant}:${fold(email)}`;
+  return (env.ADMINS ?? "").split(",").some((e) => fold(e.trim()) === want);
 }
 
 // A user session needs the tenant to say who may have one, or it is refused. USERS is `tenant:email` pairs and
@@ -31,11 +32,11 @@ export function isAdmin(env: Env, tenant: string, email: string): boolean {
 // `a+x@acme.test` but not `a@evil.acme.test`, `a@acme.test.evil.com` or an address with a second `@`.
 // Admins are governed by ADMINS alone; an admin who also needs a user session is listed in USERS.
 export function isUser(env: Env, tenant: string, email: string): boolean {
-  const e = email.trim().toLowerCase();
+  const e = fold(email.trim());
   const at = e.indexOf("@");
   if (at < 1 || at !== e.lastIndexOf("@") || at === e.length - 1) return false;
-  const t = tenant.toLowerCase();
-  const listed = (v: string | undefined) => (v ?? "").split(",").map((x) => x.trim().toLowerCase());
+  const t = fold(tenant);
+  const listed = (v: string | undefined) => (v ?? "").split(",").map((x) => fold(x.trim()));
   if (listed(env.USERS).includes(`${t}:${e}`)) return true;
   return listed(env.USER_DOMAINS).includes(`${t}:${e.slice(at + 1)}`);
 }

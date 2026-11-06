@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { ACCOUNT_ENV, OPT_IN, accountId, assertName, checkCeiling, requireOptIn, configPath, remaining, removeConfig, secretCommand, secretNames, verifyAccount, wranglerConfig, writeConfig } from "./safety.mjs";
+import { ACCOUNT_ENV, OPT_IN, accountId, assertBucket, assertName, checkCeiling, createBucket, deleteBucket, requireOptIn, configPath, remaining, remainingBuckets, removeConfig, retentionConfig, secretCommand, secretNames, verifyAccount, wranglerConfig, writeConfig, writeRetentionConfig } from "./safety.mjs";
 
 // A made-up account id, and the opt-in: these tests never reach a real account (every call is injected).
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
@@ -105,4 +105,45 @@ test("secretNames returns names only, checks the account first, and is [] when t
   assert.deepEqual(secretNames("parley-test-login", () => "not json", verify), []);
   assert.throws(() => secretNames("other", run, verify), /refusing/);
   assert.throws(() => secretNames("parley-test-login", run, () => { throw new Error("wrong account"); }), /wrong account/);
+});
+
+test("T308: the retention config adds one SQLite Durable Object and one parley-test-* bucket and nothing else", () => {
+  const c = retentionConfig({ name: "parley-test-r2-x", bucket: "parley-test-r2-x", entry: "/e.ts", vars: { PROBE_TOKEN: "t" } });
+  assert.equal(c.account_id, ACCOUNT_ID);
+  assert.equal(c.workers_dev, true);
+  assert.deepEqual(c.r2_buckets, [{ binding: "BUCKET", bucket_name: "parley-test-r2-x" }]);
+  assert.deepEqual(c.durable_objects.bindings, [{ name: "VAULT", class_name: "Vault" }]);
+  assert.deepEqual(c.migrations, [{ tag: "v1", new_sqlite_classes: ["Vault"] }]);
+  for (const k of ["routes", "route", "zone_id", "d1_databases", "kv_namespaces"]) assert.ok(!(k in c), k);
+  assert.throws(() => retentionConfig({ name: "parley-test-r2-x", bucket: "customer-data", entry: "/e.ts", vars: {} }), /refusing bucket/);
+  assert.throws(() => retentionConfig({ name: "other", bucket: "parley-test-r2-x", entry: "/e.ts", vars: {} }), /refusing Worker name/);
+  for (const bad of ["parley-test-", "Parley-test-x", "parley-test-x/y", "parley-test-x y", `parley-test-${"a".repeat(60)}`, "x-parley-test-y"]) assert.throws(() => assertBucket(bad), /refusing bucket/, bad);
+});
+
+test("T308: buckets are created, deleted and listed only after the account check, and only when named parley-test-*", () => {
+  const name = "parley-test-r2-unit";
+  const seen = [];
+  const verify = () => seen.push("verify");
+  const run = (args, config) => (seen.push(args.join(" ")), args[2] === "list" ? "name: parley-test-r2-aa\nname: customer-data\nname: parley-test-r2-aa\n" : "");
+  createBucket(name, "parley-test-r2-aa", run, verify);
+  deleteBucket(name, "parley-test-r2-aa", run, verify);
+  assert.deepEqual(remainingBuckets(name, run, verify), ["parley-test-r2-aa"]);
+  assert.deepEqual(seen, ["verify", "r2 bucket create parley-test-r2-aa", "verify", "r2 bucket delete parley-test-r2-aa", "verify", "r2 bucket list"]);
+  assert.throws(() => createBucket(name, "customer-data", run, verify), /refusing bucket/);
+  assert.throws(() => deleteBucket(name, "customer-data", run, verify), /refusing bucket/);
+  assert.throws(() => deleteBucket("other", "parley-test-r2-aa", run, verify), /refusing Worker name/);
+  assert.throws(() => createBucket(name, "parley-test-r2-aa", run, () => { throw new Error("wrong account"); }), /wrong account/);
+  assert.throws(() => remainingBuckets(name, run, () => { throw new Error("wrong account"); }), /wrong account/);
+});
+
+test("T308: the retention config is written privately and removed afterwards", () => {
+  const path = writeRetentionConfig("parley-test-r2-unit", "parley-test-r2-unit", { PROBE_TOKEN: "t" });
+  try {
+    assert.ok(path.startsWith(tmpdir()));
+    if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o077, 0);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).r2_buckets[0].bucket_name, "parley-test-r2-unit");
+  } finally {
+    removeConfig("parley-test-r2-unit");
+  }
+  assert.ok(!existsSync(path));
 });

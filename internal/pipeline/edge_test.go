@@ -622,3 +622,21 @@ func TestPrekeyRequestEndsWithItsContextOrItsTimer(t *testing.T) {
 		t.Fatal("a request that ended is still waiting")
 	}
 }
+
+// Close wipes the content of every send still queued. Put there directly: whether a queued send is still waiting when a
+// test closes the node otherwise depends on timing, and the coverage gate must not.
+func TestCloseWipesQueuedContent(t *testing.T) {
+	w := newWorld(t, "alice")
+	a := w.devs["alice"].node
+	content := []byte("secret")
+	a.mu.Lock()
+	a.queue["k"] = &queued{content: content}
+	a.mu.Unlock()
+	a.Close()
+	if !bytes.Equal(content, make([]byte, len("secret"))) {
+		t.Fatalf("queued content survived Close: %q", content)
+	}
+	if len(a.queue) != 0 {
+		t.Fatal("queue survived Close")
+	}
+}

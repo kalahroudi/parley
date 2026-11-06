@@ -6,6 +6,8 @@
 // in Node. Login state is stateless: a signed `flow` value (kept by the browser
 // in an HttpOnly cookie) carries the state, nonce and PKCE verifier.
 
+import { fold } from "./text.ts";
+
 export type Provider = {
   name: string;
   issuer: string;
@@ -224,7 +226,7 @@ export async function completeLogin(
   const claims = await verifyIdToken(p, f, meta, tok.id_token, String(fl.nonce), nowMs);
   if (p.tenantId && claims.tid !== p.tenantId) throw new OidcError("tenant_mismatch");
   if (p.hostedDomain && claims.hd !== p.hostedDomain) throw new OidcError("tenant_mismatch");
-  const email = String(claims.email ?? claims.preferred_username ?? "").toLowerCase();
+  const email = fold(String(claims.email ?? claims.preferred_username ?? ""));
   if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new OidcError("no_email");
   if (p.requireVerifiedEmail && claims.email_verified !== true) throw new OidcError("email_unverified");
   return { provider: p.name, issuer: p.issuer, sub: claims.sub, email, tenantId: p.tenantId, ...(s && { session: { tenant: s.tenant!, role: s.role!, ...(s.device !== undefined && { device: s.device }) } }) };

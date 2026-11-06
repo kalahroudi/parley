@@ -28,7 +28,7 @@
 // Identities compare case-insensitively. Groups are per tenant (one Tenant DO
 // each), so no rule ever sees another tenant's data.
 
-import { cleanText } from "./text";
+import { cleanText, fold } from "./text";
 
 export const MAX_CARDS_PER_DEVICE = 20;
 export const MAX_GROUPS = 100;
@@ -70,7 +70,7 @@ export type ValidationError = "bad_card" | "bad_group" | "bad_members" | "bad_qu
 
 const VISIBILITY: readonly string[] = ["tenant", "groups", "private"];
 // Names are case-insensitive: "Eng" and "eng" are one group.
-const groupName = (v: unknown) => (typeof v === "string" ? cleanText(v, 64)?.toLowerCase() ?? null : null);
+const groupName = (v: unknown) => (typeof v === "string" ? fold(cleanText(v, 64) ?? "") || null : null);
 
 // Common credential shapes. Best effort: the lint stops accidents, not attackers.
 const SECRET_PATTERNS: readonly RegExp[] = [
@@ -105,7 +105,7 @@ function strings(v: unknown, max: number, len: number, lower: boolean): string[]
   for (const x of v) {
     const t = typeof x === "string" ? cleanText(x, len) : null;
     if (t === null) return null;
-    out.push(lower ? t.toLowerCase() : t);
+    out.push(lower ? fold(t) : t);
   }
   return [...new Set(out)];
 }
@@ -140,7 +140,7 @@ export function validateGroup(name: unknown, members: unknown): { name: string; 
 // The groups a viewer belongs to, given every group as [name, members].
 export function memberships(groups: Iterable<[string, readonly string[]]>, viewer: string): Set<string> {
   const out = new Set<string>();
-  const who = viewer.toLowerCase();
+  const who = fold(viewer);
   if (who) for (const [name, members] of groups) if (members.includes(who)) out.add(name);
   return out;
 }
@@ -148,7 +148,7 @@ export function memberships(groups: Iterable<[string, readonly string[]]>, viewe
 // Whether `viewer` may see (and so call) a card. The owner always can.
 export function canSee(card: Pick<Card, "visibility" | "groups">, owner: string, viewer: string, viewerGroups: ReadonlySet<string>): boolean {
   if (!viewer) return false;
-  if (viewer.toLowerCase() === owner.toLowerCase()) return true;
+  if (fold(viewer) === fold(owner)) return true;
   if (card.visibility === "tenant") return true;
   if (card.visibility === "groups") return card.groups.some((g) => viewerGroups.has(g));
   return false;

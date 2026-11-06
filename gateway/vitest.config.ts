@@ -10,7 +10,7 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       // The per-device limits are raised for every suite but ratelimit.test.ts, which sets its own.
       // Tests mint admin sessions for admin@example.test in tenants named <prefix><n>.
-      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(","), RATE_TASK_PER_MIN: "100000", RATE_MESSAGE_PER_MIN: "100000", RATE_FIND_PER_MIN: "100000", RATE_CONNECT_PER_MIN: "100000" } },
+      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev", "acl", "ret"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(","), RATE_TASK_PER_MIN: "100000", RATE_MESSAGE_PER_MIN: "100000", RATE_FIND_PER_MIN: "100000", RATE_CONNECT_PER_MIN: "100000" } },
     }),
   ],
   test: {

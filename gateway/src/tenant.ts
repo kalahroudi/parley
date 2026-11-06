@@ -22,7 +22,7 @@ import {
 import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "./connect";
 import type { Env } from "./index";
 import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, type Retention } from "./task";
-import { cleanText } from "./text";
+import { cleanText, fold } from "./text";
 
 export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
 export const TOKEN_TTL_MAX_MS = 7 * 24 * 3600_000;
@@ -298,7 +298,10 @@ export class Tenant extends DurableObject<Env> {
         return same ? { id: prior.id, poll: input.poll! } : { error: "conflict" };
       }
     }
-    let owner = input.user === undefined ? undefined : cleanText(input.user, 254)?.toLowerCase();
+    // The owner is the session's email as the IdP gave it (folded), never its NFC form: NFC maps the Kelvin sign to "K", so a
+    // different account would become a listed member. An email that NFC would change is refused.
+    const clean = input.user === undefined ? undefined : cleanText(input.user, 254);
+    let owner = input.user === undefined ? undefined : clean === input.user.trim() ? fold(clean ?? "") : "";
     if (input.user !== undefined && !owner) return { error: "bad_request" };
     let kind: Enrollment["kind"] = "user";
     let tokKey: string | undefined;
@@ -416,7 +419,7 @@ export class Tenant extends DurableObject<Env> {
   private async ownerOf(device: string): Promise<string | null> {
     if (!isDeviceId(device) || (await this.revokedIds()).has(device)) return null;
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${device}`);
-    return rec && rec.status === "approved" && rec.binding ? rec.owner.toLowerCase() : null;
+    return rec && rec.status === "approved" && rec.binding ? fold(rec.owner) : null;
   }
 
   // The root-signed binding of `target` for the calling device, or null. Both must be enrolled (approved, bound, not
@@ -526,7 +529,7 @@ export class Tenant extends DurableObject<Env> {
     const revoked = await this.revokedIds();
     const out = new Map<string, string>();
     for (const [k, r] of await this.ctx.storage.list<StoredEnrollment>({ prefix: "enr:" })) {
-      if (r.status === "approved" && r.binding && !revoked.has(k.slice(4))) out.set(k.slice(4), r.owner.toLowerCase());
+      if (r.status === "approved" && r.binding && !revoked.has(k.slice(4))) out.set(k.slice(4), fold(r.owner));
     }
     return out;
   }

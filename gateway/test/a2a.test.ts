@@ -36,6 +36,9 @@ async function connect(T: string, device: string) {
 }
 
 const errCode = (r: any) => r.error?.code;
+// The long state walks go through a Worker and several Durable Objects per step; Windows CI storage writes are ~24 ms each and the
+// walk shares the machine with the other suites (it took over 60 s once), so Windows gets the global Windows allowance.
+const LONG_WALK_MS = process.platform === "win32" ? 180_000 : 60_000;
 const ROLE: Record<string, string> = { TASK: "ROLE_USER", REPLY: "ROLE_USER", CANCEL: "ROLE_USER" };
 
 function world() {
@@ -355,7 +358,7 @@ describe("lifecycle over the transport", () => {
         if (!allowed) expect([-32015, -32002], `${name} from ${from}`).toContain(errCode(r));
       }
     }
-  }, 60_000);
+  }, LONG_WALK_MS);
 
   it("a target that went offline closes the task instead of leaving it to expire", async () => {
     const w = world();
@@ -425,7 +428,7 @@ describe("lifecycle over the transport", () => {
     expect(errCode(await st(4))).toBe(-32015);
     // About 25 requests through the Worker and several Durable Objects: seconds on Windows CI storage (41 s on one noisy run), so it
     // gets the same explicit limit as the other long walks in this file rather than a higher global one.
-  }, 60_000);
+  }, LONG_WALK_MS);
 
   it("a third device, another tenant and a missing task all look like no task", async () => {
     const w = world();
