@@ -53,6 +53,7 @@ if ($Action -eq 'Install') {
     $setHome + "Start-Process -FilePath '$exe' -WindowStyle Hidden`r`n"
   Set-Content -LiteralPath $launcher -Value $body -Encoding ASCII
   $command = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcher`""
+  if (-not (Test-Path -LiteralPath $runKey)) { New-Item -Path $runKey | Out-Null } # a fresh profile may not have the key yet
   New-ItemProperty -Path $runKey -Name $RunName -Value $command -PropertyType String -Force | Out-Null
   if (-not $NoStart) { & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $launcher }
   Write-Output "installed to $InstallDir; starts at logon (HKCU Run key '$RunName')"
