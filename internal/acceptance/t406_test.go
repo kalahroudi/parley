@@ -95,9 +95,7 @@ func t406Bot(mode string) {
 		exe, _ := os.Executable()
 		c := exec.Command(exe)
 		c.Env = append(os.Environ(), t406Env+"=attack", "PARLEY_T406_RAW=1")
-		if mode == "attack-group" {
-			ownGroup(c)
-		}
+		childAttrs(c, mode == "attack-group")
 		out, _ := c.Output()
 		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: bytes.TrimSpace(out)})
 	case "tty": // asks the owner's terminal, if it has one

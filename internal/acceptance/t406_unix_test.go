@@ -55,7 +55,12 @@ func TestBotDoesNotInheritALeakedSocket(t *testing.T) {
 	}
 }
 
-func ownGroup(c *exec.Cmd) { c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
+// childAttrs sets how a bot starts its own child: in the bot's session either way, and in a process group of its own if asked.
+func childAttrs(c *exec.Cmd, ownGroup bool) {
+	if ownGroup {
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+}
 
 // A daemon that has a controlling terminal (the owner started it in a window) does not pass it on: the bot the adapter
 // starts has none, so it cannot ask the owner's terminal, and a "yes" typed at that terminal is not read by the bot.
