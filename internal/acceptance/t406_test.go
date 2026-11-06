@@ -3,22 +3,29 @@
 
 package acceptance
 
-// T406 (spike 7): what a bot is given of the local socket, and what hostile inputs
-// (a bot's output, a local client, an MCP client) can make the daemon do. The
-// scenarios run against a real daemon and its real socket, the real CLI adapter and
-// the real MCP server.
+// T406 (spike 7): a bot the daemon starts cannot approve its own tasks, and hostile inputs (a bot's output, a local
+// client, an MCP client) stay within limits. The scenarios run against a real daemon and its real socket, the real CLI
+// adapter, the real MCP server and real child processes.
 //
-// What this proves and what it does not. A bot started by the CLI adapter is given
-// no path, no descriptor and no environment that leads to the daemon's socket, and
-// the socket refuses other OS users. A bot is still a process of the same OS user:
-// if it guesses the socket's location it can connect, because the socket is not a
-// boundary against the user's own processes (see internal/localsock). Closing that
-// needs an operating-system sandbox, which does not exist yet (T507); the named
-// pending test at the end of this file fails once T507 is ticked.
+// What a bot is up against, in layers, each attacked from a real child process below:
+//
+//  1. No terminal. The owner's confirmation is read from the controlling terminal only (internal/ttyconfirm); a bot is
+//     started in a session of its own, so it has none, and a daemon that has a terminal does not pass it on.
+//  2. The daemon knows who is calling. For approve and deny it reads the pid of the process at the other end of the
+//     socket from the kernel and refuses any process that belongs to a bot it started (internal/botproc): the bot, its
+//     children, its children in another process group, and on Windows everything in its job object.
+//  3. A bot is handed no socket path, no descriptor and none of the daemon's environment, and the socket is in a
+//     directory only the owner can enter.
+//
+// What this does not close, and the README says so: a process of the same OS user that Parley did not start (it is not
+// in any bot's tree), or a bot's descendant that leaves its session and process group and loses its parent, is not
+// recognised, and a process that makes itself a pseudo-terminal can type "yes" on it. Only an operating-system
+// sandbox covers those; the profiles are in docs/sandbox and the macOS one is run against the daemon's socket below.
 
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,10 +42,13 @@ import (
 
 	"github.com/kalahroudi/parley/internal/adapter"
 	"github.com/kalahroudi/parley/internal/adapter/adaptertest"
+	"github.com/kalahroudi/parley/internal/approval"
 	"github.com/kalahroudi/parley/internal/bot"
 	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/mcp"
+	"github.com/kalahroudi/parley/internal/ttyconfirm"
+	"github.com/kalahroudi/parley/internal/ttyconfirm/ttydev"
 )
 
 const t406Env = "PARLEY_T406_BOT"
@@ -74,6 +84,42 @@ func t406Bot(mode string) {
 			c.Close()
 		}
 		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: []byte(out)})
+	case "attack": // the strongest local attacker: it knows where the socket and the waiting task are
+		b, _ := json.Marshal(attack())
+		if os.Getenv("PARLEY_T406_RAW") != "" { // run by another attacker, which relays it
+			os.Stdout.Write(b)
+			return
+		}
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: b})
+	case "attack-child", "attack-group": // the same, from a child (in a process group of its own for the second), relayed
+		exe, _ := os.Executable()
+		c := exec.Command(exe)
+		c.Env = append(os.Environ(), t406Env+"=attack", "PARLEY_T406_RAW=1")
+		if mode == "attack-group" {
+			ownGroup(c)
+		}
+		out, _ := c.Output()
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: bytes.TrimSpace(out)})
+	case "tty": // asks the owner's terminal, if it has one
+		out := "error: "
+		if ok, err := ttyconfirm.Ask(""); err != nil {
+			out += err.Error()
+		} else {
+			out = fmt.Sprint("answered ", ok)
+		}
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: []byte(out)})
+	case "host": // a daemon that has a terminal: starts a bot through the CLI adapter and reports what it saw
+		exe, _ := os.Executable()
+		_, closeTTY, ttyErr := ttydev.Open()
+		if ttyErr == nil {
+			closeTTY()
+		}
+		cli, _ := adapter.NewCLI(adapter.CLIConfig{Command: exe, Dir: os.TempDir(), Env: []string{t406Env + "=tty"}})
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := cli.Handle(ctx, t406Task, &countSession{})
+		b, _ := json.Marshal(hostReport{HostHasTerminal: ttyErr == nil, Bot: string(res), Failed: err != nil})
+		os.WriteFile(os.Getenv("PARLEY_T406_OUT"), b, 0o600)
 	case "noline": // endless output without a newline
 		buf := []byte(strings.Repeat("A", 1<<16))
 		for {
@@ -103,6 +149,47 @@ func t406Bot(mode string) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+}
+
+type hostReport struct {
+	HostHasTerminal bool
+	Bot             string
+	Failed          bool
+}
+
+// attackReport is what a bot managed against the daemon's socket.
+type attackReport struct {
+	Status  bool   // it could use the socket at all (the control: the refusals below are not a broken connection)
+	TTY     string // what asking the owner's terminal gave it
+	Approve string // what the daemon answered to approve: "served" or the error code
+	Deny    string
+}
+
+func attack() attackReport {
+	sock, id := os.Getenv("PARLEY_T406_SOCK"), os.Getenv("PARLEY_T406_TASK")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var r attackReport
+	if resp, err := localsock.Call(ctx, sock, "status", nil); err == nil && resp.OK {
+		r.Status = true
+	}
+	if ok, err := ttyconfirm.Ask(""); err != nil {
+		r.TTY = err.Error()
+	} else {
+		r.TTY = fmt.Sprint("answered ", ok)
+	}
+	outcome := func(method string) string {
+		resp, err := localsock.Call(ctx, sock, method, approval.DecideParams{TaskID: id})
+		switch {
+		case err != nil:
+			return "unreachable"
+		case resp.OK:
+			return "served"
+		}
+		return resp.Error
+	}
+	r.Approve, r.Deny = outcome("approve"), outcome("deny")
+	return r
 }
 
 type probeReport struct {
@@ -458,25 +545,66 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-// Until T507 (the operating-system sandbox for tool-using skills) is ticked, a bot of the same OS user that is told
-// where the socket is can use it. This test runs, passes and states that limit; it FAILS once T507 is ticked, so the
-// real sandbox assertions must replace it: connecting to the daemon's socket from inside the sandbox fails (unix
-// path, abstract name, a guess of the default location), the sandbox cannot be escaped through the approval command,
-// and Windows refuses tool-using skills until a sandbox exists.
-func TestPending_SandboxKeepsToolUsingSkillsAwayFromTheSocket(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "specs", "parley-mvp", "tasks.md"))
+// heldBot is the bot behind the approval gate: it counts the tasks that reached it.
+type heldBot struct{ ran atomic.Int32 }
+
+func (b *heldBot) Handle(context.Context, bot.Task, bot.Session) ([]byte, error) {
+	b.ran.Add(1)
+	return []byte("ran"), nil
+}
+
+// A bot the daemon started cannot approve or deny the tasks that wait for its owner: not by asking the terminal, not
+// by calling the socket (which it was told the path of, to give the attack its best chance), not from a child, not
+// from a child in another process group. The same calls from the owner's own process are served, so the refusals are
+// the guard's and not a broken socket. Removing the registration of bots, the pid check or the terminal rule makes this fail.
+func TestBotsStartedByTheDaemonCannotApproveTheirOwnTasks(t *testing.T) {
+	held := &heldBot{}
+	gate, err := approval.New(approval.Config{Bot: held, Mode: approval.Owner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if taskTicked(strings.ReplaceAll(string(b), "\r", ""), "T507") {
-		t.Fatal("T507 is ticked but the sandbox acceptance test is still the placeholder: replace it with assertions made from inside the sandbox")
-	}
 	g := newPipeGW(t)
-	n := g.startOK("sbx5", nodeOpts{})
+	n := g.startOK("sbx6", nodeOpts{methods: gate.Methods()})
+	sock := n.dirs.SocketPath()
+	waiting := bot.Task{ID: [16]byte{0x40, 0x06, 1}, Context: "c", Caller: "bob1", Owner: "bob@acme.test", Content: []byte("rm -rf the project")}
+	id := hex.EncodeToString(waiting.ID[:])
+	ended := make(chan error, 1)
+	go func() { _, err := gate.Handle(context.Background(), waiting, &countSession{}); ended <- err }()
+	g.waitFor("the task to wait for approval", func() bool { return len(gate.List()) == 1 })
+
+	for _, mode := range []string{"attack", "attack-child", "attack-group"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		res, err := t406CLI(t, mode, t.TempDir(), "PARLEY_T406_SOCK="+sock, "PARLEY_T406_TASK="+id).Handle(ctx, t406Task, &countSession{})
+		cancel()
+		if err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		var rep attackReport
+		if err := json.Unmarshal(res, &rep); err != nil {
+			t.Fatalf("%s: %q: %v", mode, res, err)
+		}
+		if !rep.Status {
+			t.Errorf("%s: the bot could not use the socket at all, so its refusals prove nothing: %+v", mode, rep)
+		}
+		if rep.TTY != ttyconfirm.ErrNoTerminal.Error() {
+			t.Errorf("%s: asking the owner's terminal gave the bot %q", mode, rep.TTY)
+		}
+		if rep.Approve != localsock.CodeNotPermitted || rep.Deny != localsock.CodeNotPermitted {
+			t.Errorf("%s: approve answered %q, deny answered %q, want %q for both", mode, rep.Approve, rep.Deny, localsock.CodeNotPermitted)
+		}
+		if held.ran.Load() != 0 || len(gate.List()) != 1 {
+			t.Fatalf("%s: the task was decided by a bot (ran %d, waiting %d)", mode, held.ran.Load(), len(gate.List()))
+		}
+	}
+
+	// The owner's own process is served, and the task then runs.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	res, err := t406CLI(t, "dial", t.TempDir(), "PARLEY_T406_SOCK="+n.dirs.SocketPath()).Handle(ctx, t406Task, &countSession{})
-	if err != nil || string(res) != "connected" {
-		t.Fatalf("the documented limit changed (a same-user bot given the path used to connect): %q %v", res, err)
+	r, err := localsock.Call(ctx, sock, "approve", approval.DecideParams{TaskID: id})
+	if err != nil || !r.OK {
+		t.Fatalf("the owner's own approval was refused: %+v %v", r, err)
+	}
+	if err := <-ended; err != nil || held.ran.Load() != 1 {
+		t.Errorf("after the owner approved: %v, ran %d", err, held.ran.Load())
 	}
 }

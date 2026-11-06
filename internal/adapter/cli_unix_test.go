@@ -38,7 +38,7 @@ func TestPrepareMarksInheritedDescriptorsCloseOnExec(t *testing.T) {
 			t.Errorf("fd %d would reach the bot", fd)
 		}
 	}
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-		t.Error("the command is not in a process group of its own")
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Error("the command is not in a session of its own")
 	}
 }

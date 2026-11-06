@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/botproc"
 )
 
 // ErrCLIConfig means the CLI adapter's command, directory or environment is not acceptable.
@@ -68,10 +69,20 @@ func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, er
 	prepare(cmd)
 	stdin, _ := cmd.StdinPipe()   // cannot fail: no Stdin is set and the command is not started
 	stdout, _ := cmd.StdoutPipe() // likewise
-	if err := cmd.Start(); err != nil {
+	// The bot is registered before the daemon can see a connection from it, so it can never approve its own tasks (see botproc).
+	var kill func()
+	var err error
+	remove, serr := botproc.Default.Launch(func() (int, error) {
+		if err := cmd.Start(); err != nil {
+			return 0, err
+		}
+		kill, err = contain(cmd)
+		return cmd.Process.Pid, nil
+	})
+	if serr != nil {
 		return nil, errors.New("adapter: the bot command could not be started") // the OS text names the path
 	}
-	kill, err := contain(cmd)
+	defer remove() // after the command is reaped (close runs first)
 	p := &cliPeer{cmd: cmd, id: t.ID, in: stdin, r: bufio.NewReaderSize(stdout, readBuffer), kill: kill}
 	defer p.close()
 	if err != nil {

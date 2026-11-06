@@ -15,11 +15,11 @@ import (
 // maxInheritedFD bounds the descriptors looked at: those a parent leaked into the daemon without close-on-exec.
 const maxInheritedFD = 4096
 
-// prepare puts the command in a process group of its own, so that killing the group also kills what it started, and
-// marks every descriptor the daemon holds close-on-exec. Go opens its own that way, but one the daemon inherited from
+// prepare starts the command in a session of its own: it has no controlling terminal (so nothing it runs can ask the
+// owner's terminal for anything), and killing its process group also kills what it started. It also marks every descriptor the daemon holds close-on-exec. Go opens its own that way, but one the daemon inherited from
 // whatever started it (a socket from a service manager or a CI runner) is not, and the bot would inherit it.
 func prepare(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	for fd := 3; fd < maxInheritedFD; fd++ {
 		unix.CloseOnExec(fd)
 	}

@@ -22,6 +22,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/kalahroudi/parley/internal/binding"
+	"github.com/kalahroudi/parley/internal/botproc"
 	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/keystore"
 	"github.com/kalahroudi/parley/internal/localsock"
@@ -575,4 +576,37 @@ func TestDaemonLeavesNoGoroutinesBehind(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("%d goroutines after 5 start/stop cycles, baseline %d", n, base)
+}
+
+// The guard on trust-changing commands lets an ordinary process through and refuses a bot's process, and a process
+// that cannot be judged.
+func TestBotGuard(t *testing.T) {
+	r := &botproc.Registry{}
+	guard := botGuard(r)
+	if err := guard(os.Getpid()); err != nil {
+		t.Errorf("an ordinary process was refused: %v", err)
+	}
+	remove, err := r.Launch(func() (int, error) { return os.Getpid(), nil }) // as if this process were a bot
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remove()
+	if err := guard(os.Getpid()); !errors.Is(err, errBotCaller) {
+		t.Errorf("a bot's process was let through: %v", err)
+	}
+	if err := guard(1 << 30); !errors.Is(err, errBotCaller) { // no such process: cannot be judged
+		t.Errorf("a process that cannot be judged was let through: %v", err)
+	}
+}
+
+// The daemon's own socket server refuses approve and deny without a guard that says yes, and serves status to anyone.
+func TestNewDaemonMarksApprovalSensitive(t *testing.T) {
+	e := newEnv(t)
+	d, err := New(e.cfg, e.dirs, e.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.srv.Sensitive["approve"] || !d.srv.Sensitive["deny"] || d.srv.Guard == nil || d.srv.Sensitive["status"] {
+		t.Errorf("sensitive %v, guard set %v", d.srv.Sensitive, d.srv.Guard != nil)
+	}
 }

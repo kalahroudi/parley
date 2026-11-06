@@ -20,6 +20,7 @@ import (
 
 	"github.com/kalahroudi/parley/internal/binding"
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/botproc"
 	"github.com/kalahroudi/parley/internal/caller"
 	"github.com/kalahroudi/parley/internal/connect"
 	"github.com/kalahroudi/parley/internal/fsperm"
@@ -193,7 +194,9 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 		},
 		sup: &supervisor.Supervisor{Log: deps.Log, MinBackoff: deps.MinBackoff, ShutdownTimeout: deps.ShutdownTimeout},
 	}
-	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status}}
+	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status},
+		// Approving or denying a task is the owner's alone: a process that belongs to a bot this daemon started is refused (see botproc).
+		Sensitive: map[string]bool{"approve": true, "deny": true}, Guard: botGuard(botproc.Default)}
 	d.initCaller()
 	d.initTestBot()
 	return d, nil
@@ -235,6 +238,18 @@ func KeyStoreFor(cfg Config, dirs Dirs) keystore.KeyStore {
 	}
 	return &keystore.KeychainStore{Account: cfg.KeyAccount, KR: osKeyring{}}
 }
+
+// botGuard allows a caller unless it belongs to a running bot, or cannot be told apart from one.
+func botGuard(r *botproc.Registry) func(pid int) error {
+	return func(pid int) error {
+		if isBot, err := r.Owns(pid); err != nil || isBot {
+			return errBotCaller
+		}
+		return nil
+	}
+}
+
+var errBotCaller = errors.New("daemon: the caller belongs to a bot")
 
 // Handle registers a local socket method. Call it before Run.
 func (d *Daemon) Handle(name string, m localsock.Method) { d.srv.Methods[name] = m }

@@ -11,6 +11,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/kalahroudi/parley/internal/botproc"
 )
 
 func prepare(*exec.Cmd) {}
@@ -28,10 +30,12 @@ func containTree(cmd *exec.Cmd) (func(), error) {
 	proc, e3 := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
 	e4 := windows.AssignProcessToJobObject(job, proc)
 	windows.CloseHandle(proc)
-	terminate := func() { _ = windows.TerminateJobObject(job, 1); windows.CloseHandle(job) }
+	pid := cmd.Process.Pid
+	terminate := func() { botproc.UntrackJob(pid); _ = windows.TerminateJobObject(job, 1); windows.CloseHandle(job) }
 	if err := errors.Join(e1, e2, e3, e4); err != nil {
 		terminate()
 		return nil, err
 	}
+	botproc.TrackJob(pid, job) // the daemon refuses trust-changing commands from anything in this job
 	return terminate, nil
 }
