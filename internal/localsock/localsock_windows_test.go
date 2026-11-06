@@ -119,8 +119,8 @@ func TestWindowsPeerPIDMustBeReadableAndPositive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldPID, oldSID := peerPIDFn, peerSIDFn
-	t.Cleanup(func() { peerPIDFn, peerSIDFn = oldPID, oldSID })
+	oldPID, oldSID := checkPIDFn, peerSIDFn
+	t.Cleanup(func() { checkPIDFn, peerSIDFn = oldPID, oldSID })
 	peerSIDFn = func(uint32) (*windows.SID, error) { return own, nil }
 	srv, cli := net.Pipe()
 	defer srv.Close()
@@ -129,12 +129,12 @@ func TestWindowsPeerPIDMustBeReadableAndPositive(t *testing.T) {
 		"error with a pid": func(net.Conn) (int, error) { return os.Getpid(), errors.New("boom") },
 		"pid zero":         func(net.Conn) (int, error) { return 0, nil },
 	} {
-		peerPIDFn = f
+		checkPIDFn = f
 		if err := checkPeer(srv, 0); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	peerPIDFn = func(net.Conn) (int, error) { return os.Getpid(), nil }
+	checkPIDFn = func(net.Conn) (int, error) { return os.Getpid(), nil }
 	if err := checkPeer(srv, 0); err != nil {
 		t.Errorf("a readable positive pid of the own user was refused: %v", err)
 	}

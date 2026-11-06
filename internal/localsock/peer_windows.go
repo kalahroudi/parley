@@ -22,6 +22,7 @@ var (
 	peerSIDFn = peerSID
 
 	openProcessToken = windows.OpenProcessToken
+	checkPIDFn       = peerPID // separate from peerPIDFn, which tests of the Guard swap
 )
 
 // checkPeer accepts only connections from processes whose token belongs to the
@@ -41,7 +42,7 @@ func checkPeer(c net.Conn, _ int) error {
 	if err != nil {
 		return errPeer
 	}
-	pid, err := peerPIDFn(c)
+	pid, err := checkPIDFn(c)
 	if err != nil || pid <= 0 {
 		return errPeer
 	}
