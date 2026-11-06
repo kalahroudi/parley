@@ -217,3 +217,7 @@ func TestDaemonFindsPeerBindingsThroughTheGateway(t *testing.T) {
 		t.Fatal("the lookup did not name the device it wanted")
 	}
 }
+
+func TestPending_WindowsInstallAutostartAndJourney(t *testing.T) {
+	pending(t, "T505", "the rest of the Windows daemon is not verified on a real Windows runner: a per-user install guide with autostart (Run key or Task Scheduler) that was followed on Windows, `parleyd` shutting down cleanly on CTRL_BREAK with the socket and lock released, and the `parley-cli test` echo (M1) run on Windows; the key-memory scans (T209) are Linux-only and the Windows result must be listed. Write these, then tick T505")
+}
