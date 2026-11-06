@@ -4,13 +4,18 @@
 package localsock
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/kalahroudi/parley/internal/logx"
 )
 
 // goroutinesSettle fails the test if the goroutine count does not return to base: a hostile peer must leave nothing
@@ -116,45 +121,145 @@ func TestHostileRequestsAreRefusedWithFixedCodes(t *testing.T) {
 	goroutinesSettle(t, base)
 }
 
-// Peers that connect and say nothing, or say half a request and stop, are cut off at the connection deadline, free
-// their slots and leave no goroutine. The deadline is shortened for the test; the rule is the same at 30 s.
+// stallConn is a connection whose peer says its first bytes and then nothing: Read blocks until the connection's
+// deadline "fires", which the test does by closing expire. No clock is involved, so nothing depends on how fast the
+// machine is. The deadline the server set is recorded.
+type stallConn struct {
+	first    []byte
+	expire   chan struct{}
+	reading  chan struct{}
+	closed   chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	deadline time.Time
+	reply    bytes.Buffer
+}
+
+func newStallConn(first string) *stallConn {
+	return &stallConn{first: []byte(first), expire: make(chan struct{}), reading: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (c *stallConn) Read(p []byte) (int, error) {
+	if len(c.first) > 0 {
+		n := copy(p, c.first)
+		c.first = c.first[n:]
+		return n, nil
+	}
+	select {
+	case <-c.reading:
+	default:
+		close(c.reading)
+	}
+	select {
+	case <-c.expire:
+		return 0, os.ErrDeadlineExceeded
+	case <-c.closed:
+		return 0, net.ErrClosed
+	}
+}
+func (c *stallConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reply.Write(p)
+}
+func (c *stallConn) Close() error                     { c.once.Do(func() { close(c.closed) }); return nil }
+func (c *stallConn) LocalAddr() net.Addr              { return nil }
+func (c *stallConn) RemoteAddr() net.Addr             { return nil }
+func (c *stallConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *stallConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *stallConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return nil
+}
+func (c *stallConn) told() string { c.mu.Lock(); defer c.mu.Unlock(); return c.reply.String() }
+
+// chanListener hands out the connections the test sends it.
+type chanListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (l *chanListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+func (l *chanListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
+func (l *chanListener) Addr() net.Addr { return nil }
+
+// Peers that connect and say nothing, or say half a request and stop, hold their slots until the connection
+// deadline, which the server sets on every connection; when it fires they are answered with a fixed code and closed,
+// the slots are free again and no goroutine is left. A peer past the limit is closed unread meanwhile.
 func TestStalledPeersAreCutOffAndFreeTheirSlots(t *testing.T) {
-	old := connDeadline
-	t.Cleanup(func() { connDeadline = old })
-	connDeadline = 300 * time.Millisecond
 	base := runtime.NumGoroutine()
-	ts := startServer(t, map[string]Method{"x": func(context.Context, json.RawMessage) (any, error) { return 1, nil }})
-	var held []net.Conn
+	old := checkPeerFn
+	checkPeerFn = func(net.Conn, int) error { return nil }
+	defer func() { checkPeerFn = old }()
+	ln := &chanListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	s := &Server{Log: logx.New(&syncBuf{}), UID: os.Geteuid(), Methods: map[string]Method{"x": func(context.Context, json.RawMessage) (any, error) { return 1, nil }}}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { s.Serve(ctx, ln); close(served) }()
+
+	before := time.Now()
+	var held []*stallConn
 	for i := 0; i < maxConns; i++ {
-		c, err := net.Dial("unix", ts.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if i%2 == 0 {
-			c.Write([]byte(`{"method":"x","params":"`)) // half a request
-		}
+		c := newStallConn(map[bool]string{true: `{"method":"x","params":"`, false: ``}[i%2 == 0]) // half a request, or nothing
 		held = append(held, c)
+		ln.conns <- c
 	}
-	defer func() {
-		for _, c := range held {
-			c.Close()
-		}
-	}()
-	for i, c := range held { // every one of them is closed by the server, without the peer doing anything
-		c.SetReadDeadline(time.Now().Add(20 * time.Second))
-		b := make([]byte, 512)
-		n, _ := c.Read(b)
-		if !strings.Contains(string(b[:n]), "bad_request") && n != 0 {
-			t.Errorf("stalled peer %d was told %q", i, b[:n])
-		}
-		if _, err := c.Read(b); err == nil || strings.Contains(err.Error(), "timeout") {
-			t.Errorf("stalled peer %d was not closed: %v", i, err)
+	for _, c := range held {
+		<-c.reading
+		c.mu.Lock()
+		d := c.deadline
+		c.mu.Unlock()
+		if d.Before(before.Add(connDeadline)) || d.After(time.Now().Add(connDeadline)) {
+			t.Fatalf("deadline %v is not %v from now", d, connDeadline)
 		}
 	}
-	if r := sentWhole(t, ts.path, []byte(`{"method":"x"}`)); !r.OK {
-		t.Fatalf("the slots were not freed: %+v", r)
+	over := newStallConn("")
+	ln.conns <- over
+	select {
+	case <-over.closed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("a peer past the connection limit was not closed")
 	}
-	ts.stop()
+	select {
+	case <-over.reading:
+		t.Fatal("a peer past the connection limit was read")
+	default:
+	}
+	for _, c := range held { // the deadlines fire
+		close(c.expire)
+	}
+	for i, c := range held {
+		select {
+		case <-c.closed:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("stalled peer %d was not closed", i)
+		}
+		if !strings.Contains(c.told(), `"error":"bad_request"`) {
+			t.Errorf("stalled peer %d was told %q", i, c.told())
+		}
+	}
+	good := newStallConn(`{"method":"x"}`)
+	ln.conns <- good
+	select {
+	case <-good.closed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slots were not freed")
+	}
+	if !strings.Contains(good.told(), `"ok":true`) {
+		t.Fatalf("the next request was told %q", good.told())
+	}
+	cancel()
+	<-served
 	goroutinesSettle(t, base)
 }
 

@@ -193,3 +193,38 @@ func TestHostileSilentClientIsLetGoWhenTheSessionEnds(t *testing.T) {
 	pw.Close() // the reader goroutine ends with its input, as documented
 	settle(t, base)
 }
+
+// A refused line ends only itself: the session goes on and the next line is answered. (A refusal that stopped
+// reading would let one hostile line silence a client's later requests.)
+func TestHostileRefusalsDoNotEndTheSession(t *testing.T) {
+	f := &fake{}
+	rs := session(t, f,
+		`{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}`, // duplicate key
+		`{"jsonrpc":"2.0","id":3,"method":"ping","x":1}`,  // unknown key
+		`{"jsonrpc":"2.0","id":[1],"method":"ping"}`,      // bad id
+		`{"jsonrpc":"2.0","id":4,"method":"ping"}`)
+	got := map[any]bool{}
+	for _, r := range rs {
+		got[r["id"]] = r["result"] != nil
+	}
+	if len(rs) != 4 || !got[float64(4)] {
+		t.Fatalf("%v", rs)
+	}
+}
+
+// A call refused for its id being in use does not stop the lines after it either.
+func TestHostileDuplicateIDRefusalDoesNotEndTheSession(t *testing.T) {
+	f := &fake{block: make(chan struct{})}
+	pr, pw := io.Pipe()
+	var out safeBuf
+	done := make(chan error, 1)
+	go func() { done <- (&Server{Call: f.Call}).Serve(context.Background(), pr, &out) }()
+	call := tc + `{"name":"get_task","arguments":{}}}` + "\n"
+	io.WriteString(pw, call+call+`{"jsonrpc":"2.0","id":9,"method":"ping"}`+"\n")
+	waitFor(t, func() bool {
+		return strings.Contains(out.String(), `"id":9`) && strings.Contains(out.String(), "request id in use")
+	})
+	close(f.block)
+	pw.Close()
+	<-done
+}

@@ -59,15 +59,12 @@ const (
 	// six times as long (control characters), so 256 KiB. A reply carries a
 	// directory page (at most 512 KiB from the gateway) that escaping can
 	// also inflate six times, so 4 MiB.
-	maxRequestBytes = 262144                    // 256 KiB
-	maxReplyBytes   = 4194304                   // 4 MiB
-	acceptRetry     = time.Duration(10_000_000) // 10ms
+	maxRequestBytes = 262144                        // 256 KiB
+	maxReplyBytes   = 4194304                       // 4 MiB
+	connDeadline    = time.Duration(30_000_000_000) // 30s
+	acceptRetry     = time.Duration(10_000_000)     // 10ms
 	maxConns        = 32
 )
-
-// connDeadline is how long one connection may live, read, handled and answered. It is a variable only so that a test
-// can shorten it to watch a stalled peer being cut off.
-var connDeadline = 30 * time.Second
 
 // RPCError is an error a Method may return to the client. Code must be a fixed
 // identifier chosen by the daemon; it is sent verbatim. Any other error is
