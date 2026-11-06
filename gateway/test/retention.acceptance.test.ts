@@ -387,3 +387,157 @@ describe("what the caller sends is never held, in either mode", () => {
     });
   }
 });
+
+// Every key every Durable Object of the world holds, by object.
+async function keysOf(w: ReturnType<typeof world>, ...tasks: string[]) {
+  const stubs: [string, DurableObjectStub][] = [...tasks.map((t): [string, DurableObjectStub] => [`task:${t}`, w.taskStub(t)]), ["alice", env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:alice`))], ["bob", env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:bob`))]];
+  const out: Record<string, string[]> = {};
+  for (const [name, st] of stubs) out[name] = await runInDurableObject(st, async (_, ctx) => [...(await ctx.storage.list()).keys()].sort());
+  return out;
+}
+const deviceIndex = (w: ReturnType<typeof world>, device: string) => runInDurableObject(env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:${device}`)), async (_, ctx) => ({ held: await ctx.storage.get<unknown[]>("held"), inflight: await ctx.storage.get<unknown[]>("inflight") }));
+
+describe("storage inspected key by key", () => {
+  it("Strict: no held-event, index or in-flight key exists in any object, at any point of a task", async () => {
+    const w = world();
+    await w.setRetention({ mode: "strict" });
+    const alice = await tunnel(w.T, "alice");
+    await tunnel(w.T, "bob");
+    await w.send("TASK", "alice", "bob", 0, "tk", "TASK-s");
+    await w.send("STATUS", "bob", "alice", 1, "tk");
+    await alice.event();
+    alice.ack(1);
+    await w.send("RESULT", "bob", "alice", 2, "tk");
+    await alice.event();
+    alice.ack(2);
+    await new Promise((r) => setTimeout(r, 50));
+    const keys = await keysOf(w, "tk");
+    expect(keys["task:tk"]).toEqual(["task"]);
+    for (const dev of ["alice", "bob"]) expect(keys[dev]!.filter((k) => k !== "session"), dev).toEqual([]);
+  });
+
+  it("Queued: after acknowledgment and a reconnect the Task DO holds only its record and the device keeps no index entry for it", async () => {
+    const w = world();
+    await w.setRetention({ mode: "queued" });
+    await offlineCaller(w);
+    await bobReports(w);
+    expect((await keysOf(w, "tk"))["task:tk"]).toHaveLength(4); // the record and three held events
+    const first = await tunnel(w.T, "alice");
+    for (let i = 0; i < 3; i++) await first.event();
+    expect((await deviceIndex(w, "alice")).held).toHaveLength(1); // control: the index names the task while it holds events
+    first.ack(3);
+    await until(async () => (await w.held("tk")).length === 0);
+    first.ws.close(1000, "bye");
+    await gone(w.T, "alice");
+    const second = await tunnel(w.T, "alice", first.session, 3); // the next flush drops the stale entries
+    expect(second.quiet()).toBe(true);
+    await until(async () => {
+      const i = await deviceIndex(w, "alice");
+      return !i.held?.length && !i.inflight?.length;
+    });
+    const keys = await keysOf(w, "tk");
+    expect(keys["task:tk"]).toEqual(["task"]);
+    expect(keys["alice"]!.filter((k) => k !== "session")).toEqual(["held", "inflight"]); // the keys stay, as empty lists
+    expect(await deviceIndex(w, "alice")).toEqual({ held: [], inflight: [] });
+  });
+});
+
+describe("crash points", () => {
+  it("a crash after the daemon's acknowledgment was stored and before the Task DO deleted: the next connection finishes the deletion", async () => {
+    const w = world();
+    await w.setRetention({ mode: "queued" });
+    await offlineCaller(w);
+    await bobReports(w);
+    const first = await tunnel(w.T, "alice");
+    for (let i = 0; i < 3; i++) await first.event();
+    first.ws.close(1000, "bye");
+    await gone(w.T, "alice");
+    // The state a crash leaves: the Device DO has stored "acknowledged up to 3" and the Task DO has not been told.
+    await runInDurableObject(env.DEVICE.get(env.DEVICE.idFromName(`${w.T}:alice`)), async (_, ctx) => {
+      const session = (await ctx.storage.get<{ acked_tx: number }>("session"))!;
+      session.acked_tx = 3;
+      await ctx.storage.put("session", session);
+    });
+    expect(await everyHeld(w)).toEqual([true, true, true]);
+    const second = await tunnel(w.T, "alice", first.session, 0); // the daemon itself says it saw nothing
+    await until(async () => (await w.held("tk")).length === 0);
+    expect(await everyHeld(w)).toEqual([false, false, false]);
+    expect(second.quiet()).toBe(true); // and nothing is delivered again
+  });
+
+  it("a crash after the Task DO deleted and before the Device DO recorded it: the repeated acknowledgment changes nothing", async () => {
+    const w = world();
+    await w.setRetention({ mode: "queued" });
+    await offlineCaller(w);
+    await w.send("STATUS", "bob", "alice", 1, "tk");
+    await w.send("RESULT", "bob", "alice", 2, "tk");
+    const first = await tunnel(w.T, "alice");
+    const a = await first.event();
+    const b = await first.event();
+    const ids = await w.held("tk");
+    // The Task DO already deleted both (what the first, interrupted acknowledgment did).
+    const aliceDevice = (await deviceIndex(w, "alice")).inflight as { tenant: string; device: string; id: number }[];
+    for (const i of aliceDevice) await w.taskStub("tk").ack(i.tenant, i.device, i.id);
+    expect(ids).toHaveLength(2);
+    expect(await w.held("tk")).toEqual([]);
+    const before = (await w.state("tk")).metadata.parley.ciphertext_deleted_at;
+    first.ack(Math.max(a.seq, b.seq)); // the daemon's acknowledgment arrives again: deleting what is gone is not an error
+    await until(async () => !(await deviceIndex(w, "alice")).inflight?.length);
+    expect((await w.state("tk")).metadata.parley.ciphertext_deleted_at).toBe(before);
+    expect((await w.state("tk")).status.state).toBe("TASK_STATE_COMPLETED");
+  });
+
+  it("a crash between a TTL passing and the alarm running: nothing is delivered, and the alarm still deletes it", async () => {
+    const w = world();
+    await w.setRetention({ mode: "queued", queue_ttl_ms: QUEUE_TTL_MIN_MS });
+    await offlineCaller(w);
+    await w.send("RESULT", "bob", "alice", 1, "tk");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + QUEUE_TTL_MIN_MS);
+    expect(await runDurableObjectAlarm(w.taskStub("tk"))).toBe(true);
+    expect(await w.holds("RESULT1", "tk")).toBe(false);
+    expect(await runDurableObjectAlarm(w.taskStub("tk"))).toBe(true); // delivered twice: harmless
+    expect(await w.held("tk")).toEqual([]);
+  });
+});
+
+describe("the alarm is always armed for the next deadline, from storage alone", () => {
+  const alarmAt = (w: ReturnType<typeof world>) => runInDurableObject(w.taskStub("tk"), async (_, ctx) => ctx.storage.getAlarm());
+  const deadline = (w: ReturnType<typeof world>) => runInDurableObject(w.taskStub("tk"), async (_, ctx) => {
+    const rec = (await ctx.storage.get<{ expires_at: number; queue_until?: number }>("task"))!;
+    return Math.min(rec.expires_at, rec.queue_until ?? Infinity);
+  });
+
+  it("follows the earliest of the task expiry and the held events' TTLs through holding, a TTL passing and acknowledgment", async () => {
+    const w = world();
+    await w.setRetention({ mode: "queued", queue_ttl_ms: QUEUE_TTL_MIN_MS });
+    await offlineCaller(w);
+    const created = await alarmAt(w);
+    expect(created).toBeGreaterThan(Date.now() + TASK_TTL_DEFAULT_MS - 5000); // the task's own expiry, nothing held
+    await w.send("STATUS", "bob", "alice", 1, "tk");
+    expect(await alarmAt(w)).toBe(await deadline(w)); // now the held event's TTL, which is before the task expires
+    expect(await alarmAt(w)).toBeLessThanOrEqual(created!);
+    // An early alarm (a restart can deliver one) deletes nothing and re-arms the same deadline instead of losing it.
+    const armed = await alarmAt(w);
+    expect(await runDurableObjectAlarm(w.taskStub("tk"))).toBe(true);
+    expect(await alarmAt(w)).toBe(armed);
+    expect(await w.holds("STATUS1", "tk")).toBe(true);
+    // Once the held event is gone, the alarm returns to the task's expiry.
+    const alice = await tunnel(w.T, "alice");
+    const e = await alice.event();
+    alice.ack(e.seq);
+    await until(async () => (await w.held("tk")).length === 0);
+    expect(await alarmAt(w)).toBe(created);
+  });
+
+  it("a held event that outlives nothing: after the task is canceled the alarm is the metadata purge, not a TTL", async () => {
+    const w = world();
+    await w.setRetention({ mode: "queued" });
+    await offlineCaller(w);
+    await w.send("STATUS", "bob", "alice", 1, "tk");
+    const part = { raw: b64(encodeWire({ header: header("CANCEL", { tenant: w.T, sender: "alice", target: "bob", task: taskBytes("tk"), seq: 1 }), bucket: 4096 })), mediaType: SEALED_MEDIA_TYPE };
+    await w.rpc("alice", "CancelTask", { id: taskHex("tk"), metadata: { parley: { messageId: "c1", parts: [part] } } });
+    const at = await runInDurableObject(w.taskStub("tk"), async (_, ctx) => ctx.storage.getAlarm());
+    expect(at).toBeGreaterThan(Date.now() + 80 * 24 * 3600_000);
+  });
+});

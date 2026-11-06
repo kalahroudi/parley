@@ -10,18 +10,24 @@
 
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { MAX_MEMBERS } from "../src/acl";
+import { isAdmin, isUser } from "../src/session";
 import { handleDirectory, type DeviceAuth } from "../src/directory";
+import directorySource from "../src/directory.ts?raw";
+import tenantSource from "../src/tenant.ts?raw";
 
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 const testDevice: DeviceAuth = async (req) => {
   const m = /^Bearer dev:([^:]+):([^:]+)$/.exec(req.headers.get("Authorization") ?? "");
   return m ? { tenant: m[1]!, device: m[2]! } : null;
 };
-const post = async (path: string, body: unknown, auth: string) => {
+const post = async (path: string, body: unknown, auth = "") => {
   const init = { method: "POST", headers: { "content-type": "application/json", Authorization: auth }, body: JSON.stringify(body) };
   return auth.startsWith("Bearer dev:") ? handleDirectory(new Request(`https://gw${path}`, init), env, testDevice) : SELF.fetch(`https://gw${path}`, init);
 };
 const json = async (r: Response) => (await r.json()) as any;
+
+const session = async (t: string, role: "admin" | "user", email: string) => `Bearer ps_${t}.${(await env.TENANT.get(env.TENANT.idFromName(t)).createSession(email, role)).secret}`;
 
 let n = 0;
 function tenant() {
@@ -180,5 +186,167 @@ describe("gateway ACL matrix: viewer x card x group state", () => {
     expect([...new Set(stored)].sort()).toEqual(["aud", "auds", "card", "enr", "grp", "ses"]);
     const values = await runInDurableObject(x.stub, async (_i, s) => JSON.stringify([...(await s.storage.list({ prefix: "card:" })).values()]));
     expect(values).not.toMatch(/allow|grant|permit|acl/i);
+  });
+});
+
+// Who may call which route: caller kind x route, each cell an explicit allow or deny. "allow" means the request got past
+// authorization (any status but 401/403: a bad body or a missing card is still an answer to an authorized caller).
+const ADMIN_ROUTES = ["/v1/admin/groups", "/v1/admin/groups/get", "/v1/admin/groups/put", "/v1/admin/groups/delete", "/v1/admin/retention", "/v1/admin/retention/put", "/v1/admin/audit"];
+const DEVICE_ROUTES = ["/v1/cards/publish", "/v1/cards/remove", "/v1/directory/find", "/v1/directory/binding"];
+const CALLERS = ["anonymous", "user session", "admin session", "device", "unbound device", "device of another tenant", "admin of another tenant"] as const;
+// admin routes: only the tenant's admin session; device routes: only an enrolled, bound device of the tenant.
+const ALLOW: Record<(typeof CALLERS)[number], "admin" | "device" | "none"> = {
+  anonymous: "none",
+  "user session": "none",
+  "admin session": "admin",
+  device: "device",
+  "unbound device": "none",
+  "device of another tenant": "none",
+  "admin of another tenant": "admin", // authorized in its own tenant; it must reach nothing in this one (checked below)
+};
+
+describe("route authority matrix: caller kind x route", () => {
+  it("every route admits exactly the callers it should, and every route of the handler is in the matrix", async () => {
+    const x = tenant();
+    const y = tenant();
+    const device = await x.enroll("d@example.test");
+    const unbound = await x.enroll("u@example.test", false);
+    const foreign = await y.enroll("d@example.test");
+    const auth: Record<(typeof CALLERS)[number], string | null> = {
+      anonymous: null,
+      "user session": await session(x.t, "user", "d@example.test"),
+      "admin session": await x.admin(),
+      device: device.auth,
+      "unbound device": unbound.auth,
+      "device of another tenant": `Bearer dev:${x.t}:${foreign.id}`, // another tenant's device id presented here
+      "admin of another tenant": await y.admin(), // resolves to tenant y, never x: checked by what it can see below
+    };
+    const body = (path: string) => (path === "/v1/admin/groups/put" ? { name: "g", members: [] } : path === "/v1/admin/groups/get" || path === "/v1/admin/groups/delete" ? { name: "g" } : path === "/v1/admin/retention/put" ? { mode: "strict" } : path === "/v1/cards/publish" ? { card: { name: "B", description: "d", tags: [], examples: [], visibility: "tenant" } } : path === "/v1/directory/binding" ? { device: device.id } : {});
+    let cells = 0;
+    for (const caller of CALLERS) {
+      for (const path of [...ADMIN_ROUTES, ...DEVICE_ROUTES]) {
+        const want = ALLOW[caller] === (ADMIN_ROUTES.includes(path) ? "admin" : "device");
+        if (path === "/v1/cards/remove") {
+          // Removing answers 404 both for "no such card" and for "not yours", so the deny cells assert the card survives.
+          const { id } = await json(await post("/v1/cards/publish", { card: { name: `R${cells}`, description: "d", tags: [], examples: [], visibility: "tenant" } }, device.auth));
+          await post(path, { id }, auth[caller] ?? "");
+          const left = await runInDurableObject(x.stub, async (_i, s) => (await s.storage.get(`card:${id}`)) !== undefined);
+          expect(!left, `${caller} -> ${path} removed the card`).toBe(want);
+          cells++;
+          continue;
+        }
+        const r = await post(path, body(path), auth[caller] ?? "");
+        const got = r.status !== 401 && r.status !== 403;
+        expect(got, `${caller} -> ${path} (${r.status})`).toBe(want);
+        cells++;
+      }
+    }
+    expect(cells).toBe(CALLERS.length * (ADMIN_ROUTES.length + DEVICE_ROUTES.length));
+    // y's admin works on y's data only: the group it wrote is in y, not in x.
+    await post("/v1/admin/groups/put", { name: "only-y", members: [] }, auth["admin of another tenant"]!);
+    const names = async (t: ReturnType<typeof tenant>) => ((await json(await post("/v1/admin/groups", {}, await t.admin()))).groups as { name: string }[]).map((g) => g.name);
+    expect(await names(y)).toContain("only-y");
+    expect(await names(x)).not.toContain("only-y");
+
+    // Drift guard: a route added to the handler, or a role added to sessions, without a row here fails this test.
+    const routes = new Set([...directorySource.matchAll(/"(\/v1\/(?:admin|cards|directory)\/[a-z/]+|\/v1\/admin\/(?:groups|audit|retention))"/g)].map((m) => m[1]!));
+    expect([...routes].sort()).toEqual([...ADMIN_ROUTES, ...DEVICE_ROUTES].sort());
+    const roles = /export type Role = ([^;]+);/.exec(tenantSource)?.[1]?.split("|").map((r) => r.trim().replace(/"/g, "")).sort();
+    expect(roles, "the roles this matrix knows: admin (all admin routes) and user (none of them)").toEqual(["admin", "user"]);
+  }, 60_000);
+});
+
+describe("identity edge cases: lookalikes, maximal groups, revocation", () => {
+  const sees = async (x: ReturnType<typeof tenant>, viewer: { id: string; auth: string }, cardId: string, owner: { id: string }) => {
+    const found = (await json(await post("/v1/directory/find", {}, viewer.auth))).agents?.some((a: any) => a.id === cardId) ?? false;
+    const resolved = (await x.stub.resolve(viewer.id, cardId)) !== null;
+    const relayed = await x.stub.mayRelay(viewer.id, owner.id, true);
+    expect({ found, resolved, relayed }).toEqual({ found, resolved: found, relayed: found });
+    return found;
+  };
+
+  it("an identity that only looks like a member is not one (other script, full width, zero width, padding), and a group name is not a prefix match", async () => {
+    const x = tenant();
+    const owner = await x.enroll(OWNER);
+    const admin = await x.admin();
+    const { id } = await json(await post("/v1/cards/publish", { card: { name: "Bot", description: "d", tags: [], examples: [], visibility: "groups", groups: ["eng"] } }, owner.auth));
+    await post("/v1/admin/groups/put", { name: "eng", members: ["alice@example.test"] }, admin);
+    await post("/v1/admin/groups/put", { name: "eng2", members: ["mallory@example.test"] }, admin);
+    const real = await x.enroll("Alice@Example.TEST");
+    expect(await sees(x, real, id, owner)).toBe(true); // control: case alone does not matter
+    const tried: [string, boolean][] = [];
+    for (const lookalike of ["alice@exampl\u0435.test", "\uff41lice@example.test", "alice@example.test\u200b", "ali\u0441e@example.test", "alice@example.test.", "alice+x@example.test", "alic\u0435@example.test"]) {
+      const d = await x.enroll(lookalike).catch(() => null);
+      tried.push([lookalike, !!d]);
+      if (d) expect(await sees(x, d, id, owner), JSON.stringify(lookalike)).toBe(false);
+    }
+    expect(tried.filter(([, enrolled]) => enrolled)).toHaveLength(6); // not vacuous: these did enroll and were still refused
+    expect(tried.filter(([, enrolled]) => !enrolled).map(([l]) => l)).toEqual(["alice@example.test\u200b"]); // a zero-width character never enrolls
+    // Characters that fold or normalize to ASCII (Kelvin sign: NFC gives "K"; dotted capital I: lower case gives "i" + a dot) are
+    // other characters, not case variants: the first is refused at enrollment, the second enrolls and sees nothing.
+    await post("/v1/admin/groups/put", { name: "eng", members: ["alice@example.test", "kim@example.test", "ian@example.test"] }, admin);
+    const kelvin = await post("/v1/enroll/request", { name: "laptop", signing_key: key() }, await session(x.t, "user", "\u212aim@example.test"));
+    expect(kelvin.status).toBe(400);
+    expect(await sees(x, await x.enroll("\u0130an@example.test"), id, owner)).toBe(false);
+    const prefix = await x.enroll("mallory@example.test"); // in eng2 only
+    expect(await sees(x, prefix, id, owner)).toBe(false);
+    // Group names differ only by case or surrounding space: the same group. A lookalike name is another.
+    const { id: id2 } = await json(await post("/v1/cards/publish", { card: { name: "Bot2", description: "d", tags: [], examples: [], visibility: "groups", groups: ["  ENG "] } }, owner.auth));
+    expect(await sees(x, real, id2, owner)).toBe(true);
+    const owner3 = await x.enroll("owner3@example.test"); // its only card names a lookalike group
+    const { id: id3 } = await json(await post("/v1/cards/publish", { card: { name: "Bot3", description: "d", tags: [], examples: [], visibility: "groups", groups: ["\u0435ng"] } }, owner3.auth));
+    expect(await sees(x, real, id3, owner3)).toBe(false);
+  });
+
+  it("a maximal group admits its last member and nobody else; an empty member list admits nobody", async () => {
+    const x = tenant();
+    const owner = await x.enroll(OWNER);
+    const admin = await x.admin();
+    const { id } = await json(await post("/v1/cards/publish", { card: { name: "Bot", description: "d", tags: [], examples: [], visibility: "groups", groups: ["big"] } }, owner.auth));
+    const last = "last@example.test";
+    const members = [...Array.from({ length: MAX_MEMBERS - 1 }, (_, i) => `m${i}@e.test`), last];
+    expect((await post("/v1/admin/groups/put", { name: "big", members }, admin)).status).toBe(200);
+    expect((await post("/v1/admin/groups/put", { name: "toobig", members: [...members, "one-more@e.test"] }, admin)).status).toBe(400);
+    expect(await sees(x, await x.enroll(last), id, owner)).toBe(true);
+    expect(await sees(x, await x.enroll("m0@E.test"), id, owner)).toBe(true);
+    expect(await sees(x, await x.enroll("one-more@e.test"), id, owner)).toBe(false);
+    await post("/v1/admin/groups/put", { name: "big", members: [] }, admin);
+    expect(await sees(x, await x.enroll(last), id, owner)).toBe(false);
+  });
+
+  it("a revoked device sees nothing and is carried nowhere, and a revoked target is unreachable, whatever the card says", async () => {
+    const x = tenant();
+    const owner = await x.enroll(OWNER);
+    const viewer = await x.enroll("v@example.test");
+    const admin = await x.admin();
+    const { id } = await json(await post("/v1/cards/publish", { card: { name: "Bot", description: "d", tags: [], examples: [], visibility: "tenant" } }, owner.auth));
+    expect(await sees(x, viewer, id, owner)).toBe(true);
+    const list = { tenant: x.t, version: 1, issued_at: "2026-01-01T00:00:00Z", revoked: [viewer.id], signature: "AA" };
+    expect((await post("/v1/admin/revocations", { list }, admin)).status).toBe(200);
+    expect(await x.stub.resolve(viewer.id, id)).toBeNull();
+    expect(await x.stub.mayRelay(viewer.id, owner.id, true)).toBe(false);
+    expect(await x.stub.mayRelay(viewer.id, owner.id, false)).toBe(false);
+    expect(await x.stub.mayRelay(owner.id, viewer.id, false)).toBe(false); // nor can anyone relay to it
+    const bystander = await x.enroll("b@example.test");
+    expect(await x.stub.mayRelay(bystander.id, viewer.id, true)).toBe(false);
+  });
+
+  it("the owner reaches their own card in every mode, including a groups card naming no group they are in (self-target)", async () => {
+    const x = tenant();
+    const owner = await x.enroll(OWNER);
+    const second = await x.enroll(OWNER.toUpperCase());
+    for (const card of [{ visibility: "private" }, { visibility: "groups", groups: ["nobody"] }, { visibility: "tenant" }]) {
+      const { id } = await json(await post("/v1/cards/publish", { card: { name: `B${Math.random()}`, description: "d", tags: [], examples: [], ...card } }, owner.auth));
+      expect(await sees(x, owner, id, owner)).toBe(true);
+      expect(await sees(x, second, id, owner)).toBe(true);
+    }
+  });
+});
+
+describe("identity lists compare ASCII case only", () => {
+  it("the Kelvin sign and the dotted capital I are not the ASCII letters in ADMINS, USERS or USER_DOMAINS", () => {
+    const e = { ADMINS: "t1:kim@example.test", USERS: "t1:ian@example.test", USER_DOMAINS: "t1:corp.test" } as any;
+    expect([isAdmin(e, "t1", "KIM@Example.test"), isUser(e, "t1", "IAN@example.TEST"), isUser(e, "t1", "Q@CORP.test")]).toEqual([true, true, true]);
+    expect([isAdmin(e, "t1", "\u212aim@example.test"), isUser(e, "t1", "\u0130an@example.test"), isUser(e, "t1", "q@corp.test\u212a")]).toEqual([false, false, false]);
   });
 });
