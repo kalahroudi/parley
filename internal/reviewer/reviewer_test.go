@@ -94,7 +94,7 @@ func TestOnlyAddedLinesAreChecked(t *testing.T) {
 }
 
 func TestLineNumbersFollowHunksAndFiles(t *testing.T) {
-	diff := "+++ b/a.go\n@@ -1 +10,2 @@\n+// TODO\n ctx\n@@ -9 +20 @@\n+// TODO\n+++ b/b.go\n@@ -1 +1 @@\n+// TODO\n"
+	diff := "+++ b/a.go\n@@ -1 +10,2 @@\n+// TODO\n ctx\n@@ -9,0 +20 @@\n+// TODO\n+++ b/b.go\n@@ -0,0 +1 @@\n+// TODO\n"
 	f, _, _ := reviewer.Review([]byte(diff))
 	got := []string{}
 	for _, x := range f {
@@ -292,5 +292,34 @@ func TestToolLess(t *testing.T) {
 				t.Errorf("%s imports %s", name, p)
 			}
 		}
+	}
+}
+
+// An added line that starts with "++ " looks like a file header ("+++ ") and a removed line that starts with
+// "-- " looks like "--- ". Inside a hunk they are content: they must be scanned, counted and must not move the
+// reported file or line.
+func TestHunkContentCannotImpersonateHeaders(t *testing.T) {
+	diff := "+++ b/real.go\n@@ -1,2 +1,3 @@\n-- old\n ctx\n+++ b/fake.go\n+++ // TODO hidden\n+// TODO\n"
+	f, added, _ := reviewer.Review([]byte(diff))
+	if added != 3 {
+		t.Fatalf("added = %d", added)
+	}
+	got := []string{}
+	for _, x := range f {
+		got = append(got, x.Path+":"+strconv.Itoa(x.Line)+":"+x.Rule)
+	}
+	want := "real.go:3:unfinished work marker real.go:4:unfinished work marker"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestHunkCountsHandleEdgeCases(t *testing.T) {
+	// A hunk of one old line and no new lines, a "no newline" marker, a stripped blank context line, and a
+	// huge count that must not overflow.
+	diff := "+++ b/a\n@@ -1,2 +1,2 @@\n-x\n\n\\ No newline at end of file\n+// TODO\n+++ b/b\n@@ -0,0 +1 @@\n+// TODO\n@@ -0,0 +" + "1,99999999999999999999 @@\n+// TODO\n+++ is content\n"
+	f, added, _ := reviewer.Review([]byte(diff))
+	if len(f) != 3 || added != 4 || f[0].Path != "a" || f[1].Path != "b" || f[2].Path != "b" {
+		t.Fatalf("%+v added=%d", f, added)
 	}
 }

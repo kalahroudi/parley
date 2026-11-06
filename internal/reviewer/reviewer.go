@@ -76,23 +76,43 @@ var rules = []rule{
 	{"trailing whitespace", regexp.MustCompile(`[ \t]+$`)},
 }
 
-var hunk = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+var hunk = regexp.MustCompile(`^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+// count reads a hunk length: absent means 1; a number too large to matter is capped.
+func count(s string) int {
+	if s == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n > 1<<30 {
+		return 1 << 30
+	}
+	return n
+}
 
 // Review scans a unified diff. Anything that is not a diff yields no findings
 // (and the caller is told). Findings come in diff order, at most MaxFindings; the
 // second result is true when there were more.
 func Review(diff []byte) (findings []Finding, added int, more bool) {
 	path, line := "", 0
+	oldLeft, newLeft := 0, 0 // lines the current hunk still owes: inside it, "+++ x" is an added line "++ x", not a header
 	for _, l := range strings.Split(string(diff), "\n") {
 		l = strings.TrimSuffix(l, "\r")
+		inHunk := oldLeft > 0 || newLeft > 0
 		switch {
-		case strings.HasPrefix(l, "+++ "):
+		case inHunk && strings.HasPrefix(l, "-"):
+			oldLeft--
+		case inHunk && strings.HasPrefix(l, "\\"): // "\ No newline at end of file"
+		case !inHunk && strings.HasPrefix(l, "+++ "):
 			path = safePath(strings.TrimPrefix(strings.TrimPrefix(l[4:], "b/"), "a/"))
 			line = 0
-		case strings.HasPrefix(l, "--- "):
-		case hunk.MatchString(l):
-			line, _ = strconv.Atoi(hunk.FindStringSubmatch(l)[1]) // out of range gives the largest int: the number is only a label
+		case !inHunk && strings.HasPrefix(l, "--- "):
+		case !inHunk && hunk.MatchString(l):
+			m := hunk.FindStringSubmatch(l)
+			line, _ = strconv.Atoi(m[2]) // out of range gives the largest int: the number is only a label
+			oldLeft, newLeft = count(m[1]), count(m[3])
 		case strings.HasPrefix(l, "+"):
+			newLeft--
 			added++
 			for _, r := range rules {
 				if r.re.MatchString(l[1:]) {
@@ -104,7 +124,9 @@ func Review(diff []byte) (findings []Finding, added int, more bool) {
 				}
 			}
 			line++
-		case strings.HasPrefix(l, " "):
+		case strings.HasPrefix(l, " "), inHunk && l == "": // a context line whose lone space was stripped
+			oldLeft--
+			newLeft--
 			line++
 		}
 	}

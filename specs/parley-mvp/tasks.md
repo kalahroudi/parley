@@ -107,7 +107,7 @@ Deliverable: pilot-ready build. Gate to start: spikes 2, 3, 4 and 9 have passed.
 - [ ] T504 Auto-update from the pinned project key; distribution channels (GitHub releases, Homebrew tap, Linux package repo, `go install`, source)
 - [ ] T505 Windows daemon
 - [ ] T506 ACP adapter
-- [x] T507 Approval-gated tool-using skills; reference tool-less reviewer bot
+- [ ] T507 Approval-gated tool-using skills; reference tool-less reviewer bot (library and reference bot done; wire `skill.Gate` into the daemon's bot setup and the card label after T410)
 - [ ] T508 Docs and hardening guide
 - [ ] T509 Acceptance: all journeys A to L pass end to end on all three OSes
 - [ ] T510 Acceptance: billing webhooks tested against Stripe test events
