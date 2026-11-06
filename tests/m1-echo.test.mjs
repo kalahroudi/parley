@@ -17,7 +17,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { Scan } from "./canary/canary.mjs";
 import { signRevocations, startGateway } from "./harness/gateway.mjs";
 import { build, capture, isWindows, newTenant, post, sleep, testOptions, waitFor } from "./harness/e2e.mjs";
@@ -26,12 +27,25 @@ const opts = testOptions(240000);
 
 test("M1/T414: parley-cli test between two real daemons through the real gateway", opts, async (t) => {
   const { bin, exe } = build({ "parley-cli": "./cmd/parley-cli", parleyd: "./cmd/parleyd" });
+  for (const n of ["parley-cli", "parleyd"]) assert.ok(existsSync(exe(n)), `${n} was built`);
   const gw = await startGateway({ admins: "acme:admin@acme.test" });
   const daemons = [];
   let homes = [];
   try {
-    const { admin, rootKey, cli, enroll, homes: h } = await newTenant(gw, exe);
+    const { admin, rootKey, fp, cli, enroll: enrollPod, homes: h } = await newTenant(gw, exe);
     homes = h;
+    assert.match(fp, /^([A-Z2-7]{4}-){6}[A-Z2-7]{2}$/, "the root fingerprint is the 26-character form the daemons pin");
+    // Each pod's config names the tenant, the gateway and its own device id, and the id is a 32-character hex id.
+    const enroll = async (owner) => {
+      const pod = await enrollPod(owner);
+      const cfg = JSON.parse(readFileSync(join(pod.home, "config.json"), "utf8"));
+      assert.match(pod.id, /^[0-9a-f]{32}$/);
+      assert.equal(cfg.tenant, "acme");
+      assert.equal(cfg.gateway_url, gw.url);
+      assert.equal(cfg.device_id, pod.id);
+      assert.equal(cfg.key_store, "file");
+      return pod;
+    };
     const startDaemon = (d) => {
       const p = capture(spawn(exe("parleyd"), [], { env: { ...process.env, PARLEY_HOME: d.home }, stdio: ["ignore", "pipe", "pipe"] }));
       daemons.push(p);

@@ -7,7 +7,7 @@
 //  - the TTL passes before the caller is back: the caller reconnects and receives nothing, and the task is not
 //    completed from what the gateway knows (the gateway's state code is a hint; only a signed message completes it).
 // The shortest TTL a tenant can set is 15 minutes, so this takes about 17 minutes of real time. It is not part of
-// `node --test tests/**/*.test.mjs`; `make queued-ttl` and the Queued TTL workflow run it, on macOS and Linux.
+// `node --test tests/**/*.test.mjs`; `make queued-ttl` runs it, on macOS and Linux.
 // The caller's gateway_url points at a TCP proxy (tests/harness/e2e.mjs, cuttableProxy) so the test can cut its
 // connection and restore it while the daemon keeps running; every other process talks to the gateway directly.
 

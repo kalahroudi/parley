@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,7 +33,6 @@ import (
 // responder sends the bot host's messages through the daemon's pipeline.
 type responder struct{ d *daemon.Daemon }
 
-//cover:ignore test harness, run as a process by tests/walking-skeleton.test.mjs, which is its test
 func (r *responder) Respond(ctx context.Context, id [16]byte, typ envelope.Type, content []byte) error {
 	n, err := r.d.Node()
 	if err != nil {
@@ -41,23 +41,38 @@ func (r *responder) Respond(ctx context.Context, id [16]byte, typ envelope.Type,
 	return n.Respond(ctx, id, typ, content)
 }
 
-//cover:ignore test harness, run as a process by tests/walking-skeleton.test.mjs, which is its test
 func main() {
-	if err := run(); err != nil {
-		//logx:allow fatal startup error for the test harness's terminal; no task content exists in this process path
-		fmt.Fprintln(os.Stderr, "botd:", err)
-		os.Exit(1)
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := serve(ctx, os.Args[1:], os.Getenv, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
-//cover:ignore test harness, run as a process by tests/walking-skeleton.test.mjs, which is its test
-func run() error {
-	owner := flag.String("owner", "", "the only owner whose devices may call the bot")
-	command := flag.String("command", "", "absolute path of the bot program")
-	name := flag.String("name", "walking-skeleton-bot", "the card's name")
-	flag.Parse()
+// serve runs the daemon until ctx ends and returns the process exit code.
+func serve(ctx context.Context, args []string, getenv func(string) string, errw io.Writer) int {
+	if err := run(ctx, args, getenv, errw); err != nil {
+		//logx:allow fatal startup error for the test harness's terminal; no task content exists in this process path
+		fmt.Fprintln(errw, "botd:", err)
+		return 1
+	}
+	return 0
+}
 
-	dirs, err := daemon.DefaultDirs(os.Getenv, os.UserConfigDir)
+// allowOwner is the bot's allowlist: devices of this one owner.
+func allowOwner(owner string) func(string) bool {
+	return func(o string) bool { return strings.EqualFold(o, owner) }
+}
+
+func run(ctx context.Context, args []string, getenv func(string) string, logw io.Writer) error {
+	fs := flag.NewFlagSet("botd", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	owner := fs.String("owner", "", "the only owner whose devices may call the bot")
+	command := fs.String("command", "", "absolute path of the bot program")
+	name := fs.String("name", "walking-skeleton-bot", "the card's name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dirs, err := daemon.DefaultDirs(getenv, os.UserConfigDir)
 	if err != nil {
 		return err
 	}
@@ -65,7 +80,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	cli, err := adapter.NewCLI(adapter.CLIConfig{Command: *command, Args: flag.Args(), Env: []string{}})
+	cli, err := adapter.NewCLI(adapter.CLIConfig{Command: *command, Args: fs.Args(), Env: []string{}})
 	if err != nil {
 		return err
 	}
@@ -76,32 +91,29 @@ func run() error {
 	}
 	defer host.Close()
 	d, err := daemon.New(cfg, dirs, daemon.Deps{
-		Log:       daemon.NewLogger(os.Stderr, cfg.LogLevel),
-		Allow:     func(o string) bool { return strings.EqualFold(o, *owner) },
+		Log:       daemon.NewLogger(logw, cfg.LogLevel),
+		Allow:     allowOwner(*owner),
 		OnInbound: host.Inbound,
 	})
 	if err != nil {
 		return err
 	}
 	resp.d = d
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go publish(ctx, d, cfg, *name)
+	version := func() (uint64, bool) { return d.Trust().Tracker.Version(cfg.Tenant, cfg.DeviceID) }
+	go publish(ctx, cfg, d.SigningKey(), version, *name)
 	return d.Run(ctx)
 }
 
 // publish puts the bot's card in the tenant directory, retrying until the gateway accepts it.
-//
-//cover:ignore test harness, run as a process by tests/walking-skeleton.test.mjs, which is its test
-func publish(ctx context.Context, d *daemon.Daemon, cfg daemon.Config, name string) {
+func publish(ctx context.Context, cfg daemon.Config, signer ed25519.PrivateKey, binding func() (uint64, bool), name string) {
 	card, _ := json.Marshal(map[string]any{"card": map[string]any{
 		"name": name, "description": "Answers, asks one question, or waits, as its task says", "tags": []string{"skeleton"},
 		"examples": []string{"echo your text"}, "visibility": "tenant",
 	}})
 	api := &connect.Client{BaseURL: cfg.GatewayURL, Tenant: cfg.Tenant, Device: cfg.DeviceID}
 	for ctx.Err() == nil {
-		if v, ok := d.Trust().Tracker.Version(cfg.Tenant, cfg.DeviceID); ok {
-			if tok, err := api.Token(ctx, d.SigningKey(), v, connect.ScopeAPI); err == nil {
+		if v, ok := binding(); ok {
+			if tok, err := api.Token(ctx, signer, v, connect.ScopeAPI); err == nil {
 				req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.GatewayURL+"/v1/cards/publish", bytes.NewReader(card))
 				req.Header.Set("Authorization", "Bearer "+tok.Secret)
 				req.Header.Set("Content-Type", "application/json")

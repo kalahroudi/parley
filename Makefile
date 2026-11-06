@@ -40,7 +40,7 @@ m1:
 	node --test tests/m1-echo.test.mjs
 
 # T405: Queued retention with a real daemon whose connection drops. The shortest tenant TTL is 15 minutes, so this takes
-# about 17 (macOS and Linux; needs Go, Node and `cd gateway && npm ci`). Not part of `make test`; the Queued TTL workflow runs it.
+# about 17 (macOS and Linux; needs Go, Node and `cd gateway && npm ci`). Not part of `make test`; no workflow runs it yet (CI changes are outside T405).
 queued-ttl:
 	node --test tests/slow/queued-ttl.mjs
 

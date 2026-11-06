@@ -8,7 +8,7 @@
 // so it is named here and fails CI once T308 (which verifies R2 deletion) is ticked.
 //
 // The second, "Queued TTL deletion with a real daemon reconnecting after the TTL receives nothing", is written (T405):
-// tests/slow/queued-ttl.mjs, run by `make queued-ttl` and the Queued TTL workflow.
+// tests/slow/queued-ttl.mjs, run by `make queued-ttl` (no CI workflow runs it yet).
 
 import { pending } from "./harness/pending.mjs";
 
