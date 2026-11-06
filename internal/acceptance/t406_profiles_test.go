@@ -10,6 +10,7 @@ package acceptance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,8 +76,9 @@ func TestSandboxProfilesAreShippedAndStateWhatTheyDo(t *testing.T) {
 			t.Errorf("linux-bwrap.sh lacks %s", flag)
 		}
 	}
-	if win, err := os.ReadFile(sandboxFile(t, "windows.md")); err != nil || !strings.Contains(string(win), "runas /user:") {
-		t.Errorf("windows.md: %v", err)
+	win, err := os.ReadFile(sandboxFile(t, "windows.md"))
+	if err != nil || !strings.Contains(string(win), "Not verified on a second user account") {
+		t.Errorf("windows.md must say the profile is not verified: %v", err)
 	}
 }
 
@@ -103,6 +105,7 @@ func TestMacOSProfileKeepsAProcessAwayFromTheSocket(t *testing.T) {
 	if got := dialFrom(t, sock, "/usr/bin/sandbox-exec", "-f", sandboxFile(t, "macos.sb")); got != "refused" {
 		t.Errorf("under the macOS profile the process %q", got)
 	}
+	fmt.Println("SANDBOX-PROFILE macos: RAN, the process was refused")
 }
 
 // Under the Linux script a process told the daemon's socket path cannot connect. The runner must allow unprivileged user
@@ -112,7 +115,12 @@ func TestLinuxSandboxScriptKeepsAProcessAwayFromTheSocket(t *testing.T) {
 		t.Skip("bubblewrap exists on Linux only")
 	}
 	if out, err := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-user", "true").CombinedOutput(); err != nil {
-		t.Skipf("bubblewrap cannot start here (%v: %s), so the profile was not run on this machine", err, strings.TrimSpace(string(out)))
+		msg := fmt.Sprintf("bubblewrap cannot start here (%v: %s)", err, strings.TrimSpace(string(out)))
+		if os.Getenv("CI") != "" {
+			t.Fatalf("%s; CI must run the Linux sandbox profile (install bubblewrap and allow user namespaces)", msg)
+		}
+		fmt.Println("SANDBOX-PROFILE linux: SKIPPED outside CI:", msg)
+		t.Skip(msg)
 	}
 	g := newPipeGW(t)
 	n := g.startOK("sbx8", nodeOpts{})
@@ -123,4 +131,34 @@ func TestLinuxSandboxScriptKeepsAProcessAwayFromTheSocket(t *testing.T) {
 	if got := dialFrom(t, sock, sandboxFile(t, "linux-bwrap.sh"), filepath.Dir(sock)); got != "refused" {
 		t.Errorf("under the Linux script the process %q", got)
 	}
+	fmt.Println("SANDBOX-PROFILE linux: RAN, the process was refused")
+}
+
+// The Windows script is not verified on a second user account (docs/sandbox/windows.md says so); what is tested is that it
+// parses, that its dry run prints the commands and runs nothing, and that it refuses a hostile user name or bot path.
+func TestWindowsSandboxScriptParsesAndDryRuns(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell's parser is checked on the Windows runners")
+	}
+	script := sandboxFile(t, "windows.ps1")
+	parse := `$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$t,[ref]$e);if($e.Count){$e|%{$_.Message};exit 1}`
+	if out, err := exec.Command("powershell", "-NoProfile", "-Command", parse, script).CombinedOutput(); err != nil {
+		t.Fatalf("does not parse: %v: %s", err, out)
+	}
+	run := func(args ...string) (string, error) {
+		out, err := exec.Command("powershell", append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script}, args...)...).CombinedOutput()
+		return string(out), err
+	}
+	out, err := run("-Bot", `C:otsot.exe`, "-DryRun")
+	want := "would run: net user parley-bot * /add"
+	if err != nil || !strings.Contains(out, want) || !strings.Contains(out, `would run: runas /user:parley-bot "C:otsot.exe"`) {
+		t.Errorf("dry run: %v %q", err, out)
+	}
+	if _, err := run("-Bot", `C:otsot.exe`, "-User", "x & calc", "-DryRun"); err == nil {
+		t.Error("a hostile user name was accepted")
+	}
+	if _, err := run("-Bot", `C:ots"bot.exe`, "-DryRun"); err == nil {
+		t.Error("a bot path with a quote was accepted")
+	}
+	fmt.Println("SANDBOX-PROFILE windows: script parsed and dry-run checked; enforcement NOT verified on a second user")
 }

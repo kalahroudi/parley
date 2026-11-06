@@ -87,15 +87,21 @@ Approval is not an MCP tool and has no flag that answers for you. Three layers, 
 | Bot has no terminal | yes (new session) | yes (new session) | yes (no console) |
 | Inherited descriptors closed | yes | yes | nothing is inherited |
 
-**What this does not stop.** A program of your OS user that Parley did not start is in no bot's tree: it can call `approve` on the socket if it finds it, and a program that makes itself a pseudo-terminal can type "yes" on it. A descendant of a bot that deliberately leaves its session and process group and loses its parent on Linux or macOS is no longer recognised (a test states this limit and fails if it changes). For all of these use an operating-system sandbox; profiles you can use as they are follow.
+**What this does not stop.** A program of your OS user that Parley did not start is in no bot's tree: it can call `approve` on the socket if it finds it, and a program that makes itself a pseudo-terminal can type "yes" on it. A descendant of a bot that deliberately leaves its session and process group and loses its parent on Linux or macOS is no longer recognised (a test states this limit and fails if it changes). For all of these use an operating-system sandbox; profiles follow, with their status.
 
 ## Keeping other programs away from the local socket
 
-Run any tool-using bot Parley does not start itself under one of the profiles in [`docs/sandbox`](docs/sandbox):
+**What Parley enforces itself, and tests, is the in-process defences above:** the terminal-only confirmation, the daemon's refusal of a bot's process tree, and the session and descriptor isolation of the bots it starts. They cover bots that Parley starts. They do not cover anything else running as you.
 
-- **macOS:** `sandbox-exec -f docs/sandbox/macos.sb <bot command>`. The tests run a process under this profile against a live daemon: it cannot connect (Apple marks `sandbox-exec` deprecated; it is still enforced).
-- **Linux:** `docs/sandbox/linux-bwrap.sh <state directory> <bot command>` (needs bubblewrap and unprivileged user namespaces). The script is syntax-checked in CI, and the test runs it against a live daemon wherever bubblewrap can start; where the runner does not allow it, the test says it was skipped. Separately, running the bot as another OS user closes the socket to it by file permissions.
-- **Windows:** run the bot as a different user (`docs/sandbox/windows.md`); the socket's directory is closed to other users by its access list. The profile has not been run against a second user. Tool-using skills are unsupported on Windows until a sandbox exists (T507).
+For tool-using bots that Parley does not start, there are operating-system sandbox profiles in [`docs/sandbox`](docs/sandbox). They are shipped as starting points and their status differs; none of them is something Parley enforces:
+
+| Profile | Status |
+|---|---|
+| macOS: `sandbox-exec -f docs/sandbox/macos.sb <bot command>` | Run against a live daemon in CI on macOS: a process told the socket's path is refused. Apple marks `sandbox-exec` deprecated; it is still enforced. |
+| Linux: `docs/sandbox/linux-bwrap.sh <state directory> <bot command>` (needs bubblewrap and unprivileged user namespaces) | Run against a live daemon in CI on Linux, which fails if the sandbox cannot start; the CI log says whether it ran. Outside CI the test says explicitly when it skipped. |
+| Windows: `docs/sandbox/windows.ps1 -Bot <path>` (runs the bot as another user) | **Not verified on a second user account.** Only its syntax and its dry run are tested. No claim of enforcement. |
+
+The unverified profiles are tracked as a follow-up. Tool-using skills are unsupported on Windows until a sandbox exists (T507).
 
 ## What Parley does not promise
 
