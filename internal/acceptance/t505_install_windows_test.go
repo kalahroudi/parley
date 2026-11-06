@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -50,7 +51,13 @@ func TestWindowsInstallScriptIsPerUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code := strings.ToLower(string(b))
+	var lines []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), "#") { // the header comment names what the script does not do
+			lines = append(lines, l)
+		}
+	}
+	code := strings.ToLower(strings.Join(lines, "\n"))
 	for _, bad := range []string{"hklm", "program files", "programdata", "sc.exe", "new-service", "schtasks", "register-scheduledtask", "runas", "start-process -verb"} {
 		if strings.Contains(code, bad) {
 			t.Errorf("install.ps1 mentions %q: it must stay per-user and need no administrator", bad)
@@ -106,7 +113,9 @@ func TestWindowsInstallAutostartUninstall(t *testing.T) {
 	// What Windows does at logon: run the value's command line.
 	logon := func() {
 		t.Helper()
-		if out, err := exec.Command("cmd.exe", "/c", runCmd).CombinedOutput(); err != nil {
+		c := exec.Command("powershell.exe")
+		c.SysProcAttr = &syscall.SysProcAttr{CmdLine: runCmd} // the value verbatim, as the Run key's launcher passes it
+		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("the Run command failed: %v\n%s", err, out)
 		}
 	}
