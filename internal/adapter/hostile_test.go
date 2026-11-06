@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,11 +42,22 @@ func isFinal(t envelope.Type) bool {
 func converseThroughHost(t *testing.T, b bot.Bot, content []byte) []bottest.Message {
 	t.Helper()
 	rec := bottest.NewRecorder()
+	base := runtime.NumGoroutine()
 	h, err := bot.NewHost(bot.Config{Bot: b, Responder: rec, Timeout: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
+	// Whatever the bot did, nothing of the task may outlive the Host: no reader, no child, no request.
+	defer func() {
+		h.Close()
+		deadline := time.Now().Add(10 * time.Second)
+		for runtime.NumGoroutine() > base && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if n := runtime.NumGoroutine(); n > base {
+			t.Errorf("%d goroutines before the task, %d after the host was closed", base, n)
+		}
+	}()
 	id := [16]byte{9}
 	h.Inbound(pipeline.Inbound{Type: envelope.TypeTask, TaskID: id, Caller: "d", Owner: "o", Context: "c", Content: content})
 	answered := 0
@@ -109,6 +121,7 @@ func TestHostileBotStreamsReachTheCallerAsFixedErrors(t *testing.T) {
 		"status flood":         {status, adapter.MaxStatuses + 1},
 		"question flood":       {`{"type":"question","content":"cQ=="}` + "\n", adapter.MaxQuestions + 1},
 		"ends without final":   {status, 1},
+		"line past the limit":  {strings.Repeat("a", 4096), 2*adapter.MaxLine/4096 + 8},
 	} {
 		check := func(t *testing.T, msgs []bottest.Message) {
 			t.Helper()

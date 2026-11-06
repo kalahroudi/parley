@@ -557,3 +557,27 @@ func TestEscapedMaximumRequestAndLargeReplyRoundTrip(t *testing.T) {
 		t.Errorf("reply length %d", len(s))
 	}
 }
+
+// A request is exactly one object with the two known fields: an unknown field, a second value or text after the first
+// is refused and never reaches a method; whitespace after the request is fine.
+func TestSocketRefusesRequestsThatCarryMoreThanTheOneObject(t *testing.T) {
+	called := make(chan struct{}, 8)
+	ts := startServer(t, map[string]Method{"x": func(context.Context, json.RawMessage) (any, error) { called <- struct{}{}; return 1, nil }})
+	for name, p := range map[string]string{
+		"unknown field": `{"method":"x","admin":true}`,
+		"second value":  `{"method":"x"}{"method":"x"}`,
+		"trailing text": `{"method":"x"} junk`,
+		"invalid UTF-8": "{\"method\":\"x\",\"params\":\"\xff\"} \xff",
+		"NUL":           "{\"method\":\"x\"}\x00",
+	} {
+		if r := rawRoundTrip(t, ts.path, []byte(p)); r.Error != "bad_request" || r.OK {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	if len(called) != 0 {
+		t.Fatal("a refused request reached a method")
+	}
+	if r := rawRoundTrip(t, ts.path, []byte(" {\"method\":\"x\"} \r\n")); !r.OK {
+		t.Fatalf("a request with only whitespace after it was refused: %+v", r)
+	}
+}

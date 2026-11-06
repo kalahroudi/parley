@@ -32,6 +32,7 @@
 package localsock
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -211,7 +212,8 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	defer cancel()
 	var req request
 	dec := json.NewDecoder(io.LimitReader(c, maxRequestBytes))
-	if err := dec.Decode(&req); err != nil {
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || !onlySpace(dec.Buffered()) {
 		reply(c, Response{Error: "bad_request"})
 		return
 	}
@@ -237,6 +239,13 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		return
 	}
 	reply(c, Response{OK: true, Result: b})
+}
+
+// onlySpace reports whether what the decoder has already read past the request is only JSON whitespace. It never
+// reads more: a client that sends one request and waits for the reply must not be made to wait for more bytes.
+func onlySpace(r io.Reader) bool {
+	b, _ := io.ReadAll(r)
+	return len(bytes.TrimLeft(b, " \t\r\n")) == 0
 }
 
 func reply(c net.Conn, r Response) { _ = json.NewEncoder(c).Encode(r) }
