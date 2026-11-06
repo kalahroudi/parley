@@ -21,7 +21,9 @@ import {
 } from "./acl";
 import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "./connect";
 import type { Env } from "./index";
-import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, type Retention } from "./task";
+import type { Device } from "./device";
+import { ADMIN_COLUMNS, adminRow, csvRow, TASK_COLUMNS, taskRow, type TaskAudit } from "./export";
+import { QUEUE_TTL_DEFAULT_MS, QUEUE_TTL_MAX_MS, QUEUE_TTL_MIN_MS, TASK_METADATA_RETENTION_MS, type Retention, type Task } from "./task";
 import { cleanText, fold } from "./text";
 
 export const TOKEN_TTL_DEFAULT_MS = 24 * 3600_000;
@@ -134,6 +136,45 @@ export interface AuditEvent {
 }
 export const MAX_AUDIT = 500;
 
+// The tenant's record of the tasks it has seen begin (metadata only), oldest first, for the audit CSV, the export and
+// the offboarding cascade. A row is kept as long as the Task DO keeps its own metadata (90 days). At most MAX_TASK_LOG
+// rows are kept: when full, the oldest row whose task has expired goes, and when none has, a new task is refused (so
+// a tenant may have this many unexpired tasks at once), which means a task that is still live is never dropped from
+// the record.
+export interface TaskLogRow {
+  task: string;
+  caller: string;
+  target: string;
+  created: number;
+  expires_at: number;
+  bucket: number;
+  retention: Retention;
+}
+export const MAX_TASK_LOG = 10_000;
+
+// Offboarding. A newly revoked device is first closed (socket, session counters, held events), then the live tasks it
+// takes part in are canceled. Each step is a call to another Durable Object and one request may make about 1000, so
+// a pass makes at most CASCADE_CALLS and the alarm carries on, one second later and again until nothing is left.
+export const CASCADE_CALLS = 200;
+export const CASCADE_RETRY_MS = 1000;
+interface Cascade {
+  close: string[]; // devices whose sockets and held events are still to be dropped
+  cancel: string[]; // devices whose live tasks are still to be canceled (a scan of the task log)
+  after?: string; // the task log key the scan has reached
+}
+
+// Tenant deletion is resumable the same way: a `deleting` marker is set first (the tenant then admits nothing), and
+// passes of at most PURGE_CALLS wipe the Task and Device DOs until the storage itself is emptied.
+export const PURGE_CALLS = 200;
+const PURGE_BATCH = 64;
+
+export const EXPORT_SECTIONS = ["settings", "devices", "cards", "groups", "audit", "tasks"] as const;
+export type ExportSection = (typeof EXPORT_SECTIONS)[number];
+const SECTION_PREFIX = { devices: "enr:", cards: "card:", groups: "grp:", audit: "aud:", tasks: "tsk:" } as const;
+export const CSV_PAGE_DEFAULT = 100;
+export const CSV_PAGE_MAX = 500;
+export type CsvKind = "admin" | "tasks";
+
 // The device ids a signed revocation list names; anything not a string is ignored.
 const revokedOf = (l: { revoked?: unknown } | undefined | null) => new Set(Array.isArray(l?.revoked) ? l.revoked.filter((x): x is string => typeof x === "string") : []);
 
@@ -210,6 +251,7 @@ export class Tenant extends DurableObject<Env> {
   // hash, so the gateway never holds a usable session secret.
   async loginStart(sessionHash: string, pollHash: string): Promise<{ id: string; code: string; expires_at: number } | { error: "bad_request" | "too_many" }> {
     return this.ctx.blockConcurrencyWhile(async () => {
+      if (await this.isDeleting()) return { error: "bad_request" as const };
       const hex64 = /^[0-9a-f]{64}$/;
       if (typeof sessionHash !== "string" || typeof pollHash !== "string" || !hex64.test(sessionHash) || !hex64.test(pollHash)) return { error: "bad_request" as const };
       const now = Date.now();
@@ -257,6 +299,7 @@ export class Tenant extends DurableObject<Env> {
 
   // Null for an unknown, signed-out or expired session.
   async getSession(secret: string): Promise<Session | null> {
+    if (await this.isDeleting()) return null;
     const k = `ses:${await sha256(secret)}`;
     const rec = await this.ctx.storage.get<Session>(k);
     if (!rec) return null;
@@ -269,6 +312,11 @@ export class Tenant extends DurableObject<Env> {
 
   async endSession(secret: string): Promise<void> {
     await this.ctx.storage.delete(`ses:${await sha256(secret)}`);
+  }
+
+  // A tenant whose deletion has begun admits nothing new (see deleteTenant).
+  private async isDeleting(): Promise<boolean> {
+    return (await this.ctx.storage.get("deleting")) !== undefined;
   }
 
   // `user` is the verified identity of an SSO login (interactive enrollment);
@@ -285,6 +333,7 @@ export class Tenant extends DurableObject<Env> {
   private async enroll(
     input: { user?: string; token?: string; name: string; signing_key: string; id?: string; poll?: string },
   ): Promise<{ id: string; poll: string } | { error: EnrollError }> {
+    if (await this.isDeleting()) return { error: "bad_request" };
     // Enrollment tolerates pasted whitespace; the stored key is the canonical spelling.
     const key = b64bytes(input.signing_key.replace(/\s/g, ""), 32);
     const name = cleanText(input.name, 100);
@@ -389,17 +438,78 @@ export class Tenant extends DurableObject<Env> {
     if (cur && (l.version < cur.version || (l.version === cur.version && JSON.stringify(l) !== JSON.stringify(cur)))) return "rollback";
     if (cur && JSON.stringify(l) === JSON.stringify(cur)) return "ok";
     // A revoked device leaves the directory at once: its cards go in the same
-    // commit that records the list, and reads ignore it from then on.
+    // commit that records the list, and reads ignore it from then on. The same
+    // commit notes the offboarding cascade for the devices this list adds, so a
+    // crash after it cannot leave a revoked device with an open socket or live tasks.
     const revoked = revokedOf(l);
+    const before = revokedOf(cur);
+    const fresh = [...revoked].filter((d) => isDeviceId(d) && !before.has(d));
     const cards = await this.ctx.storage.list<DirectoryEntry>({ prefix: "card:", limit: MAX_CARDS_PER_TENANT });
     const doomed = [...cards].filter(([, c]) => revoked.has(c.device_id)).map(([k]) => k);
-    await this.commit({ revocations: l }, doomed, {
+    const puts: Record<string, unknown> = { revocations: l };
+    if (fresh.length) {
+      // Devices added while a cascade is under way restart its scan from the first row.
+      const open = (await this.ctx.storage.get<Cascade>("cascade")) ?? { close: [], cancel: [] };
+      puts.cascade = { close: [...new Set([...open.close, ...fresh])], cancel: [...new Set([...open.cancel, ...fresh])] } satisfies Cascade;
+    }
+    await this.commit(puts, doomed, {
       action: "revocations.put",
       actor: "admin",
       subject: String(l.version),
-      detail: { revoked: revoked.size, cards_removed: doomed.length },
+      detail: { revoked: revoked.size, cards_removed: doomed.length, newly_revoked: fresh.length },
     });
+    if (fresh.length && !(await this.cascade())) await this.schedule(Date.now() + CASCADE_RETRY_MS);
     return "ok";
+  }
+
+  // This tenant's name, which the Durable Objects it owns are named after (`${tenant}:...`).
+  private get tenant(): string {
+    return this.ctx.id.name!;
+  }
+  private deviceStub(device: string) {
+    return this.env.DEVICE.get(this.env.DEVICE.idFromName(`${this.tenant}:${device}`)) as DurableObjectStub<Device>;
+  }
+  private taskStub(task: string) {
+    return this.env.TASK.get(this.env.TASK.idFromName(`${this.tenant}:${task}`)) as DurableObjectStub<Task>;
+  }
+
+  // One pass of the offboarding cascade, within its budget. True when nothing is left; false when the alarm must
+  // carry on (budget spent, or a call failed: every step is safe to repeat and progress is kept).
+  private async cascade(): Promise<boolean> {
+    const c = await this.ctx.storage.get<Cascade>("cascade");
+    if (!c) return true;
+    let calls = 0;
+    let finished = false;
+    try {
+      for (; c.close.length && calls < CASCADE_CALLS; calls++) {
+        await this.deviceStub(c.close[0]!).revoke();
+        c.close.shift();
+        await this.ctx.storage.put("cascade", c);
+      }
+      // The sockets go first; only then are the tasks scanned, so no device is still talking while they are canceled.
+      const who = new Set(c.cancel);
+      while (!c.close.length && calls < CASCADE_CALLS && !finished) {
+        const rows = [...(await this.ctx.storage.list<TaskLogRow>({ prefix: "tsk:", limit: 128, ...(c.after ? { startAfter: c.after } : {}) }))];
+        const now = Date.now();
+        let used = 0;
+        for (const [k, r] of rows) {
+          if (calls >= CASCADE_CALLS) break;
+          used++;
+          const hit = who.has(r.caller) ? r.caller : who.has(r.target) ? r.target : null;
+          if (hit && r.expires_at > now) {
+            await this.taskStub(r.task).revoke(this.tenant, hit);
+            calls++;
+          }
+          c.after = k; // only once the row is done, so a failed call is repeated
+        }
+        finished = used === rows.length && rows.length < 128;
+      }
+    } catch {
+      // The progress made is saved below, and the alarm repeats the step that failed.
+    }
+    if (finished) await this.ctx.storage.delete("cascade");
+    else await this.ctx.storage.put("cascade", c);
+    return finished;
   }
 
   async revocations(): Promise<SignedList | null> {
@@ -454,6 +564,7 @@ export class Tenant extends DurableObject<Env> {
   // binding the registered root signed for this tenant and device and that has not expired, and whose key is the one
   // that was enrolled. Anything else is null.
   private async connectable(tenant: string, device: string): Promise<{ key: Uint8Array; version: number } | null> {
+    if (await this.isDeleting()) return null;
     const root = b64bytes((await this.ctx.storage.get<string>("root")) ?? "", 32);
     if (!root || !isDeviceId(device) || (await this.revokedIds()).has(device)) return null;
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${device}`);
@@ -562,6 +673,180 @@ export class Tenant extends DurableObject<Env> {
     const all = await this.ctx.storage.list<AuditEvent>({ prefix: "aud:", limit: MAX_AUDIT });
     const r = paginate([...all].map(([k, e]) => ({ id: k.slice(4), ...e })), (e) => e.id, page);
     return { events: r.items, ...(r.next_cursor ? { next_cursor: r.next_cursor } : {}) };
+  }
+
+  // Notes that a task has begun (the gateway has just created it). "revoked" when either device is on the revocation
+  // list now (a revocation can land between the task's creation and this call, after the cascade has scanned the
+  // log), and "full" when MAX_TASK_LOG tasks are unexpired; in both cases the caller cancels the task.
+  async logTask(row: TaskLogRow): Promise<"ok" | "full" | "revoked"> {
+    const revoked = await this.revokedIds();
+    if (revoked.has(row.caller) || revoked.has(row.target)) return "revoked";
+    const [last, count] = await Promise.all([this.ctx.storage.get<number>("tsks"), this.ctx.storage.get<number>("ntsk")]);
+    let victim: string | undefined;
+    if ((count ?? 0) >= MAX_TASK_LOG) {
+      const now = Date.now();
+      const expired = ([, r]: [string, TaskLogRow]) => r.expires_at <= now;
+      // Usually the oldest row is long expired; only when it is not is the whole log searched.
+      victim = [...(await this.ctx.storage.list<TaskLogRow>({ prefix: "tsk:", limit: 1 }))].find(expired)?.[0];
+      victim ??= [...(await this.ctx.storage.list<TaskLogRow>({ prefix: "tsk:", limit: MAX_TASK_LOG }))].find(expired)?.[0];
+      if (!victim) return "full";
+    }
+    const seq = (last ?? 0) + 1;
+    // Both writes are issued with no await between them, so they commit together.
+    await Promise.all([
+      this.ctx.storage.put({ [`tsk:${String(seq).padStart(12, "0")}`]: row, tsks: seq, ntsk: (count ?? 0) + 1 - (victim ? 1 : 0) }),
+      ...(victim ? [this.ctx.storage.delete(victim)] : []),
+    ]);
+    if (!count) await this.schedule(row.created + TASK_METADATA_RETENTION_MS);
+    return "ok";
+  }
+
+  // Deletes the rows that have outlived the metadata retention (they are in creation order, so they are at the front)
+  // and returns when the next one falls due.
+  private async pruneTaskLog(now: number): Promise<number | undefined> {
+    let count = (await this.ctx.storage.get<number>("ntsk")) ?? 0;
+    for (;;) {
+      const rows = [...(await this.ctx.storage.list<TaskLogRow>({ prefix: "tsk:", limit: 128 }))];
+      const due = rows.findIndex(([, r]) => r.created + TASK_METADATA_RETENTION_MS > now);
+      const n = due < 0 ? rows.length : due;
+      if (n) {
+        count -= n;
+        await Promise.all([...this.deleteAll(rows.slice(0, n).map(([k]) => k)), this.ctx.storage.put("ntsk", count)]);
+      }
+      if (due >= 0) return rows[due]![1].created + TASK_METADATA_RETENTION_MS;
+      if (rows.length < 128) return undefined;
+    }
+  }
+
+  // One page of a stored list in key order, after the cursor.
+  private async pageOf<T>(prefix: string, page: Page): Promise<{ rows: [string, T][]; next_cursor?: string }> {
+    const got = [...(await this.ctx.storage.list<T>({ prefix, limit: page.limit + 1, ...(page.after === null ? {} : { startAfter: prefix + page.after }) }))];
+    const rows = got.slice(0, page.limit);
+    if (got.length <= page.limit) return { rows };
+    const hex = Array.from(new TextEncoder().encode(rows[rows.length - 1]![0].slice(prefix.length)), (b) => b.toString(16).padStart(2, "0")).join("");
+    return { rows, next_cursor: hex };
+  }
+
+  // What the Task DOs hold now about each logged task (one call each, in parallel; at most a page).
+  private async taskAudits(rows: [string, TaskLogRow][]): Promise<TaskAudit[]> {
+    return Promise.all(
+      rows.map(async ([, r]) => {
+        const t = await this.taskStub(r.task).get(this.tenant);
+        return {
+          created: r.created,
+          task: r.task,
+          caller: r.caller,
+          target: r.target,
+          bucket: r.bucket,
+          retention: r.retention,
+          expires_at: r.expires_at,
+          ...(t ? { state: t.state, updated: t.updated, ...(t.reason ? { reason: t.reason } : {}), ...(t.ciphertext_deleted_at ? { ciphertext_deleted_at: t.ciphertext_deleted_at } : {}) } : {}),
+        };
+      }),
+    );
+  }
+
+  // Tenant export: everything the tenant holds about the tenant, one section and one page at a time. There is no
+  // content to export, only metadata and the plaintext names the spec declares plaintext; the credentials the
+  // tenant holds (session, token and poll secrets, kept as hashes) are not part of it.
+  async exportSection(section: ExportSection, page: Page): Promise<{ section: ExportSection; items: unknown[]; next_cursor?: string }> {
+    if (section === "settings") {
+      return {
+        section,
+        items: [{ retention: await this.retention(), root_public_key: (await this.rootKey()) ?? null, revocations: await this.revocations(), deleted: (await this.ctx.storage.get("deleted")) ?? null }],
+      };
+    }
+    const prefix = SECTION_PREFIX[section];
+    const { rows, next_cursor } = await this.pageOf<any>(prefix, page);
+    const items =
+      section === "devices"
+        ? rows.map(([, r]) => strip(r))
+        : section === "groups"
+          ? rows.map(([k, g]) => ({ name: k.slice(prefix.length), members: g.members }))
+          : section === "audit"
+            ? rows.map(([k, e]) => ({ id: k.slice(prefix.length), ...e }))
+            : section === "tasks"
+              ? await this.taskAudits(rows)
+              : rows.map(([, c]) => c);
+    return { section, items, ...(next_cursor ? { next_cursor } : {}) };
+  }
+
+  // The metadata audit CSV: admin actions, or tasks (who called whom, when, the state code, the padded size bucket).
+  // The first page carries the header row, so pages can be joined as they arrive.
+  async auditCsv(kind: CsvKind, page: Page): Promise<{ csv: string; next_cursor?: string }> {
+    const head = page.after === null ? csvRow(kind === "admin" ? ADMIN_COLUMNS : TASK_COLUMNS) : "";
+    if (kind === "admin") {
+      const { rows, next_cursor } = await this.pageOf<AuditEvent>("aud:", page);
+      return { csv: head + rows.map(([, e]) => adminRow(e)).join(""), ...(next_cursor ? { next_cursor } : {}) };
+    }
+    const { rows, next_cursor } = await this.pageOf<TaskLogRow>("tsk:", page);
+    const owners = new Map<string, string>();
+    for (const d of new Set(rows.flatMap(([, r]) => [r.caller, r.target]))) {
+      const e = await this.ctx.storage.get<StoredEnrollment>(`enr:${d}`);
+      if (e) owners.set(d, e.owner);
+    }
+    const audits = await this.taskAudits(rows);
+    return { csv: head + audits.map((t) => taskRow(t, (d) => owners.get(d))).join(""), ...(next_cursor ? { next_cursor } : {}) };
+  }
+
+  // Tenant deletion. The marker comes first: from then on no session, device or enrollment is admitted. Then every
+  // Task and Device DO the tenant knows of is wiped, and last the tenant's own storage. A pass that cannot finish
+  // (budget, or a failed call) is continued by the alarm, so a deletion that was started is completed.
+  async deleteTenant(): Promise<void> {
+    // A deletion already under way is only continued; a new one on a tenant that was deleted before replaces the old tombstone.
+    if (!(await this.isDeleting())) {
+      await this.ctx.storage.delete("deleted");
+      await this.ctx.storage.put("deleting", Date.now());
+    }
+    await this.purge();
+  }
+
+  // What remains of a deleted tenant: when it was deleted, how many audit events it had and a SHA-256 over them
+  // (their stored form, in order). No names, no payload; anyone holding an earlier audit export can check it against
+  // this. Stored before anything is deleted, once, so a resumed pass does not change it.
+  private async tombstone(): Promise<void> {
+    if ((await this.ctx.storage.get("deleted")) !== undefined) return;
+    const aud = [...(await this.ctx.storage.list<AuditEvent>({ prefix: "aud:", limit: MAX_AUDIT }))];
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(aud))));
+    await this.ctx.storage.put("deleted", { at: Date.now(), audit_events: aud.length, audit_sha256: Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("") });
+  }
+
+  private async purge(): Promise<void> {
+    let calls = 0;
+    try {
+      await this.tombstone();
+      // Credentials and half-finished sign-ins first.
+      for (const prefix of ["ses:", "tok:", "dtk:", "chal:", "lgn:"]) {
+        for (;;) {
+          const keys = [...(await this.ctx.storage.list({ prefix, limit: 128 })).keys()];
+          if (!keys.length) break;
+          await this.ctx.storage.delete(keys);
+        }
+      }
+      for (const [prefix, wipe] of [
+        ["tsk:", (_id: string, r: TaskLogRow) => this.taskStub(r.task).wipe(this.tenant)],
+        ["enr:", (id: string) => this.deviceStub(id).revoke()],
+      ] as const) {
+        for (;;) {
+          const rows = [...(await this.ctx.storage.list<TaskLogRow>({ prefix, limit: PURGE_BATCH }))];
+          if (!rows.length) break;
+          if (calls + rows.length > PURGE_CALLS) return await this.schedule(Date.now() + CASCADE_RETRY_MS);
+          await Promise.all(rows.map(([k, r]) => wipe(k.slice(prefix.length), r)));
+          calls += rows.length;
+          await Promise.all(this.deleteAll(rows.map(([k]) => k)));
+        }
+      }
+      await this.ctx.storage.deleteAlarm();
+      // Everything but the tombstone, and the marker last: a crash before that leaves the deletion to be resumed.
+      for (;;) {
+        const keys = [...(await this.ctx.storage.list({ limit: 128 })).keys()].filter((k) => k !== "deleted" && k !== "deleting");
+        if (!keys.length) break;
+        await Promise.all(this.deleteAll(keys));
+      }
+      await this.ctx.storage.delete("deleting");
+    } catch {
+      await this.schedule(Date.now() + CASCADE_RETRY_MS);
+    }
   }
 
   // Publishes (or replaces, by name) a card for the calling device. The secrets
@@ -708,8 +993,14 @@ export class Tenant extends DurableObject<Env> {
   // Purges expired tokens, expired pending requests and decided records past
   // retention, then re-arms for the next one still due.
   async alarm() {
+    if (await this.ctx.storage.get("deleting")) return this.purge();
     const now = Date.now();
     let next: number | undefined;
+    const soonest = (at: number | undefined) => {
+      if (at !== undefined && (next === undefined || at < next)) next = at;
+    };
+    if (!(await this.cascade())) soonest(now + CASCADE_RETRY_MS);
+    soonest(await this.pruneTaskLog(now));
     const due = async (k: string, at: number) => {
       if (at <= now) await this.ctx.storage.delete(k);
       else if (next === undefined || at < next) next = at;

@@ -41,7 +41,7 @@ export function isUser(env: Env, tenant: string, email: string): boolean {
   return listed(env.USER_DOMAINS).includes(`${t}:${e.slice(at + 1)}`);
 }
 
-function sessionCookie(req: Request, value: string, maxAgeS: number): string {
+export function sessionCookie(req: Request, value: string, maxAgeS: number): string {
   const secure = new URL(req.url).protocol === "https:" ? "; Secure" : "";
   return `${cookieName(req)}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeS}${secure}`;
 }
@@ -83,6 +83,10 @@ export async function principal(req: Request, env: Env): Promise<Principal | nul
   const s = await tenantStub(env, m[1]!).getSession(m[2]!);
   // The allowlist is checked on every request, so removing someone from ADMINS ends their admin sessions now, not at expiry.
   if (s?.role === "admin" && !isAdmin(env, m[1]!, s.email)) return null;
+  // The same for a user: taken off USERS (and off the domain list) they lose the session, and with it the right to
+  // file enrollment requests, at once. A session is also never longer than SESSION_TTL_MS (8 h), so a sign-in to the
+  // identity provider is repeated at least that often, well inside the 24 h the spec allows.
+  if (s?.role === "user" && !isUser(env, m[1]!, s.email)) return null;
   return s ? { role: s.role, tenant: m[1]!, email: s.email, csrf: s.csrf, secret: m[2]!, via } : null;
 }
 

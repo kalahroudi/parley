@@ -37,7 +37,13 @@ function tenant() {
   const adminSession = session("admin", "admin@example.test"); // one admin session per tenant, as a person has
   const enroll = async (email: string, bind = true) => {
     const sk = key();
-    const { id } = await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, await session("user", email)));
+    // A user session lasts only while the tenant still lists the user (src/session.ts), and these addresses are test data (look-alikes
+    // among them), so each is listed as it is used.
+    (env as { USERS?: string }).USERS = `${env.USERS ?? ""},${t}:${email}`;
+    // A named service owner (no address) is a pod: it enrolls with an admin-minted token, as in production.
+    const { id } = email.includes("@")
+      ? await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk }, await session("user", email)))
+      : await json(await post("/v1/enroll/request", { name: "laptop", signing_key: sk, tenant: t, token: (await stub.mintToken(email))!.token }, ""));
     const admin = await adminSession;
     expect((await post("/v1/admin/enrollments/decide", { id, decision: "approved" }, admin)).status).toBe(200);
     if (bind) expect((await post("/v1/admin/bindings", { id, binding: { device_id: id, signing_key: sk, version: 1 } }, admin)).status).toBe(200);
