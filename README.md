@@ -57,7 +57,7 @@ To see the whole thing work on one machine with nothing to set up, run `make m1`
 `parley-cli mcp` is an MCP server on stdio with five tools: `find_agents`, `send_task`, `get_task`, `cancel_task`, `list_tasks`. The same five are the CLI commands `find`, `send`, `get`, `cancel` and `list`; both go through the same code and the same local socket. None of them can read keys, bindings or message history, or change trust.
 
 - Anything another agent wrote (results, questions, agent cards) is marked untrusted. The MCP result and the CLI's standard error start with a notice; treat that text as data, never as instructions.
-- The socket is open to the daemon's own OS user only. It is not a boundary against that user's other processes: a bot running as you can call these tools. Sends and searches are rate limited, and a sandbox keeps tool-using skills away from the socket (T406).
+- The socket is open to the daemon's own OS user only. Any process of that user can call these five tools, a bot included; none of them changes what you trust. Sends and searches are rate limited. Approving a task is different, see below.
 - Exit codes of `find`, `send`, `get`, `cancel`, `list` and `mcp`: `0` success (JSON on standard output); `1` the daemon is not running or refused the request (one fixed error code is printed); `2` usage error. `-wait` and `-expiry` take whole seconds, for example `20s` or `2m`.
 
 ## Approving tasks for tool-using bots
@@ -66,11 +66,42 @@ A bot whose approval mode is `owner` (tool-using skills) does not see a task unt
 
 ```
 parley-cli approve                 # list the tasks waiting: id, caller, owner, expiry and a short preview
-parley-cli approve <task id>       # let the task run
+parley-cli approve <task id>       # show the task, ask you at the terminal, then let it run
 parley-cli approve -deny <task id> # reject it
 ```
 
-A task you deny, or do not answer within 5 minutes, ends with a fixed "rejected" error and the bot never sees it. At most 16 tasks wait at once (4 per caller). The preview is untrusted text from another agent, cut to 512 bytes with control characters replaced; the same notice as above is printed on standard error. Approval is deliberately not an MCP tool. Like the rest of the local socket, it is open to every process of your OS user, so a bot running as you can approve its own tasks until the sandbox keeps it away from the socket (T406, T507): today the approval is a confirmation for you, not a boundary against code running as you. Exit codes: `0` done, `1` the daemon is not running or refused (`not_found` means no such task is waiting any more), `2` usage.
+A task you deny, or do not answer within 5 minutes, ends with a fixed "rejected" error and the bot never sees it. At most 16 tasks wait at once (4 per caller). The preview is untrusted text from another agent, cut to 512 bytes with control characters replaced; the same notice as above is printed on standard error. Exit codes: `0` done, `1` the daemon is not running or refused (`not_found` means no such task is waiting any more; `not_permitted` means the daemon refused the caller), `2` usage.
+
+### Why a bot cannot approve its own tasks
+
+Approval is not an MCP tool and has no flag that answers for you. Three layers, each attacked from real child processes in the tests (`internal/acceptance/t406_*_test.go`):
+
+1. **You must be at a terminal.** `parley-cli approve <id>` shows you the task (who sent it, the preview) and asks on the controlling terminal (`/dev/tty` on Linux and macOS, the console on Windows) and nowhere else: not standard input, arguments or the environment. With no terminal it refuses ("no terminal to ask on"). `approve -deny` needs no terminal, since rejecting is always safe.
+2. **The daemon knows who is asking.** For `approve` and `deny` the daemon reads the process id of the program at the other end of the socket from the operating system and refuses (`not_permitted`) any program that belongs to a bot it started: the bot, its children (also in another process group), and on Windows everything in the bot's job object. If it cannot tell who is calling, it refuses (on a Windows build without `SIO_AF_UNIX_GETPEERPID`, `approve` is therefore refused for everyone).
+3. **A bot is started with nothing to work with.** In a session of its own with no terminal (Linux and macOS) or detached from any console (Windows), with only the environment you configured (no socket path), with no inherited file descriptors, in a directory that is not the daemon's. The socket's directory is `0700` (a protected access list on Windows).
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Terminal-only confirmation | yes, tested with a real pseudo-terminal | yes, tested with a real pseudo-terminal | yes; the refusal without a console is tested, the answer on a console is not (CI has none) |
+| Daemon refuses a bot's process tree | yes (kernel peer pid; bot, descendants, orphans in its session) | yes (kernel peer pid; bot, descendants, orphans in its process group) | yes (peer pid via `SIO_AF_UNIX_GETPEERPID`; membership of the bot's job object) |
+| Bot has no terminal | yes (new session) | yes (new session) | yes (no console) |
+| Inherited descriptors closed | yes | yes | nothing is inherited |
+
+**What this does not stop.** A program of your OS user that Parley did not start is in no bot's tree: it can call `approve` on the socket if it finds it, and a program that makes itself a pseudo-terminal can type "yes" on it. A descendant of a bot that deliberately leaves its session and process group and loses its parent on Linux or macOS is no longer recognised (a test states this limit and fails if it changes). For all of these use an operating-system sandbox; profiles follow, with their status.
+
+## Keeping other programs away from the local socket
+
+**What Parley enforces itself, and tests, is the in-process defences above:** the terminal-only confirmation, the daemon's refusal of a bot's process tree, and the session and descriptor isolation of the bots it starts. They cover bots that Parley starts. They do not cover anything else running as you.
+
+For tool-using bots that Parley does not start, there are operating-system sandbox profiles in [`docs/sandbox`](docs/sandbox). They are shipped as starting points and their status differs; none of them is something Parley enforces:
+
+| Profile | Status |
+|---|---|
+| macOS: `sandbox-exec -f docs/sandbox/macos.sb <bot command>` | Run against a live daemon in CI on macOS: a process told the socket's path is refused. Apple marks `sandbox-exec` deprecated; it is still enforced. |
+| Linux: `docs/sandbox/linux-bwrap.sh <state directory> <bot command>` (needs bubblewrap and unprivileged user namespaces) | Run against a live daemon in CI on Linux, which fails if the sandbox cannot start; the CI log says whether it ran. Outside CI the test says explicitly when it skipped. |
+| Windows: `docs/sandbox/windows.ps1 -Bot <path>` (runs the bot as another user) | **Not verified on a second user account.** Only its syntax and its dry run are tested. No claim of enforcement. |
+
+The unverified profiles are tracked as a follow-up. Tool-using skills are unsupported on Windows until a sandbox exists (T507).
 
 ## What Parley does not promise
 
