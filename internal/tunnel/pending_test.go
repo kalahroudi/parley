@@ -28,6 +28,9 @@ func TestTokenSourceGivesEachConnectionAFreshToken(t *testing.T) {
 		}
 	})
 	waitFor(t, "welcome", func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.session != "" })
+	// The gateway registers a connection only after the welcome is written, so wait for it: dropping earlier would
+	// find nothing to close and no reconnect (and no second token) would follow.
+	waitFor(t, "the gateway to register the connection", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.conns) == 1 })
 	g.drop()
 	waitFor(t, "a second token for the reconnect", func() bool { return calls.Load() >= 2 })
 }
