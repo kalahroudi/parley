@@ -1034,6 +1034,7 @@ describe("the prekey relay", () => {
     // The revocation list is written straight to storage, as it stands in the moment before the offboarding cascade has
     // closed the socket (the cascade itself is tested in offboarding.test.ts): each frame is rechecked on its own.
     await x.call((_i, ctx) => ctx.storage.put("revocations", { tenant: x.t, version: 1, revoked: [a.id] }));
+    expect(await x.call((_i, ctx) => ctx.storage.get("revocations"))).toEqual({ tenant: x.t, version: 1, revoked: [a.id] });
     await A.send(request("r1", b.id));
     await A.send(reply("r2", b.id));
     expect(B.events()).toEqual([]);
@@ -1042,6 +1043,20 @@ describe("the prekey relay", () => {
     await B.send(request("r4", a.id)); // a revoked target is refused to the requester
     expect(B.events().at(-1)).toEqual({ t: "prekey_refused", id: "r4", from: a.id, reason: "offline" });
     A.ws.close();
+    B.ws.close();
+  });
+
+  it("closes the revoked device's socket when the list is stored, and still refuses it in both directions", async () => {
+    const x = tenant();
+    const a = await enr(x);
+    const b = await enr(x);
+    const A = await daemon(x, a);
+    const B = await daemon(x, b);
+    const closed = new Promise<number>((r) => A.ws.addEventListener("close", (e) => r(e.code)));
+    expect((await x.revoke([a.id], 1)).status).toBe(200);
+    expect(await closed).toBe(4403);
+    await B.send(request("r4", a.id)); // a revoked target is refused to the requester
+    expect(B.events().at(-1)).toEqual({ t: "prekey_refused", id: "r4", from: a.id, reason: "offline" });
     B.ws.close();
   });
 
