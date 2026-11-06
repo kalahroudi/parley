@@ -80,6 +80,25 @@ export function wranglerConfig({ name, entry, vars }, env = process.env) {
 }
 
 export const entryPath = resolve(here, "worker", "entry.ts");
+export const retentionEntryPath = resolve(here, "retention", "entry.ts");
+
+// T308's Worker adds one SQLite Durable Object and one R2 bucket, both named parley-test-*; it is the only config
+// that may carry an R2 binding, and the bucket is created before and deleted after the run (see retention-run.mjs).
+const BUCKET = /^parley-test-[a-z0-9][a-z0-9-]{0,40}$/;
+export function assertBucket(bucket) {
+  if (!BUCKET.test(bucket)) throw new Error(`refusing bucket name ${JSON.stringify(bucket)}: must match ${BUCKET}`);
+  return bucket;
+}
+
+export function retentionConfig({ name, bucket, entry, vars }, env = process.env) {
+  const c = wranglerConfig({ name, entry, vars }, env);
+  return {
+    ...c,
+    durable_objects: { bindings: [{ name: "VAULT", class_name: "Vault" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["Vault"] }],
+    r2_buckets: [{ binding: "BUCKET", bucket_name: assertBucket(bucket) }],
+  };
+}
 
 export function workDir(name) {
   const dir = join(tmpdir(), assertName(name));
@@ -92,6 +111,13 @@ export function writeConfig(name, vars) {
   const dir = workDir(name);
   const path = join(dir, "wrangler.jsonc");
   writeFileSync(path, JSON.stringify(wranglerConfig({ name, entry: entryPath, vars }), null, 2), { mode: 0o600 });
+  return path;
+}
+
+export function writeRetentionConfig(name, bucket, vars) {
+  requireOptIn();
+  const path = join(workDir(name), "wrangler.jsonc");
+  writeFileSync(path, JSON.stringify(retentionConfig({ name, bucket, entry: retentionEntryPath, vars }), null, 2), { mode: 0o600 });
   return path;
 }
 
@@ -162,4 +188,38 @@ export function remaining(run = (cmd, args) => execFileSync(cmd, args, { encodin
   verifyAccount(run);
   const out = run("cf", ["workers", "scripts", "search", "--name", PREFIX]);
   return [...new Set([...out.matchAll(/parley-test-[a-z0-9-]+/g)].map((m) => m[0]))];
+}
+
+// R2 buckets named parley-test-*: created for one run and deleted after it (a bucket must be empty to be deleted).
+export function createBucket(name, bucket, run = (args, config) => wrangler(args, config), verify = verifyAccount) {
+  verify();
+  assertName(name);
+  assertBucket(bucket);
+  return run(["r2", "bucket", "create", bucket], configPath(name));
+}
+
+export function deleteBucket(name, bucket, run = (args, config) => wrangler(args, config), verify = verifyAccount) {
+  verify();
+  assertName(name);
+  assertBucket(bucket);
+  return run(["r2", "bucket", "delete", bucket], configPath(name));
+}
+
+export function remainingBuckets(name, run = (args, config) => wrangler(args, config), verify = verifyAccount) {
+  verify();
+  assertName(name);
+  const out = run(["r2", "bucket", "list"], configPath(name));
+  return [...new Set([...out.matchAll(/parley-test-[a-z0-9-]+/g)].map((m) => m[0]))];
+}
+
+export function deployRetention(name, bucket, vars) {
+  verifyAccount();
+  return deployedUrl(name, wrangler(["deploy"], writeRetentionConfig(name, bucket, vars)));
+}
+
+// Deletes the Worker with the retention config (it carries the bucket binding the deploy created).
+export function destroyRetention(name, bucket) {
+  verifyAccount();
+  assertName(name);
+  wrangler(["delete", "--force"], writeRetentionConfig(name, bucket, {}));
 }

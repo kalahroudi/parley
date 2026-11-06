@@ -32,7 +32,7 @@ Cancel, expiry and a dropped Strict socket delete every held event at once. The 
 
 ## Claims
 
-"Deleted from our storage" means our Durable Object storage. Cloudflare may keep deleted data in its 30-day recovery history (T308 documents it); held events are sealed to keys we never hold, and for processed tasks to keys the device has erased.
+"Deleted from our storage" means our Durable Object storage. Cloudflare may keep deleted data in its 30-day recovery history (T308 built the measurement; `retention-reality.md` says what is and is not yet measured on Cloudflare); held events are sealed to keys we never hold, and for processed tasks to keys the device has erased.
 
 ## Known limits
 
