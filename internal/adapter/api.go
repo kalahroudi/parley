@@ -112,7 +112,7 @@ func (a *API) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, er
 	if err := p.post(ctx, taskLine(t)); err != nil {
 		return nil, err
 	}
-	return converse(ctx, p, s)
+	return converse(ctx, p, s, nil)
 }
 
 type apiPeer struct {

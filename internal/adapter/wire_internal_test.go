@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -25,6 +27,7 @@ func FuzzReadMessage(f *testing.F) {
 		`{"type":"question","content":"cT8="}`,
 		`{"type":"error","message":"no such file"}`,
 		`{"type":"result","content":"@@@"}`,
+		`{"type":"tool","tool":"grep","args":["a","b"]}`, `{"type":"tool"}`, `{"type":"tool","content":"YQ=="}`, `{"type":"status","tool":"x"}`,
 		`{"type":"shout"}`, `[]`, `null`, "", `{"type":"result"} trailing`,
 	} {
 		f.Add(s)
@@ -37,9 +40,12 @@ func FuzzReadMessage(f *testing.F) {
 				return
 			}
 			switch m.Type {
-			case typeStatus, typeQuestion, typeResult, typeError:
+			case typeStatus, typeQuestion, typeResult, typeError, typeTool:
 			default:
 				t.Fatalf("type %q admitted", m.Type)
+			}
+			if len(m.Args) > MaxToolArgs || (m.Type != typeTool && (m.Tool != "" || m.Args != nil)) {
+				t.Fatal("tool fields outside a tool request")
 			}
 			if len(m.Content) > MaxLine || len(m.Message) > MaxLine {
 				t.Fatal("a message beyond the line limit")
@@ -148,22 +154,22 @@ func TestConverseBoundsQuestionsAndStatuses(t *testing.T) {
 		return out
 	}
 	p, s := &scripted{say: repeat(typeQuestion, MaxQuestions+5)}, &counting{}
-	if _, err := converse(context.Background(), p, s); err != errProtocol {
+	if _, err := converse(context.Background(), p, s, nil); err != errProtocol {
 		t.Fatalf("%v", err)
 	}
 	if s.asked != MaxQuestions || len(p.answered) != MaxQuestions || p.answered[0] != 1 || p.answered[MaxQuestions-1] != MaxQuestions {
 		t.Fatalf("asked %d, answered %v", s.asked, p.answered)
 	}
 	p, s = &scripted{say: repeat(typeQuestion, MaxQuestions)}, &counting{}
-	if _, err := converse(context.Background(), p, s); err != io.EOF || s.asked != MaxQuestions {
+	if _, err := converse(context.Background(), p, s, nil); err != io.EOF || s.asked != MaxQuestions {
 		t.Fatalf("exactly the limit is allowed: %v, asked %d", err, s.asked)
 	}
 	p, s = &scripted{say: repeat(typeStatus, MaxStatuses+5)}, &counting{}
-	if _, err := converse(context.Background(), p, s); err != errProtocol || s.statuses != MaxStatuses {
+	if _, err := converse(context.Background(), p, s, nil); err != errProtocol || s.statuses != MaxStatuses {
 		t.Fatalf("%v, %d statuses", err, s.statuses)
 	}
 	p, s = &scripted{say: repeat(typeStatus, MaxStatuses)}, &counting{}
-	if _, err := converse(context.Background(), p, s); err != io.EOF || s.statuses != MaxStatuses {
+	if _, err := converse(context.Background(), p, s, nil); err != io.EOF || s.statuses != MaxStatuses {
 		t.Fatalf("exactly the limit is allowed: %v, %d statuses", err, s.statuses)
 	}
 }
@@ -192,5 +198,115 @@ func TestReadMessageLimitIsExact(t *testing.T) {
 		if _, err := readMessage(bufio.NewReaderSize(strings.NewReader(line(MaxLine+1)+"\n"), size)); err != errTooLong {
 			t.Fatalf("size %d: a line of MaxLine+1 bytes: %v", size, err)
 		}
+	}
+}
+
+func TestReadMessageAdmitsToolRequestsOnly(t *testing.T) {
+	read := func(line string) (message, error) {
+		return readMessage(bufio.NewReader(strings.NewReader(line + "\n")))
+	}
+	m, err := read(`{"type":"tool","tool":"grep","args":["a","b c"]}`)
+	if err != nil || m.Type != typeTool || m.Tool != "grep" || len(m.Args) != 2 || m.Args[1] != "b c" {
+		t.Fatalf("%+v %v", m, err)
+	}
+	if m, err = read(`{"type":"tool"}`); err != nil || m.Tool != "" {
+		t.Fatalf("a bare request is the broker's to refuse: %+v %v", m, err)
+	}
+	many := `{"type":"tool","tool":"t","args":[` + strings.Repeat(`"",`, MaxToolArgs-1) + `""]}`
+	if _, err = read(many); err != nil {
+		t.Fatalf("MaxToolArgs arguments: %v", err)
+	}
+	for name, line := range map[string]string{
+		"too many args":      `{"type":"tool","tool":"t","args":[` + strings.Repeat(`"",`, MaxToolArgs) + `""]}`,
+		"content":            `{"type":"tool","tool":"t","content":"YQ=="}`,
+		"message":            `{"type":"tool","tool":"t","message":"m"}`,
+		"args not strings":   `{"type":"tool","tool":"t","args":[1]}`,
+		"tool in a result":   `{"type":"result","tool":"t"}`,
+		"args in a status":   `{"type":"status","args":[]}`,
+		"tool in a question": `{"type":"question","tool":"t"}`,
+		"tool in an error":   `{"type":"error","tool":"t"}`,
+		"a tool result":      `{"type":"tool_result"}`,
+		"unknown field":      `{"type":"tool","tool":"t","x":1}`,
+	} {
+		if _, err := read(line); err != errProtocol {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// fakeTools answers tool requests and records what it was asked.
+type fakeTools struct {
+	calls  []string
+	waits  int
+	ended  [][16]byte
+	reply  ToolReply
+	err    error
+	onWait bool
+}
+
+func (f *fakeTools) Call(_ context.Context, t bot.Task, tool string, args []string, onWait func()) (ToolReply, error) {
+	f.calls = append(f.calls, tool+"|"+strings.Join(args, ","))
+	if f.onWait {
+		onWait()
+	}
+	return f.reply, f.err
+}
+func (f *fakeTools) End(id [16]byte) { f.ended = append(f.ended, id) }
+
+func TestConverseServesToolRequests(t *testing.T) {
+	ft := &fakeTools{reply: ToolReply{Outcome: "ok", Exit: 0, Content: []byte("framed")}, onWait: true}
+	var sent [][]byte
+	tc := &toolConv{tools: ft, task: bot.Task{ID: [16]byte{5}}, send: func(_ context.Context, l []byte) error { sent = append(sent, l); return nil }}
+	say := []message{{Type: typeTool, Tool: "grep", Args: []string{"a"}}, {Type: typeTool, Tool: "ls"}, {Type: typeResult, Content: []byte("done")}}
+	s := &counting{}
+	out, err := converse(context.Background(), &scripted{say: say}, s, tc)
+	if err != nil || string(out) != "done" || fmt.Sprint(ft.calls) != "[grep|a ls|]" || s.statuses != 2 || len(sent) != 2 {
+		t.Fatalf("%q %v %v %d %d", out, err, ft.calls, s.statuses, len(sent))
+	}
+	var l struct {
+		V, Turn   int
+		Type, ID  string
+		Outcome   string
+		Untrusted bool
+		Content   []byte
+	}
+	if err := json.Unmarshal(sent[1], &l); err != nil || l.Type != "tool_result" || l.Turn != 2 || l.ID != "05000000000000000000000000000000" ||
+		l.Outcome != "ok" || !l.Untrusted || string(l.Content) != "framed" || l.V != 1 {
+		t.Fatalf("%+v %v %s", l, err, sent[1])
+	}
+}
+
+func TestConverseToolRequestsAreBoundedAndNeedTools(t *testing.T) {
+	req := func(n int) []message {
+		out := make([]message, n)
+		for i := range out {
+			out[i] = message{Type: typeTool, Tool: "t"}
+		}
+		return out
+	}
+	if _, err := converse(context.Background(), &scripted{say: req(1)}, &counting{}, nil); err != errProtocol {
+		t.Fatalf("a bot without tools asked for one: %v", err)
+	}
+	ft := &fakeTools{}
+	tc := &toolConv{tools: ft, send: func(context.Context, []byte) error { return nil }}
+	if _, err := converse(context.Background(), &scripted{say: req(MaxToolRequests + 5)}, &counting{}, tc); err != errProtocol || len(ft.calls) != MaxToolRequests {
+		t.Fatalf("%v after %d", err, len(ft.calls))
+	}
+	ft = &fakeTools{}
+	tc.tools = ft
+	if _, err := converse(context.Background(), &scripted{say: req(MaxToolRequests)}, &counting{}, tc); err != io.EOF || len(ft.calls) != MaxToolRequests {
+		t.Fatalf("exactly the limit is served: %v after %d", err, len(ft.calls))
+	}
+}
+
+func TestConverseToolFailuresEndTheTask(t *testing.T) {
+	boom := errors.New("boom")
+	tc := &toolConv{tools: &fakeTools{err: boom}, send: func(context.Context, []byte) error { return nil }}
+	if _, err := converse(context.Background(), &scripted{say: []message{{Type: typeTool, Tool: "t"}}}, &counting{}, tc); err != boom {
+		t.Fatalf("call: %v", err)
+	}
+	tc = &toolConv{tools: &fakeTools{}, send: func(context.Context, []byte) error { return boom }}
+	if _, err := converse(context.Background(), &scripted{say: []message{{Type: typeTool, Tool: "t"}}}, &counting{}, tc); err != boom {
+		t.Fatalf("send: %v", err)
 	}
 }
