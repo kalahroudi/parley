@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kalahroudi/parley/internal/outbox"
 )
 
 func TestFindAgentsMarksCardsUntrustedAndValidatesTheQuery(t *testing.T) {
@@ -227,4 +229,113 @@ func TestDirectoryRefreshesTokenNearExpiry(t *testing.T) {
 	d.Now = nil
 	d.secret = ""
 	d.Find(context.Background(), Query{})
+}
+
+// bindingGW answers /v1/directory/binding the way the gateway does, with whatever the test sets.
+func bindingGW(t *testing.T, status *atomic.Int32, body *atomic.Value, seen *atomic.Value) *Directory {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		seen.Store(r.Method + " " + r.URL.Path + " " + r.Header.Get("Authorization") + " " + string(b))
+		w.WriteHeader(int(status.Load()))
+		io.WriteString(w, body.Load().(string))
+	}))
+	t.Cleanup(srv.Close)
+	var n atomic.Int32
+	return &Directory{BaseURL: srv.URL, Token: func(context.Context) (string, time.Time, error) {
+		return "tok" + string(rune('0'+n.Add(1))), time.Now().Add(time.Hour), nil
+	}}
+}
+
+func TestDirectoryBindingAsksForTheDeviceAndReturnsTheSignedBinding(t *testing.T) {
+	var status atomic.Int32
+	var body, seen atomic.Value
+	status.Store(200)
+	const good = `{"binding":{"tenant":"t1","owner":"o@x","device_id":"dev1","signing_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":3,"not_after":"2099-01-01T00:00:00Z","signature":"AAAA"}}`
+	body.Store(good)
+	d := bindingGW(t, &status, &body, &seen)
+	b, err := d.Binding(context.Background(), "dev1")
+	if err != nil || b.DeviceID != "dev1" || b.Version != 3 || b.Owner != "o@x" || b.Tenant != "t1" {
+		t.Fatalf("%+v %v", b, err)
+	}
+	if seen.Load() != `POST /v1/directory/binding Bearer tok1 {"device":"dev1"}` {
+		t.Errorf("request %v", seen.Load())
+	}
+	status.Store(404)
+	body.Store(`{"error":"SECRET"}`)
+	if b, err := d.Binding(context.Background(), "dev1"); !errors.Is(err, outbox.ErrGone) || b != nil || strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("a 404 must be ErrGone: %+v %v", b, err)
+	}
+	// The reply must name the device that was asked for, and nothing else in it may be trusted to be there.
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+	}{
+		"another device":   {200, strings.Replace(good, "dev1", "dev2", 1)},
+		"no binding":       {200, `{}`},
+		"null binding":     {200, `{"binding":null}`},
+		"unknown field":    {200, `{"binding":null,"x":1}`},
+		"not json":         {200, `<html>SECRET`},
+		"trailing data":    {200, good + good},
+		"server error":     {500, `SECRET`},
+		"rate limited":     {429, `{"error":"rate_limited"}`},
+		"unauthorized":     {401, ``},
+		"bad binding type": {200, `{"binding":"SECRET"}`},
+	} {
+		status.Store(int32(tc.status))
+		body.Store(tc.body)
+		if b, err := d.Binding(context.Background(), "dev1"); err == nil || b != nil || strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("%s: %+v %v", name, b, err)
+		}
+	}
+}
+
+func TestDirectoryBindingRenewsAnExpiredTokenOnceAndFailsClosed(t *testing.T) {
+	var calls atomic.Int32
+	var auth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		if calls.Add(1) == 1 {
+			w.WriteHeader(401)
+			return
+		}
+		io.WriteString(w, `{"binding":{"tenant":"t","owner":"o","device_id":"d","signing_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":1,"not_after":"2099-01-01T00:00:00Z","signature":"AAAA"}}`)
+	}))
+	defer srv.Close()
+	var tokens atomic.Int32
+	d := &Directory{BaseURL: srv.URL, Token: func(context.Context) (string, time.Time, error) {
+		return "tok" + string(rune('0'+tokens.Add(1))), time.Now().Add(time.Hour), nil
+	}}
+	if b, err := d.Binding(context.Background(), "d"); err != nil || b == nil || auth.Load() != "Bearer tok2" {
+		t.Fatalf("%v %v %v", b, err, auth.Load())
+	}
+	d.Token = func(context.Context) (string, time.Time, error) { return "", time.Time{}, errors.New("SECRET") }
+	d.secret = ""
+	if _, err := d.Binding(context.Background(), "d"); err == nil || strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("token error: %v", err)
+	}
+	d.Token = func(context.Context) (string, time.Time, error) { return "t", time.Now().Add(time.Hour), nil }
+	srv.Close()
+	if _, err := d.Binding(context.Background(), "d"); err == nil {
+		t.Error("closed gateway")
+	}
+}
+
+// The first attempt uses the cached token: only a 401 asks for a fresh one (a mutated `attempt > 0` would ask every time).
+func TestDirectoryBindingReusesItsTokenUntilTheGatewayRefusesIt(t *testing.T) {
+	var status atomic.Int32
+	var body, seen atomic.Value
+	status.Store(200)
+	body.Store(`{"binding":{"tenant":"t","owner":"o","device_id":"d","signing_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":1,"not_after":"2099-01-01T00:00:00Z","signature":"AAAA"}}`)
+	d := bindingGW(t, &status, &body, &seen)
+	var tokens atomic.Int32
+	inner := d.Token
+	d.Token = func(ctx context.Context) (string, time.Time, error) { tokens.Add(1); return inner(ctx) }
+	for range 3 {
+		if _, err := d.Binding(context.Background(), "d"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tokens.Load() != 1 || seen.Load() != `POST /v1/directory/binding Bearer tok1 {"device":"d"}` {
+		t.Fatalf("tokens %d, last request %v", tokens.Load(), seen.Load())
+	}
 }

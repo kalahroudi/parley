@@ -3,7 +3,7 @@
     {
       "package": "internal/binding",
       "file": "binding.go",
-      "line": 20,
+      "line": 21,
       "type": "ARITHMETIC_BASE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."

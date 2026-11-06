@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kalahroudi/parley/internal/binding"
+	"github.com/kalahroudi/parley/internal/bot"
 	"github.com/kalahroudi/parley/internal/caller"
 	"github.com/kalahroudi/parley/internal/connect"
 	"github.com/kalahroudi/parley/internal/fsperm"
@@ -86,11 +87,13 @@ type Deps struct {
 	HTTP    *http.Client
 	// Directory finds a peer's current root-signed binding (it is only a source:
 	// the pipeline verifies every binding against the pinned root and the rollback
-	// store). Nil means no peer can be found, so nothing is accepted or sent.
+	// store). Nil means the configured gateway's directory (caller.Directory.Binding).
 	Directory func(ctx context.Context, device string) (*binding.Signed, error)
 	// Allow is the owner allowlist for callers into this device's bots; OnInbound
-	// is the bot; OnUpdate gets the progress of tasks this device sent. With
-	// Allow or OnInbound nil no bot runs here and every prekey request is refused.
+	// is the bot; OnUpdate gets the progress of tasks this device sent. With both
+	// nil the built-in test bot runs (see testbot.go), unless Config.DisableTestBot
+	// is set; with only one of them nil no bot runs here and every prekey request
+	// is refused.
 	Allow     func(owner string) bool
 	OnInbound func(pipeline.Inbound)
 	OnUpdate  func(pipeline.Update)
@@ -122,6 +125,7 @@ type Daemon struct {
 	node   *pipeline.Node
 	pool   *prekey.Pool
 	caller *caller.Service
+	host   *bot.Host // the test bot's host, or nil
 	tun    atomic.Pointer[tunnel.Client]
 }
 
@@ -191,6 +195,7 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	}
 	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status}}
 	d.initCaller()
+	d.initTestBot()
 	return d, nil
 }
 
@@ -269,6 +274,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer keystore.Zero(d.signer)
 	defer d.caller.Close() // after closeNode: no update can arrive once the pipeline is closed
 	defer d.closeNode()    // before the key is zeroed (defers run last in, first out): the pipeline signs with it until then
+	defer d.closeHost()    // before the pipeline closes: the bot stops answering first
 	release, err := LockState(d.dirs.State)
 	if err != nil {
 		return err
@@ -292,6 +298,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	<-served
 	d.deps.Log.Info("parleyd stopped")
 	return err
+}
+
+func (d *Daemon) closeHost() {
+	if d.host != nil {
+		d.host.Close()
+	}
 }
 
 // instanceLock is LockState for a state directory, as a function value.

@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kalahroudi/parley/internal/binding"
+	"github.com/kalahroudi/parley/internal/outbox"
 )
 
 // Query is a find_agents request: cards whose name, description or tags match
@@ -146,7 +149,7 @@ func (d *Directory) Find(ctx context.Context, q Query) (*Page, error) {
 		if err != nil {
 			return nil, err
 		}
-		status, reply, err := d.post(ctx, tok, raw)
+		status, reply, err := d.post(ctx, "/v1/directory/find", tok, raw)
 		if err != nil {
 			return nil, err
 		}
@@ -171,8 +174,45 @@ func (d *Directory) Find(ctx context.Context, q Query) (*Page, error) {
 	}
 }
 
-func (d *Directory) post(ctx context.Context, token string, body []byte) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(d.BaseURL, "/")+"/v1/directory/find", bytes.NewReader(body))
+// Binding asks the gateway for the root-signed binding of a device of this tenant. The gateway is only a source:
+// the answer is decoded strictly and checked to name the device that was asked for, and the caller still
+// verifies its signature against the pinned root and the rollback store (the pipeline does, before anything is
+// sent to or accepted from the device). A 404 is outbox.ErrGone (the task fails at once); any other failure is
+// retried by the outbox. Nothing of the reply appears in an error.
+func (d *Directory) Binding(ctx context.Context, device string) (*binding.Signed, error) {
+	raw, _ := json.Marshal(map[string]string{"device": device}) // a string
+	for attempt := 0; ; attempt++ {
+		tok, err := d.token(ctx, attempt > 0)
+		if err != nil {
+			return nil, err
+		}
+		status, reply, err := d.post(ctx, "/v1/directory/binding", tok, raw)
+		if err != nil {
+			return nil, err
+		}
+		if status == http.StatusUnauthorized && attempt == 0 {
+			continue // an expired or revoked token: ask for a fresh one once
+		}
+		if status == http.StatusNotFound {
+			return nil, outbox.ErrGone // unknown, not approved, revoked or hidden: the same answer, and no point in retrying
+		}
+		if status != http.StatusOK {
+			return nil, directoryError{}
+		}
+		var out struct {
+			Binding *binding.Signed `json:"binding"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(reply))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&out) != nil || dec.More() || out.Binding == nil || out.Binding.DeviceID != device {
+			return nil, directoryError{}
+		}
+		return out.Binding, nil
+	}
+}
+
+func (d *Directory) post(ctx context.Context, path, token string, body []byte) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(d.BaseURL, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, directoryError{}
 	}

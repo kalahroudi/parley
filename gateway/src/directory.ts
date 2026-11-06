@@ -31,8 +31,8 @@ const limitedResponse = (retryAfterMs: number) =>
   });
 const fail = (r: { error: DirectoryError; field?: string }) => json(STATUS[r.error], r.field ? { error: r.error, field: r.field } : { error: r.error });
 
-// An admin is a session. A device has no credential until connect tokens land,
-// so device routes fail closed unless a resolver is injected (tests do).
+// An admin is a session. A device is known by its connect token (src/connect.ts); index.ts hands the handler
+// that resolver, and with none the device routes fail closed.
 export type DeviceAuth = (req: Request) => Promise<{ tenant: string; device: string } | null>;
 type Identity = { admin: boolean; tenant: string; device?: string };
 
@@ -110,6 +110,14 @@ export async function handleDirectory(req: Request, env: Env, deviceAuth?: Devic
     if (wait !== null) return limitedResponse(wait);
     const r = await stub.find(id.device, b.query, page);
     return "error" in r ? fail(r) : json(200, r);
+  }
+  if (pathname === "/v1/directory/binding") {
+    if (!isDeviceId(b.device)) return json(400, { error: "bad_request" });
+    const wait = await limitDevice(env, id.tenant, id.device, "find");
+    if (wait !== null) return limitedResponse(wait);
+    const sb = await stub.peerBinding(id.device, b.device);
+    if (sb === "not_enrolled") return fail({ error: "not_enrolled" });
+    return sb ? json(200, { binding: sb }) : json(404, { error: "not_found" });
   }
   return json(404, { error: "not_found" });
 }

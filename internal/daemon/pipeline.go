@@ -9,7 +9,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/kalahroudi/parley/internal/binding"
 	"github.com/kalahroudi/parley/internal/connect"
 	"github.com/kalahroudi/parley/internal/envelope"
 	"github.com/kalahroudi/parley/internal/frames"
@@ -23,10 +22,6 @@ import (
 
 // sweepEvery is the default for Deps.SweepEvery.
 const sweepEvery = 5 * time.Second
-
-// ErrNoDirectory is what peer lookups return when the daemon was given no
-// directory: no peer can be found, so no message is accepted or sent.
-var ErrNoDirectory = errors.New("daemon: no directory to find peers' bindings in")
 
 // Node returns the daemon's message pipeline, building it on first use. It
 // needs the device's own binding (the prekeys carry its version), so it fails
@@ -49,9 +44,6 @@ func (d *Daemon) Node() (*pipeline.Node, error) {
 		return nil, err
 	}
 	directory, allow, inbound := d.deps.Directory, d.deps.Allow, d.deps.OnInbound
-	if directory == nil {
-		directory = func(context.Context, string) (*binding.Signed, error) { return nil, ErrNoDirectory }
-	}
 	if allow == nil || inbound == nil {
 		// No bot runs here: nobody is allowed to start a task, so every prekey request is refused
 		// rather than a task being accepted, erased and then dropped.

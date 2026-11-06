@@ -19,6 +19,13 @@ Every frame is counted against the sender's allowance (scope `prekey`, `RATE_PRE
 
 The sealed task, status, result and cancel messages travel over the A2A endpoint (`SendMessage`, `CancelTask`) as before and reach the peer as tunnel events.
 
+## Peer bindings and the test bot (T414)
+
+- **Finding a peer.** With no injected directory a daemon asks the gateway for a peer's binding (`POST /v1/directory/binding`, authenticated with an `api` connect token; see [directory-acl.md](directory-acl.md)). The answer is untrusted input: the pipeline verifies root signature, tenant, expiry and rollback before use, and a binding the daemon has verified is kept until it expires, so a peer is looked up once, not per message.
+- **The test bot.** Unless `disable_test_bot` is set in `config.json` (or a real bot is supplied), a daemon answers a task with `parley echo: <the task text>` (at most 1 KiB, run in the bot host with its limits) and only for callers whose root-signed binding names the same owner as this device's own. `parley-cli test -to <device id>` sends a random text to such a device and checks the echo, which proves the enrolled devices, the gateway, the prekey exchange, both sealed directions and the bot in one step. A device never answers itself (the pipeline refuses a task from its own device id), so the test needs a second device of the same owner: `enroll` prints a device's id.
+- **Starting up.** A daemon that has just started has no revocation list until its first refresh and refuses to send (`not_ready`); `parley-cli test` sends again for its first ten seconds instead of reporting that.
+- The real bots (T402) replace the test bot through `Deps.Allow` and `Deps.OnInbound`; until then it is the only bot a daemon runs.
+
 ## Keys and chains
 
 - The caller issues its reply key (rpk) from its own pool, puts the public half in the TASK header and the signed prekey object inside the sealed payload, so the target knows the key's id and can check it against the caller's binding.
@@ -29,7 +36,6 @@ The sealed task, status, result and cancel messages travel over the A2A endpoint
 
 ## What this does not do
 
-- **Peer bindings.** `daemon.Deps.Directory` is a seam; no gateway endpoint serves a peer's binding yet, so a real daemon rejects everything until one exists. Pending test `TestPending_DaemonFindsPeerBindingsThroughTheGateway` (T414).
 - **The acknowledgment step.** The tunnel acknowledges an event to the gateway when it hands it to the daemon, before the pipeline erases the key; what the pipeline calls "ack" is a seam (a no-op), not a second protocol message. A crash between the tunnel's acknowledgment and the erase loses the task, and the caller resends, as the plan states. Moving the transport acknowledgment after the erase needs a tunnel protocol change.
-- **Cancel, REPLY and status** are implemented in the pipeline and tested end to end, but nothing user-facing calls them yet (T401 and T413).
+- **Cancel, REPLY and status** are implemented in the pipeline and tested end to end, but only the caller interface (T401) and the bot host (T413) call them; the built-in test bot sends one RESULT and nothing else.
 - A reply key is reused across a task's replies by design (plan: replies reuse the construction toward rpk). Per-message forward secrecy for replies holds once the key is erased at the end of the task.

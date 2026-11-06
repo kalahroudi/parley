@@ -27,6 +27,9 @@ func (d *Daemon) initCaller() {
 			tok, err := api.Token(ctx, d.signer, v, connect.ScopeAPI)
 			return tok.Secret, tok.ExpiresAt, err
 		}}
+	if d.deps.Directory == nil {
+		d.deps.Directory = dir.Binding
+	}
 	d.caller = caller.New(caller.Config{
 		Node: func() (caller.Node, error) {
 			n, err := d.Node()

@@ -1136,3 +1136,19 @@ describe("randomChallenge", () => {
     expect(randomChallenge()).not.toBe(a);
   });
 });
+
+describe("the directory with a connect token (the Worker's own wiring)", () => {
+  it("lets a device search the directory and read a peer's binding with an api token, and nothing else does", async () => {
+    const x = tenant();
+    const [a, b] = [await x.enroll(), await x.enroll({ owner: "bob@example.test" })];
+    const api = bearer(await x.token(a));
+    expect((await post("/v1/directory/find", {}, api)).status).toBe(200);
+    const r = await post("/v1/directory/binding", { device: b.id }, api);
+    expect([r.status, (await json(r)).binding.device_id]).toEqual([200, b.id]);
+    expect((await post("/v1/directory/binding", { device: b.id }, bearer(await x.token(a, "connect")))).status).toBe(401); // wrong scope
+    expect((await post("/v1/directory/binding", { device: b.id }, bearer("pdt_nope.x.y"))).status).toBe(401);
+    expect((await post("/v1/directory/binding", { device: b.id }, {})).status).toBe(401);
+    await x.revoke([a.id], 1);
+    expect((await post("/v1/directory/binding", { device: b.id }, api)).status).toBe(401); // its token died with the binding
+  });
+});

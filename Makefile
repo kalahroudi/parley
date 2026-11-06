@@ -1,4 +1,4 @@
-.PHONY: fuzz-smoke fuzz-long malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
+.PHONY: m1 fuzz-smoke fuzz-long malgw-mutations test test-layout test-go test-gateway soak coverage mutation dev
 
 test: test-layout test-go test-gateway
 
@@ -33,6 +33,11 @@ test-go:
 	@if command -v go >/dev/null; then go vet ./... && go test -race ./...; \
 	elif [ -n "$$CI" ]; then echo "go not installed in CI" >&2; exit 1; \
 	else echo "go not installed, skipping"; fi
+
+# Milestone M1 (T414), the one command: builds parleyd and parley-cli, runs the real gateway (wrangler dev) and
+# three real daemons, and checks `parley-cli test` end to end (needs Go, Node and `cd gateway && npm ci`).
+m1:
+	node --test tests/m1-echo.test.mjs
 
 # Boot the gateway, a mock OIDC server and N daemons (default 2): make dev N=3
 dev:

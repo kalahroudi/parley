@@ -66,6 +66,11 @@ type pipeGW struct {
 	revs       *revocation.Signed
 	nTokens    int
 
+	// dirHook, if set, answers /v1/directory/binding instead of the honest rule (a hostile or broken gateway):
+	// it returns the status and the body, or ok false to fall through to the honest answer.
+	dirHook  func(caller, device string) (status int, body string, ok bool)
+	dirCalls atomic.Int32 // /v1/directory/binding calls
+
 	relayed atomic.Int32 // prekey frames relayed
 	a2a     atomic.Int32 // /a2a calls
 	opens   atomic.Int32 // tunnel connections
@@ -131,6 +136,8 @@ func (g *pipeGW) serve(w http.ResponseWriter, r *http.Request) {
 		g.tunnel(w, r)
 	case "/a2a":
 		g.a2aCall(w, r)
+	case "/v1/directory/binding":
+		g.binding(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -160,6 +167,40 @@ func (g *pipeGW) token(w http.ResponseWriter, r *http.Request) {
 	g.tokens[tok] = tokenRec{device: in.Device, scope: in.Scope}
 	g.mu.Unlock()
 	json.NewEncoder(w).Encode(map[string]any{"token": tok, "expires_at": time.Now().Add(5 * time.Minute).UnixMilli()})
+}
+
+// binding is what the Worker does for /v1/directory/binding: a device with an api token of this tenant gets the
+// root-signed binding of an enrolled device, and 404 for anything else.
+func (g *pipeGW) binding(w http.ResponseWriter, r *http.Request) {
+	g.dirCalls.Add(1)
+	caller, ok := g.bearer(r, connect.ScopeAPI, false)
+	if !ok {
+		http.Error(w, "no", http.StatusUnauthorized)
+		return
+	}
+	var in struct{ Device string }
+	body, _ := io.ReadAll(r.Body)
+	g.note(body)
+	if json.Unmarshal(body, &in) != nil {
+		http.Error(w, "bad", http.StatusBadRequest)
+		return
+	}
+	g.mu.Lock()
+	hook, d := g.dirHook, g.devs[in.Device]
+	g.mu.Unlock()
+	if hook != nil {
+		if status, out, ok := hook(caller, in.Device); ok {
+			w.WriteHeader(status)
+			io.WriteString(w, out)
+			return
+		}
+	}
+	if d == nil {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"error":"not_found"}`)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"binding": d.bind})
 }
 
 func (g *pipeGW) bearer(r *http.Request, scope connect.Scope, spend bool) (string, bool) {
@@ -340,7 +381,8 @@ func aEvent(wire []byte) string {
 	return string(b)
 }
 
-// directory is the honest peer lookup the daemons are given (the gateway endpoint for it is T414's).
+// directory is the honest peer lookup that tests give a daemon to keep the gateway out of it; the daemon's own
+// lookup through /v1/directory/binding is tested in daemon_m1_test.go.
 func (g *pipeGW) directory(_ context.Context, device string) (*binding.Signed, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -395,7 +437,11 @@ type nodeOpts struct {
 	noBinding bool          // do not record the daemon's own binding
 	prepare   func(dirs daemon.Dirs)
 	noBot     bool
-	deny      func(owner string) bool
+	// realDirectory leaves Deps.Directory unset, so the daemon finds peers through the gateway's endpoint.
+	realDirectory bool
+	testBot       bool   // run the daemon's built-in test bot instead of the test's own bot
+	owner         string // the owner its binding names (default: <id>@acme.test)
+	deny          func(owner string) bool
 }
 
 func (g *pipeGW) shortDir() string {
@@ -417,7 +463,11 @@ func (g *pipeGW) start(id string, o nodeOpts) (*pipeNode, error) {
 	t := g.t
 	t.Helper()
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
-	b, err := binding.Sign(g.rootKey, binding.Binding{Tenant: pipeTenant, Owner: id + "@acme.test", DeviceID: id, SigningKey: pub, Version: 1, NotAfter: time.Now().Add(binding.Lifetime / 2)})
+	owner := id + "@acme.test"
+	if o.owner != "" {
+		owner = o.owner
+	}
+	b, err := binding.Sign(g.rootKey, binding.Binding{Tenant: pipeTenant, Owner: owner, DeviceID: id, SigningKey: pub, Version: 1, NotAfter: time.Now().Add(binding.Lifetime / 2)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +483,7 @@ func (g *pipeGW) start(id string, o nodeOpts) (*pipeNode, error) {
 		}
 		o.prepare(n.dirs)
 	}
-	cfg := daemon.Config{Format: 1, Tenant: pipeTenant, DeviceID: id, GatewayURL: g.srv.URL, RootPublicKey: g.rootPub(), KeyStore: daemon.KeyStoreFile}
+	cfg := daemon.Config{Format: 1, Tenant: pipeTenant, DeviceID: id, GatewayURL: g.srv.URL, RootPublicKey: g.rootPub(), KeyStore: daemon.KeyStoreFile, DisableTestBot: !o.testBot}
 	deps := daemon.Deps{Log: logx.New(io.Discard), Harden: func() error { return nil }, Keys: memKeys{key}, MinBackoff: time.Millisecond,
 		ShutdownTimeout: 5 * time.Second, Now: n.clk.now, Directory: g.directory, AllowUnlockedMemory: true,
 		OnEvent: func(tunnel.Event) { n.taps.Add(1) },
@@ -444,7 +494,10 @@ func (g *pipeGW) start(id string, o nodeOpts) (*pipeNode, error) {
 			n.upc = append(n.upc, string(u.Content))
 			n.mu.Unlock()
 		}}
-	if !o.noBot {
+	if o.realDirectory {
+		deps.Directory = nil
+	}
+	if !o.noBot && !o.testBot {
 		deps.Allow = func(owner string) bool { return o.deny == nil || !o.deny(owner) }
 		deps.OnInbound = func(in pipeline.Inbound) {
 			rec := got{Type: in.Type, Task: in.TaskID, Caller: in.Caller, Owner: in.Owner, Content: string(in.Content)}

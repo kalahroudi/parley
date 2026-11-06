@@ -69,6 +69,9 @@ func TestPassAndExclusions(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code %d\n%s\n%s", code, out, errw)
 	}
+	if strings.Contains(out, "not covered") {
+		t.Errorf("a passing package lists statements:\n%s", out)
+	}
 	for _, want := range []string{"100.0%", "2/2 statements", "unreachable on this platform", "rand never fails", "p.go:7", "p.go:13"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -84,6 +87,22 @@ func TestBelowGateFails(t *testing.T) {
 	root, cfg, p := fixture(t, tiers, prof, map[string]string{"p/p.go": plain})
 	code, out, _ := gate(root, cfg, p)
 	if code != 1 || !strings.Contains(out, "FAIL tier 2") || !strings.Contains(out, "50.0%") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "     not covered: p/p.go:9-9 (1 statements)\n     not covered: p/p.go:15-15 (1 statements)\n") {
+		t.Fatalf("the missed statements are not listed:\n%s", out)
+	}
+}
+
+// The missed statements come out sorted by file, then line, whatever order the profile has them in.
+func TestMissedStatementsAreListedInOrder(t *testing.T) {
+	tiers := `{"tiers":{"1":{"line":100,"packages":["p"]}}}`
+	prof := header + "example.test/m/p/q.go:3.2,3.10 2 0\nexample.test/m/p/p.go:15.3,15.11 1 0\nexample.test/m/p/p.go:4.2,4.10 1 1\nexample.test/m/p/p.go:9.2,9.10 1 0\n"
+	plain := strings.NewReplacer("//cover:ignore", "// note").Replace(src)
+	root, cfg, p := fixture(t, tiers, prof, map[string]string{"p/p.go": plain, "p/q.go": "package p\n\nfunc q() {\n\t_ = 1\n\t_ = 2\n}\n"})
+	code, out, _ := gate(root, cfg, p)
+	want := "     not covered: p/p.go:9-9 (1 statements)\n     not covered: p/p.go:15-15 (1 statements)\n     not covered: p/q.go:3-3 (2 statements)\n"
+	if code != 1 || !strings.Contains(out, want) {
 		t.Fatalf("code %d\n%s", code, out)
 	}
 }

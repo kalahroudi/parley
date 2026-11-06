@@ -55,7 +55,7 @@ export default {
     if (pathname === "/v1/connect/challenge" || pathname === "/v1/connect/token") return handleConnectAuth(request, env);
     if (pathname.startsWith("/v1/login/")) return handleLogin(request, env);
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
-    if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env);
+    if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env, (req) => authenticate(req, env, "api"));
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations" || pathname === "/v1/root") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {
       return request.method === "GET" ? Response.json(agentCard(new URL(request.url).origin)) : new Response("method not allowed", { status: 405 });

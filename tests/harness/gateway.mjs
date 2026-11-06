@@ -7,7 +7,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,17 +40,21 @@ export async function startGateway({ admins = "", users = "", userDomains = "", 
   const port = await freePort();
   const vars = { FLOW_SECRET: "test-flow-secret", RATE_CONNECT_PER_MIN: "100000", RATE_CONNECT_DEVICE_PER_MIN: "100000", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users, USER_DOMAINS: userDomains, RATE_AUTH_PER_MIN: "100000", RATE_TENANT_LOGIN_PER_MIN: "100000", RATE_SESSION_PER_MIN: "100000", ...extra };
   // Own state directory and inspector port, so several gateways can run side by side (node --test runs files in parallel).
-  const args = ["wrangler", "dev", "--port", String(port), "--inspector-port", String(await freePort()), "--persist-to", mkdtempSync(join(tmpdir(), "parley-gw-"))];
+  const state = mkdtempSync(join(tmpdir(), "parley-gw-"));
+  const log = `${state}.log`; // beside the state, not in it: wrangler's output (what the gateway logs and what it was asked)
+  const args = ["wrangler", "dev", "--port", String(port), "--inspector-port", String(await freePort()), "--persist-to", state];
   for (const [k, v] of Object.entries(vars)) if (v) args.push("--var", `${k}:${v}`);
+  const logFd = openSync(log, "w");
   const gw = spawn("npx", args, {
     cwd: join(root, "gateway"),
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     shell: process.platform === "win32",
     detached: process.platform !== "win32",
   });
   const url = `http://127.0.0.1:${port}`;
   const close = async () => {
     kill(gw);
+    closeSync(logFd);
     await idp.close();
   };
   try {
@@ -65,7 +69,7 @@ export async function startGateway({ admins = "", users = "", userDomains = "", 
     await close();
     throw e;
   }
-  return { url, idp, close, signIn: (o) => signIn(url, o) };
+  return { url, idp, close, state, log, signIn: (o) => signIn(url, o) };
 }
 
 // Runs the login the way a browser does (without one) and returns the callback
@@ -121,6 +125,13 @@ function encode(parts) {
 export function signBinding(root, { tenant, owner, id, publicKey, version = 1, notAfter = Math.floor(Date.now() / 1000) + 90 * 86400 }) {
   const signature = cryptoSign(null, encode(["parley/binding/v1", tenant, owner, id, publicKey, BigInt(version), BigInt(notAfter)]), root.privateKey);
   return { tenant, owner, device_id: id, signing_key: publicKey.toString("base64"), version, not_after: new Date(notAfter * 1000).toISOString().replace(".000Z", "Z"), signature: signature.toString("base64") };
+}
+
+// The revocation list the root holder signs (internal/revocation): `issuedAt` is unix seconds. Post it with
+// POST /v1/admin/revocations ({ list }); daemons fetch it from /v1/revocations and refuse to send without a fresh one.
+export function signRevocations(root, { tenant, version = 1, issuedAt = Math.floor(Date.now() / 1000), revoked = [] }) {
+  const signature = cryptoSign(null, Buffer.concat([encode(["parley/revocation/v1", tenant, BigInt(version), BigInt(issuedAt)]), (() => { const n = Buffer.alloc(4); n.writeUInt32BE(revoked.length); return n; })(), ...revoked.map((id) => encode([id]))]), root.privateKey);
+  return { tenant, version, issued_at: new Date(issuedAt * 1000).toISOString().replace(".000Z", "Z"), revoked, signature: signature.toString("base64") };
 }
 
 // A device that holds its own key, brought to "approved with a binding the root signed" the way an admin's daemon

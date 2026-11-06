@@ -50,8 +50,9 @@ func TestNodeNeedsAnEnrolledDevice(t *testing.T) {
 	}
 }
 
-// With no directory and no bot configured the pipeline fails closed: no peer is found, nobody may start a task.
-func TestNodeFailsClosedWithoutDirectoryOrBot(t *testing.T) {
+// With no bot configured the pipeline fails closed (nobody may start a task), and a gateway that cannot vouch for
+// a peer (here one with no directory at all) finds nobody.
+func TestNodeFailsClosedWithoutBotAndFindsNobodyThroughAGatewayWithoutOne(t *testing.T) {
 	e := newEnv(t)
 	r := e.start(t, func(d *Deps) { d.AllowUnlockedMemory = true })
 	enroll(t, e, r)
@@ -64,7 +65,7 @@ func TestNodeFailsClosedWithoutDirectoryOrBot(t *testing.T) {
 	if _, err := n.Submit(pipeline.Request{Target: "bob", Content: []byte("x"), Expiry: time.Now().Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	// The default directory finds nobody.
+	// The default directory asks the gateway, which has nothing for bob.
 	if err := n.HandleEvent(context.Background(), tunnel.Event{Body: `{"t":"prekey_request","id":"r","from":"bob","nonce":"AQID","expires_at":4102444800000}`}); !errors.Is(err, pipeline.ErrPeer) {
 		t.Fatalf("%v", err)
 	}

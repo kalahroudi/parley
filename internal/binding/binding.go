@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"io"
 	"sync"
 	"time"
 )
@@ -137,6 +138,33 @@ func (t *Tracker) Version(tenant, device string) (uint64, bool) {
 	defer t.mu.Unlock()
 	r, ok := t.seen[deviceKey{tenant, device}]
 	return r.Version, ok
+}
+
+// Owner is the owner named by the highest binding this tracker has recorded for
+// the device, read back from the record (which Accept wrote only after Verify
+// passed). It is false when no binding is recorded or the record cannot be read.
+func (t *Tracker) Owner(tenant, device string) (string, bool) {
+	t.mu.Lock()
+	r, ok := t.seen[deviceKey{tenant, device}]
+	t.mu.Unlock()
+	if !ok {
+		return "", false
+	}
+	// Encode: label, tenant, owner, ... each field a 4-byte length and its bytes.
+	rd := bytes.NewReader(r.Encoded)
+	var fields [3][]byte
+	for i := range fields {
+		var n uint32
+		if binary.Read(rd, binary.BigEndian, &n) != nil || uint64(n) > uint64(rd.Len()) {
+			return "", false
+		}
+		fields[i] = make([]byte, n)
+		_, _ = io.ReadFull(rd, fields[i]) // n bytes are there: checked just above
+	}
+	if string(fields[0]) != label || string(fields[1]) != tenant || len(fields[2]) == 0 {
+		return "", false
+	}
+	return string(fields[2]), true
 }
 
 // Accept verifies s, durably records its version, and only then returns nil.
