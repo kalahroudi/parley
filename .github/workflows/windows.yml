@@ -25,3 +25,5 @@ jobs:
           go-version-file: go.mod
       - name: Daemon lifecycle (CTRL_BREAK, single instance, restart)
         run: go test -count=1 -v -run 'TestWindowsDaemonLifecycle' ./internal/acceptance
+      - name: Key-memory scan (in-process scan, kernel lock state, minidump of the child)
+        run: go test -count=1 -v -run 'TestWindowsKeyMemoryScan' ./internal/acceptance
