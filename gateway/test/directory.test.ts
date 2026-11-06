@@ -557,11 +557,7 @@ describe("groups pages and the audit log", () => {
   });
 });
 
-// Needs the daemon side (the allowlist in the signed binding), which has no gateway test harness yet.
-describe("T307 acceptance", () => {
-  it.todo("T307: ACL matrix end to end: gateway visibility x the target daemon's allowlist from the signed binding; the daemon refuses a visible card whose binding does not name the caller");
-});
-
+// The ACL matrix (T307) is gateway/test/acl.acceptance.test.ts and, with real daemons, tests/acl-matrix.test.mjs.
 
 describe("retention setting", () => {
   it("is Strict with a 1 hour TTL until the admin chooses", async () => {
