@@ -37,7 +37,7 @@ func TestCheckPeerClosedConnection(t *testing.T) {
 }
 
 func TestCredOfBadDescriptor(t *testing.T) {
-	if _, err := credOf(-1); err == nil {
+	if _, _, err := credOf(-1); err == nil {
 		t.Error("a bad descriptor must be an error")
 	}
 }
@@ -53,8 +53,11 @@ func TestPeerUIDOfARealPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if uid, err := peerUID(c); err != nil || int(uid) != os.Geteuid() {
-		t.Errorf("peerUID = %d, %v", uid, err)
+	if uid, pid, err := peerCred(c); err != nil || int(uid) != os.Geteuid() || pid != os.Getpid() {
+		t.Errorf("peerCred = %d, %d, %v", uid, pid, err)
+	}
+	if pid, err := peerPID(c); err != nil || pid != os.Getpid() {
+		t.Errorf("peerPID = %d, %v", pid, err)
 	}
 	if err := checkPeer(c, os.Geteuid()); err != nil {
 		t.Errorf("own uid refused: %v", err)
@@ -65,7 +68,10 @@ func TestPeerUIDOfARealPeer(t *testing.T) {
 }
 
 func TestPeerUIDOfAnInvalidConnection(t *testing.T) {
-	if _, err := peerUID(&net.UnixConn{}); err == nil {
+	if _, _, err := peerCred(&net.UnixConn{}); err == nil {
 		t.Error("an invalid connection must be an error")
+	}
+	if _, _, err := peerCred(nil); err == nil {
+		t.Error("a non-unix connection must be an error")
 	}
 }

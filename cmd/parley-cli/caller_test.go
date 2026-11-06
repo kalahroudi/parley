@@ -20,6 +20,7 @@ import (
 	"github.com/kalahroudi/parley/internal/bot"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/logx"
+	"github.com/kalahroudi/parley/internal/ttyconfirm"
 )
 
 type seen struct {
@@ -92,7 +93,6 @@ func TestCommandsSendTheRightRequests(t *testing.T) {
 		{[]string{"cancel", "abc"}, "", "cancel_task", `{"task_id":"abc"}`},
 		{[]string{"list"}, "", "list_tasks", `null`},
 		{[]string{"approve"}, "", "approvals", `null`},
-		{[]string{"approve", "ab"}, "", "approve", `{"task_id":"ab"}`},
 		{[]string{"approve", "-deny", "ab"}, "", "deny", `{"task_id":"ab"}`},
 		{[]string{"approve", "ab", "-deny"}, "", "deny", `{"task_id":"ab"}`},
 		{[]string{"list", "-state", "TASK_STATE_COMPLETED", "-limit", "10", "-cursor", "00"}, "", "list_tasks", `{"state":"TASK_STATE_COMPLETED","limit":10,"cursor":"00"}`},
@@ -253,6 +253,11 @@ func TestJG01OwnerApprovesAndDeniesThroughTheCLI(t *testing.T) {
 		}
 	}
 
+	var prompts []string
+	answer := func(p string) (bool, error) { prompts = append(prompts, p); return true, nil }
+	old := askOwner
+	askOwner = answer
+	defer func() { askOwner = old }()
 	ch := hold(1, "run the tests\x1b[2J")
 	waitFor(1)
 	code, out, errw := run(t, home, "", "approve")
@@ -263,11 +268,27 @@ func TestJG01OwnerApprovesAndDeniesThroughTheCLI(t *testing.T) {
 	if b.ran.Load() != 0 {
 		t.Fatal("ran before approval")
 	}
+	// Without a terminal, or with a no, nothing is approved; a "yes" on standard input counts for nothing.
+	askOwner = func(string) (bool, error) { return false, ttyconfirm.ErrNoTerminal }
+	if code, _, errw = run(t, home, "yes\n", "approve", id); code != 1 || !strings.Contains(errw, "no terminal") || b.ran.Load() != 0 || len(g.List()) != 1 {
+		t.Fatalf("approve without a terminal: %d %q ran %d", code, errw, b.ran.Load())
+	}
+	askOwner = func(string) (bool, error) { return false, nil }
+	if code, _, errw = run(t, home, "yes\n", "approve", id); code != 1 || !strings.Contains(errw, "not approved") || b.ran.Load() != 0 || len(g.List()) != 1 {
+		t.Fatalf("approve answered no: %d %q", code, errw)
+	}
+	askOwner = answer
+	if code, _, errw = run(t, home, "", "approve", "05000000000000000000000000000000"); code != 1 || errw != "error: not_found\n" || len(prompts) != 0 {
+		t.Fatalf("approve of a task that does not wait: %d %q prompts %q", code, errw, prompts)
+	}
 	if code, out, errw = run(t, home, "", "approve", id); code != 0 || !strings.Contains(out, `"decision": "approved"`) || errw != "" {
 		t.Fatalf("approve: %d %q %q", code, out, errw)
 	}
 	if err := <-ch; err != nil || b.ran.Load() != 1 {
 		t.Fatalf("after approve: %v ran %d", err, b.ran.Load())
+	}
+	if len(prompts) != 1 || !strings.Contains(prompts[0], "run the tests.[2J") || !strings.Contains(prompts[0], "dev-2") || strings.Contains(prompts[0], "\x1b") {
+		t.Fatalf("the owner was not shown the task: %q", prompts)
 	}
 	if code, _, errw = run(t, home, "", "approve", id); code != 1 || errw != "error: not_found\n" {
 		t.Fatalf("second approve: %d %q", code, errw)
@@ -282,7 +303,7 @@ func TestJG01OwnerApprovesAndDeniesThroughTheCLI(t *testing.T) {
 	if err := <-ch; !errors.As(err, &f) || f.Message != approval.TextDenied || b.ran.Load() != 1 {
 		t.Fatalf("after deny: %v ran %d", err, b.ran.Load())
 	}
-	if code, _, errw = run(t, home, "", "approve", "nonsense"); code != 1 || errw != "error: bad_params\n" {
+	if code, _, errw = run(t, home, "", "approve", "nonsense"); code != 1 || errw != "error: not_found\n" {
 		t.Fatalf("bad id: %d %q", code, errw)
 	}
 

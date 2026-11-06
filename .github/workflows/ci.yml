@@ -62,6 +62,13 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y minisign; else brew install minisign; fi
+      # The Linux sandbox profile (docs/sandbox/linux-bwrap.sh) is run against a live daemon; the test fails under CI if
+      # bubblewrap cannot start. Ubuntu 24.04 blocks unprivileged user namespaces by default, so allow them here.
+      - name: Install bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       # Run Go directly, not through the Makefile Go target, which skips silently
       # when Go is missing and could let CI pass without running Go tests.
       - name: Go vet
@@ -73,6 +80,13 @@ jobs:
         run: go test -race -coverprofile=cover.out ./...
       - name: Go coverage gates
         run: go run ./scripts/covergate -profile cover.out
+      # Say whether each OS sandbox profile ran or was skipped, and fail if the profile of this OS did not run.
+      - name: OS sandbox profiles (ran or skipped)
+        shell: bash
+        run: |
+          go test -count=1 -v -run 'TestLinuxSandboxScriptKeeps|TestMacOSProfileKeeps|TestWindowsSandboxScriptParses' ./internal/acceptance | tee sandbox.out
+          case "$RUNNER_OS" in Linux) k=linux;; macOS) k=macos;; *) k=windows;; esac
+          grep -q "SANDBOX-PROFILE $k: " sandbox.out && ! grep -q "SANDBOX-PROFILE $k: SKIPPED" sandbox.out
       # Tier 1 (plan.md, coverage policy): the envelope crypto module must stay at
       # 100% of statements; the fuzz step is a short smoke run over the committed
       # seed corpus (internal/envelope/testdata/fuzz).

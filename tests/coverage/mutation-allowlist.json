@@ -507,7 +507,7 @@
     {
       "package": "internal/adapter",
       "file": "cli.go",
-      "line": 27,
+      "line": 28,
       "type": "ARITHMETIC_BASE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
@@ -519,6 +519,14 @@
       "type": "ARITHMETIC_BASE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestConstantsArePinned in this package."
+    },
+    {
+      "package": "internal/adapter",
+      "file": "cli_unix.go",
+      "line": 23,
+      "type": "CONDITIONALS_BOUNDARY",
+      "status": "LIVED",
+      "reason": "Equivalent mutant: it only makes the loop also call close-on-exec on descriptor 4096, which is past the bound by design and is not open, so nothing observable changes; TestPrepareMarksInheritedDescriptorsCloseOnExec pins descriptor 4095."
     }
   ]
 }
