@@ -21,6 +21,7 @@ import (
 	"github.com/kalahroudi/parley/internal/adapter/adaptertest"
 	"github.com/kalahroudi/parley/internal/bot"
 	"github.com/kalahroudi/parley/internal/bot/bottest"
+	"github.com/kalahroudi/parley/internal/botproc"
 )
 
 const helperEnv = "PARLEY_ADAPTER_HELPER"
@@ -272,5 +273,27 @@ func TestCLICommandThatCannotBeContainedDoesNotRun(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if fi, _ = os.Stat(beat); fi != nil && fi.Size() != was {
 		t.Fatal("the command that could not be contained is still running")
+	}
+}
+
+// A bot is registered with the daemon's registry from the moment it starts until it is reaped, so the daemon can refuse
+// it the commands that change what it trusts.
+func TestCLIRegistersTheBotWhileItRuns(t *testing.T) {
+	pids := make(chan int, 1)
+	restore := adapter.SetContain(func(cmd *exec.Cmd) (func(), error) {
+		pids <- cmd.Process.Pid
+		return func() { _ = cmd.Process.Kill() }, nil
+	})
+	defer restore()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go cli(t, "deaf").Handle(ctx, bot.Task{ID: [16]byte{9}, Content: []byte("x")}, nil)
+	pid := <-pids
+	own, err := botproc.Default.Owns(pid)
+	if !own && !errors.Is(err, botproc.ErrUnknown) { // on Windows the job is not tracked by the stand-in, which is refused too
+		t.Errorf("the running bot is not registered: %v %v", own, err)
+	}
+	if runtime.GOOS != "windows" && (!own || err != nil) {
+		t.Errorf("the running bot is not taken for a bot: %v %v", own, err)
 	}
 }

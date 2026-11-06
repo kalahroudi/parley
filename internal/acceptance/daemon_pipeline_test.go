@@ -39,6 +39,7 @@ import (
 	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/envelope"
 	"github.com/kalahroudi/parley/internal/frames"
+	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/logx"
 	"github.com/kalahroudi/parley/internal/outbox"
 	"github.com/kalahroudi/parley/internal/pipeline"
@@ -442,6 +443,7 @@ type nodeOpts struct {
 	testBot       bool   // run the daemon's built-in test bot instead of the test's own bot
 	owner         string // the owner its binding names (default: <id>@acme.test)
 	deny          func(owner string) bool
+	methods       map[string]localsock.Method // extra local socket methods, registered before the daemon runs
 }
 
 func (g *pipeGW) shortDir() string {
@@ -517,6 +519,9 @@ func (g *pipeGW) start(id string, o nodeOpts) (*pipeNode, error) {
 		return nil, err
 	}
 	n.d = d
+	for name, m := range o.methods {
+		d.Handle(name, m)
+	}
 	if !o.noBinding {
 		if err := d.Trust().Tracker.Accept(b, n.clk.now()); err != nil {
 			t.Fatal(err)

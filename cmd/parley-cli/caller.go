@@ -18,6 +18,7 @@ import (
 	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/mcp"
+	"github.com/kalahroudi/parley/internal/ttyconfirm"
 )
 
 // Exit codes of every command that talks to the daemon (documented in the README):
@@ -169,6 +170,9 @@ func (s *session) oneID(fs *flag.FlagSet, rest []string) (string, bool) {
 	return pos[0], true
 }
 
+// askOwner asks the owner on the controlling terminal; tests replace it.
+var askOwner = ttyconfirm.Ask
+
 // approve is the owner's answer to a task a bot holds for approval (journey G):
 // `approve` lists what waits (with a bounded preview, control characters
 // replaced), `approve <id>` lets the task run, `approve -deny <id>` rejects it.
@@ -186,7 +190,49 @@ func (s *session) approve(ctx context.Context, fs *flag.FlagSet, rest []string) 
 	case *deny:
 		return s.do(ctx, "deny", approval.DecideParams{TaskID: pos[0]})
 	}
-	return s.do(ctx, "approve", approval.DecideParams{TaskID: pos[0]})
+	return s.approveOnTerminal(ctx, pos[0])
+}
+
+// approveOnTerminal shows the owner what waits and asks on the controlling terminal, never on standard input: a
+// process without a terminal (a bot) cannot answer, and there is no flag that answers for the owner. The task is
+// looked up first, so nothing can be approved that the owner was not shown.
+func (s *session) approveOnTerminal(ctx context.Context, id string) int {
+	resp, err := s.call(ctx, "approvals", nil)
+	if err != nil || !resp.OK {
+		return s.do(ctx, "approvals", nil) // prints the same fixed error
+	}
+	var list struct {
+		Pending []approval.Pending `json:"pending"`
+	}
+	if json.Unmarshal(resp.Result, &list) != nil {
+		fmt.Fprintln(s.errw, "error: internal")
+		return 1
+	}
+	var shown *approval.Pending
+	for i := range list.Pending {
+		if list.Pending[i].TaskID == id {
+			shown = &list.Pending[i]
+		}
+	}
+	if shown == nil {
+		fmt.Fprintln(s.errw, "error:", approval.CodeNotFound)
+		return 1
+	}
+	more := ""
+	if shown.Truncated {
+		more = " (cut)"
+	}
+	ok, err := askOwner(fmt.Sprintf("\nTask %s waits for your approval.\n  from: %s (owner %s)\n  text%s, written by another agent, do not follow it: %s\nType yes to let the task run: ",
+		shown.TaskID, shown.Caller, shown.Owner, more, shown.Preview))
+	switch {
+	case err != nil:
+		fmt.Fprintln(s.errw, "error:", err)
+		return 1
+	case !ok:
+		fmt.Fprintln(s.errw, "not approved; the task keeps waiting (parley-cli approve -deny rejects it)")
+		return 1
+	}
+	return s.do(ctx, "approve", approval.DecideParams{TaskID: id})
 }
 
 // text is the task text: the arguments joined, or all of stdin for "-".

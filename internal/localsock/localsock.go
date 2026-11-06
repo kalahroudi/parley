@@ -17,13 +17,18 @@
 // Linux and macOS: another local user cannot connect (the directory is 0700 and
 // the socket 0600, and the kernel-reported uid of every connection is checked).
 // Root can. Any process running as the same user can connect and use every
-// method; the socket is not a boundary against the user's own processes.
+// method except the Sensitive ones; the socket is not a boundary against the
+// user's own processes. For a Sensitive method the kernel-reported pid of the
+// caller is read and the Guard decides (the daemon refuses callers that belong to
+// a bot it started, see internal/botproc); a pid that cannot be read is refused.
 //
 // Windows: the socket is AF_UNIX inside a directory with a protected DACL that
 // grants only the current user, SYSTEM and Administrators, and it is verified at
 // every start. Another standard user cannot reach the socket because they cannot
-// open its directory. Administrators and SYSTEM can. There is no peer-credential
-// check, so nothing re-verifies the caller once the directory is reachable: any
+// open its directory. Administrators and SYSTEM can. There is no peer-user
+// check, so nothing re-verifies who the caller is once the directory is reachable
+// (only the pid of a caller of a Sensitive method is read, with
+// SIO_AF_UNIX_GETPEERPID): any
 // process running as the same user can connect, and anything that is later
 // granted access to the directory (an ACL changed after start, or a process
 // holding SeBackupPrivilege) is served without question. A named pipe with a
@@ -94,6 +99,7 @@ var (
 	removeFile  = os.Remove
 	restrictFn  = restrict  // OS-specific: closes the socket file to other users
 	checkPeerFn = checkPeer // OS-specific: the kernel-attested peer uid check
+	peerPIDFn   = peerPID   // OS-specific: the kernel-attested peer pid
 	dialUnix    = func(ctx context.Context, path string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", path)
@@ -139,6 +145,11 @@ type Server struct {
 	Log     *logx.Logger
 	Methods map[string]Method
 	UID     int // the only user whose processes may connect (ignored on Windows)
+	// Sensitive names the methods that change what the daemon trusts or runs (approving a task). For these the
+	// kernel-reported pid of the caller is read, and Guard must allow it. If the pid cannot be read, or Guard is nil
+	// or returns an error, the request is refused: these methods fail closed.
+	Sensitive map[string]bool
+	Guard     func(pid int) error
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
@@ -225,6 +236,11 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		reply(c, Response{Error: "unknown_method"})
 		return
 	}
+	if s.Sensitive[req.Method] && s.guard(c) != nil {
+		s.Log.Warn("local request refused: caller not allowed to change trust")
+		reply(c, Response{Error: CodeNotPermitted})
+		return
+	}
 	res, err := m(ctx, req.Params)
 	if err != nil {
 		var re *RPCError
@@ -276,6 +292,29 @@ func onlySpace(r io.Reader) bool {
 	b, _ := io.ReadAll(r)
 	return len(bytes.TrimLeft(b, " \t\r\n")) == 0
 }
+
+// CodeNotPermitted is the fixed error a sensitive method gives a caller the Guard refused.
+const CodeNotPermitted = "not_permitted"
+
+// guard allows a sensitive request only if the caller's pid is known and Guard accepts it.
+func (s *Server) guard(c net.Conn) error {
+	if s.Guard == nil {
+		return errNoGuard
+	}
+	pid, err := peerPIDFn(c)
+	if err != nil {
+		return err
+	}
+	if pid <= 0 {
+		return errNoPID
+	}
+	return s.Guard(pid)
+}
+
+var (
+	errNoGuard = errors.New("localsock: no guard for a sensitive method")
+	errNoPID   = errors.New("localsock: the kernel gave no caller pid")
+)
 
 func reply(c net.Conn, r Response) { _ = json.NewEncoder(c).Encode(r) }
 
