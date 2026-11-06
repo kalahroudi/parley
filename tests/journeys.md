@@ -24,3 +24,17 @@ Status is `planned` until the test exists and passes, then `passing`. Update thi
 | J Updates | JJ-01 | 5 | planned | Auto-update accepts a release signed by the pinned key, rejects any other; pin-to-version holds; protocol version in handshake |
 | K Billing | JK-01 | 5 | planned | Stripe test-mode Checkout and Portal; seat limit blocks only new enrollment; live tunnels are never cut |
 | L Owner and security views | JL-01 | 5 | planned | Per-bot call log, admin kill-switch with reason, metadata audit CSV, tenant export and deletion; no content anywhere |
+
+## T405 walking skeleton: last run and what it does not cover
+
+`tests/walking-skeleton.test.mjs` runs in the CI `test` job on macOS and Linux (it skips itself on Windows) with real `parleyd` and `parley-cli mcp` processes, the real gateway (`wrangler dev`), and a bot behind the CLI adapter. Last run: passing on macOS (about 2 minutes). It covers enrollment and approval of three devices, discovery, an echo, INPUT_REQUIRED with an answer on the same task, cancel (the bot's process ends), a stranger refused by the target's own allowlist, an offline target delivered once on return, an expired task that never runs, a bot daemon restarted mid-task (the lost task is not run again; a resend works), a revoked target (`recipient_not_found`, nothing reaches the bot) and the canary scan of the gateway's storage and log and of every daemon's output. Removing the gateway's revocation filter, or leaking one reply's text into a daemon log, turns it red.
+
+Not covered by this journey, and why:
+
+- Admin init and the recovery code: JA-01 (`acceptance.test.mjs`); the journey's admin is the test itself, which holds the root key.
+- Replay refused: the journey sends no replayed frame (that needs a gateway that replays), so removing the replay check does not turn it red. The Go replay tests and the malicious-gateway mutations (`scripts/malgw-mutations.sh`, "replay table skipped") hold it.
+- The daemon's own revocation checks (send side `Guard.CheckSend`, receive side `Revoked`): the gateway already hides a revoked device, so the journey cannot reach them; they are held by the same mutation script and the trust tests.
+- A revocation reaching a running daemon by its hourly refresh: the minimum interval is one minute, too slow for CI; the journey restarts the daemon, which reads the list at start.
+- A task in flight when its recipient restarts: the caller is not told; the task stays WORKING until it expires or is canceled (the journey cancels it). Whether the caller should be told is a product question for the author.
+- Approval (`none` or `owner`, JG-01): T403 tests; the bot host in the journey has no approval policy.
+- Queued retention with a dropped connection: `make queued-ttl` (about 17 minutes, no CI workflow runs it yet).

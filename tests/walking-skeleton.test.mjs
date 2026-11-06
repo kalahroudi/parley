@@ -22,8 +22,8 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Scan } from "./canary/canary.mjs";
-import { startGateway } from "./harness/gateway.mjs";
-import { build, capture, mcpClient, newTenant, repo, sleep, testOptions, waitFor } from "./harness/e2e.mjs";
+import { signRevocations, startGateway } from "./harness/gateway.mjs";
+import { build, capture, mcpClient, newTenant, post, repo, sleep, testOptions, waitFor } from "./harness/e2e.mjs";
 
 const opts = process.platform === "win32" ? { ...testOptions(420000), skip: "macOS and Linux only" } : testOptions(420000);
 
@@ -36,7 +36,7 @@ test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on
   const children = [];
   let tenant;
   const random = () => randomBytes(8).toString("hex");
-  const canary = { echo: `CANARY-echo-${random()}`, answer: `CANARY-answer-${random()}`, late: `CANARY-late-${random()}`, stranger: `CANARY-stranger-${random()}`, offline: `CANARY-offline-${random()}` };
+  const canary = { echo: `CANARY-echo-${random()}`, answer: `CANARY-answer-${random()}`, late: `CANARY-late-${random()}`, stranger: `CANARY-stranger-${random()}`, offline: `CANARY-offline-${random()}`, resent: `CANARY-resent-${random()}`, revoked: `CANARY-revoked-${random()}` };
   try {
     tenant = await newTenant(gw, exe);
     const { cli, enroll } = tenant;
@@ -69,7 +69,7 @@ test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on
       children.push(p);
       return mcpClient(p.child);
     };
-    const mcp = startMcp(caller.home);
+    let mcp = startMcp(caller.home);
     const init = await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "walking-skeleton", version: "1" } });
     assert.equal(init.result.protocolVersion, "2025-06-18");
     mcp.notify("notifications/initialized");
@@ -177,16 +177,56 @@ test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on
     assert.equal(readdirSync(botRuns).length, runsBefore, "the expired task was not run");
     assert.equal((await mcp.tool("get_task", { task_id: late })).json.state, "TASK_STATE_FAILED");
 
+    // Restart mid-conversation: the bot daemon restarts while a task is running. The task is lost with the daemon's
+    // memory (by design: the bot's process ends and nothing re-runs it), the caller can cancel it, and a resend works
+    // because the restarted daemon's fresh prekeys are used. The lost task is never run a second time.
+    const mid = await send({ agent, text: "slow mid" });
+    await follow(mid, (v) => v.state === "TASK_STATE_WORKING");
+    await waitFor("the bot to start the slow task", async () => runs("slow").length === 1);
+    const [slowPid] = runs("slow").map(pidOf);
+    await stopBot(botD);
+    await waitFor("the slow bot's process to end with its daemon", async () => !alive(slowPid), 100);
+    botD = startBot();
+    const resent = await follow(await send({ agent, text: `echo ${canary.resent}` }), (v) => finalStates.has(v.state), 120);
+    assert.equal(resent.json.state, "TASK_STATE_COMPLETED");
+    assert.equal(resent.json.content, `bot heard: ${canary.resent}`);
+    assert.equal(runs("slow").length, 1, "the task lost in the restart was not run again");
+    assert.equal(runs("echo").length, 3, "the first echo, the offline echo and the resend each ran exactly once (the expired one and the stranger's never)");
+    assert.equal((await mcp.tool("cancel_task", { task_id: mid })).isError, false);
+    assert.equal((await follow(mid, (v) => finalStates.has(v.state))).json.state, "TASK_STATE_CANCELED");
+
     // The caller's own list shows every task, with no content.
     const all = await mcp.tool("list_tasks", {});
-    assert.equal(all.json.tasks.length, 5);
+    assert.equal(all.json.tasks.length, 7);
     assert.ok(all.json.tasks.every((t) => !("content" in t)));
+
+    // Revocation: the root revokes the bot's device. A daemon reads the list when it starts, so the caller's daemon
+    // restarts and must now refuse to send to it; nothing reaches the bot.
+    const revokedList = signRevocations(tenant.rootKey, { tenant: "acme", version: 2, revoked: [botHome.id] });
+    assert.equal((await post(gw.url, "/v1/admin/revocations", tenant.admin, { list: revokedList })).status, 200);
+    callerD.child.kill("SIGTERM");
+    assert.equal((await callerD.done).code, 0, "the caller daemon stops cleanly");
+    const callerD2 = run("parleyd", [], caller.home);
+    await waitFor("the restarted caller daemon", async () => {
+      assert.equal(callerD2.child.exitCode, null, `the caller daemon exited early:\n${callerD2.output()}`);
+      return (await cli(caller.home, ["list"]).done).code === 0;
+    }, 450);
+    const echoesBefore = runs("echo").length;
+    mcp = startMcp(caller.home);
+    await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "walking-skeleton", version: "1" } });
+    mcp.notify("notifications/initialized");
+    const sentRevoked = await mcp.tool("send_task", { agent, text: `echo ${canary.revoked}`, expiry_seconds: 5 });
+    assert.equal(sentRevoked.isError, false, sentRevoked.text);
+    const refusedRevoked = await follow(sentRevoked.json.task_id, (v) => finalStates.has(v.state), 60);
+    assert.equal(refusedRevoked.json.state, "TASK_STATE_FAILED");
+    assert.equal(refusedRevoked.json.reason, "recipient_not_found"); // not recipient_offline: the revoked device is not a recipient at all
+    assert.equal(runs("echo").length, echoesBefore, "nothing reached the revoked device's bot");
 
     // Canary: no task, question or answer text is anywhere the gateway keeps or says anything, or in a daemon's log.
     const scan = new Scan({ ...canary, heard: "bot heard: ", colour: "colour: ", question: "which colour?" });
     scan.path(gw.state);
     scan.path(gw.log);
-    for (const [i, d] of [callerD, strangerD, botD].entries()) scan.bytes(`daemon ${i} output`, d.output());
+    for (const [i, d] of [callerD, callerD2, strangerD, botD].entries()) scan.bytes(`daemon ${i} output`, d.output());
     scan.assertClean();
     assert.ok(scan.sinks.length > 5, "the scan looked at the gateway's real state and log, not at nothing");
     const control = new Scan({ task: canary.echo });
