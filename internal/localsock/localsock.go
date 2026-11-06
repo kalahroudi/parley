@@ -37,6 +37,7 @@
 package localsock
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,7 +225,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	defer cancel()
 	var req request
 	dec := json.NewDecoder(io.LimitReader(c, maxRequestBytes))
-	if err := dec.Decode(&req); err != nil {
+	dec.DisallowUnknownFields()
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil || !onlySpace(dec.Buffered()) || !ExactKeys(raw, "method", "params") || json.Unmarshal(raw, &req) != nil {
 		reply(c, Response{Error: "bad_request"})
 		return
 	}
@@ -253,6 +258,39 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		return
 	}
 	reply(c, Response{OK: true, Result: b})
+}
+
+// ExactKeys reports whether b is one JSON object whose top-level keys are all different, even when compared without
+// case (encoding/json would fold them into one field and keep the last), and, when allowed is given, are all exactly
+// among allowed, with nothing after it. Nested values are skipped, not inspected: they are the business of whoever reads them.
+func ExactKeys(b []byte, allowed ...string) bool {
+	d := json.NewDecoder(bytes.NewReader(b))
+	if t, err := d.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		kt, err := d.Token()
+		k, _ := kt.(string)
+		if err != nil || seen[strings.ToLower(k)] || (len(allowed) > 0 && !slices.Contains(allowed, k)) {
+			return false
+		}
+		seen[strings.ToLower(k)] = true
+		var skip json.RawMessage
+		if d.Decode(&skip) != nil {
+			return false
+		}
+	}
+	_, _ = d.Token() // the closing brace: More is only false before one
+	_, err := d.Token()
+	return err == io.EOF // and nothing after it
+}
+
+// onlySpace reports whether what the decoder has already read past the request is only JSON whitespace. It never
+// reads more: a client that sends one request and waits for the reply must not be made to wait for more bytes.
+func onlySpace(r io.Reader) bool {
+	b, _ := io.ReadAll(r)
+	return len(bytes.TrimLeft(b, " \t\r\n")) == 0
 }
 
 // CodeNotPermitted is the fixed error a sensitive method gives a caller the Guard refused.

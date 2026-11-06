@@ -145,6 +145,10 @@ loop:
 			s.fail(nil, codeParse, "parse error")
 			continue
 		}
+		if !localsock.ExactKeys(line, "jsonrpc", "id", "method", "params", "result", "error") {
+			s.fail(nil, codeRequest, "invalid request")
+			continue
+		}
 		if !validID(m.ID) {
 			s.fail(nil, codeRequest, "invalid request id")
 			continue
@@ -185,6 +189,13 @@ loop:
 		cctx, ccancel := context.WithCancel(ctx)
 		key := string(m.ID)
 		mu.Lock()
+		if running[key] != nil { // two calls under one id could not be told apart, answered or canceled
+			mu.Unlock()
+			ccancel()
+			<-sem
+			s.fail(nil, codeRequest, "request id in use")
+			continue
+		}
 		running[key] = ccancel
 		mu.Unlock()
 		wg.Add(1)
@@ -259,7 +270,7 @@ func (s *Server) callTool(ctx context.Context, m message) {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	if err := json.Unmarshal(m.Params, &p); err != nil || !known(p.Name) {
+	if !localsock.ExactKeys(m.Params, "name", "arguments", "_meta") || json.Unmarshal(m.Params, &p) != nil || !known(p.Name) {
 		s.fail(m.ID, codeParams, "unknown tool")
 		return
 	}
@@ -269,8 +280,7 @@ func (s *Server) callTool(ctx context.Context, m message) {
 			s.fail(m.ID, codeParams, "arguments too large")
 			return
 		}
-		var obj map[string]json.RawMessage
-		if json.Unmarshal(p.Arguments, &obj) != nil {
+		if !localsock.ExactKeys(p.Arguments) {
 			s.fail(m.ID, codeParams, "arguments must be an object")
 			return
 		}
