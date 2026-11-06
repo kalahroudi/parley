@@ -1,6 +1,7 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { handleAdmin } from "./admin";
 import { agentCard, handleA2A } from "./a2a";
 import { authenticate, handleConnectAuth } from "./connect";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
@@ -55,6 +56,7 @@ export default {
     if (pathname === "/v1/connect/challenge" || pathname === "/v1/connect/token") return handleConnectAuth(request, env);
     if (pathname.startsWith("/v1/login/")) return handleLogin(request, env);
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
+    if (pathname === "/v1/admin/export" || pathname === "/v1/admin/audit/csv" || pathname === "/v1/admin/tenant/delete") return handleAdmin(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env, (req) => authenticate(req, env, "api"));
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations" || pathname === "/v1/root") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {

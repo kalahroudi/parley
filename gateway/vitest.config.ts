@@ -10,7 +10,7 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       // The per-device limits are raised for every suite but ratelimit.test.ts, which sets its own.
       // Tests mint admin sessions for admin@example.test in tenants named <prefix><n>.
-      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev", "acl", "ret"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(","), RATE_TASK_PER_MIN: "100000", RATE_MESSAGE_PER_MIN: "100000", RATE_FIND_PER_MIN: "100000", RATE_CONNECT_PER_MIN: "100000" } },
+      miniflare: { bindings: { ADMINS: ["ten", "dir", "ses", "a2a", "dev", "acl", "ret", "off"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:admin@example.test`)).concat(["tx:root@example.test"]).join(","), USER_DOMAINS: ["ten", "dir", "ses", "a2a", "dev", "acl", "ret", "off"].flatMap((p) => Array.from({ length: 400 }, (_, i) => `${p}${i + 1}:example.test`)).join(","), RATE_TASK_PER_MIN: "100000", RATE_MESSAGE_PER_MIN: "100000", RATE_FIND_PER_MIN: "100000", RATE_CONNECT_PER_MIN: "100000" } },
     }),
   ],
   test: {
@@ -48,6 +48,8 @@ export default defineConfig({
         "src/connect.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         // Tier 1 for the frames the gateway parses before it relays them.
         "src/protocol.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
+        // Tier 1 for the audit CSV (what stops a cell from running as a spreadsheet formula).
+        "src/export.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
         // Tier 1 for the device sign-in confirmation (the page that shows the code, and the form that confirms it).
         "src/login.ts": { lines: 100, statements: 100, branches: 100, functions: 100 },
       },

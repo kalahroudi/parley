@@ -7,6 +7,7 @@ import type { Task } from "./task";
 import {
   CLOSE_PROTOCOL,
   CLOSE_REPLACED,
+  CLOSE_REVOKED,
   CLOSE_TOO_LARGE,
   HEARTBEAT_MS,
   MAX_FRAME_BYTES,
@@ -109,6 +110,13 @@ export class Device extends DurableObject<Env> {
     // which the resume logic tolerates because events are never replayed).
     if (!send(ws, { t: "event", seq: session.tx_seq, body })) return { status: "offline" };
     return { status: "delivered", seq: session.tx_seq };
+  }
+
+  // The device was revoked (or its tenant deleted): every socket closes now and nothing is kept, not the session
+  // counters and not the notes of held events. Safe to repeat.
+  async revoke(): Promise<void> {
+    for (const ws of this.ctx.getWebSockets()) ws.close(CLOSE_REVOKED, "revoked");
+    await this.ctx.storage.deleteAll();
   }
 
   // Notes that a task holds sealed events for this device until `until`.

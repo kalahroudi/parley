@@ -40,8 +40,9 @@ export { SEALED_MEDIA_TYPE };
 //    because a bare cancel is indistinguishable from a gateway forgery.
 //  - Extra JSON-RPC error codes -32010 to -32015, outside the A2A range -32001 to
 //    -32009, for offline recipient, bad sequence, duplicate task, not permitted,
-//    too large and illegal state move, and -32016 for a rate limit (with HTTP 429,
-//    Retry-After and error.data.retry_after_ms; limits are in src/ratelimit.ts).
+//    too large and illegal state move, -32016 for a rate limit (with HTTP 429,
+//    Retry-After and error.data.retry_after_ms; limits are in src/ratelimit.ts) and
+//    -32017 for a tenant at its limit of unexpired tasks (MAX_TASK_LOG in src/tenant.ts).
 //  - `status.message` on tasks relayed to a daemon carries the sealed part and
 //    metadata.parley {kind, from, seq}; `from` is the gateway's say-so and a
 //    daemon must take the sender from the signed header, never from it.
@@ -80,6 +81,7 @@ const ERR = {
   tooLarge: [-32014, "message too large"],
   transition: [-32015, "task state does not allow this"],
   rateLimited: [-32016, "rate limited"],
+  busy: [-32017, "too many unexpired tasks"],
 } as const;
 type Err = (typeof ERR)[keyof typeof ERR];
 
@@ -321,6 +323,13 @@ async function send(rid: unknown, params: Json, env: Env, who: Identity): Promis
     const rec = await stub.create({ tenant: who.tenant, id: shape.taskId, caller: who.device, target: shape.target, retention: (await tenantStub(env, who.tenant).retention()).mode });
     if (rec === "exists") return fail(rid, ERR.exists);
     if (rec === "bad_request") return fail(rid, ERR.params);
+    // The tenant notes the task for its audit and for offboarding. A tenant at its limit of unexpired tasks refuses a
+    // new one; a device revoked in the meantime gets the answer an offline one does. Either way the task is closed.
+    const noted = await tenantStub(env, who.tenant).logTask({ task: shape.taskId, caller: who.device, target: shape.target, created: rec.created, expires_at: rec.expires_at, bucket: shape.bucket, retention: rec.retention });
+    if (noted !== "ok") {
+      await stub.apply(who.tenant, who.device, "CANCEL", 1);
+      return fail(rid, noted === "full" ? ERR.busy : ERR.offline);
+    }
     const d = await deviceStub(env, who.tenant, shape.target).deliver(eventBody(rec, who.device, shape.kind, undefined, role, m.messageId, shape.context, parts));
     if (d.status !== "delivered") {
       // The target never saw it: close the task so it does not sit until expiry. The
