@@ -237,6 +237,7 @@ func TestReadMessageAdmitsToolRequestsOnly(t *testing.T) {
 // fakeTools answers tool requests and records what it was asked.
 type fakeTools struct {
 	calls  []string
+	given  [][]byte // the content slices handed out
 	waits  int
 	ended  [][16]byte
 	reply  ToolReply
@@ -249,7 +250,10 @@ func (f *fakeTools) Call(_ context.Context, t bot.Task, tool string, args []stri
 	if f.onWait {
 		onWait()
 	}
-	return f.reply, f.err
+	r := f.reply
+	r.Content = append([]byte(nil), r.Content...)
+	f.given = append(f.given, r.Content)
+	return r, f.err
 }
 func (f *fakeTools) End(id [16]byte) { f.ended = append(f.ended, id) }
 
@@ -262,6 +266,11 @@ func TestConverseServesToolRequests(t *testing.T) {
 	out, err := converse(context.Background(), &scripted{say: say}, s, tc)
 	if err != nil || string(out) != "done" || fmt.Sprint(ft.calls) != "[grep|a ls|]" || s.statuses != 2 || len(sent) != 2 {
 		t.Fatalf("%q %v %v %d %d", out, err, ft.calls, s.statuses, len(sent))
+	}
+	for _, c := range ft.given {
+		if !bytes.Equal(c, make([]byte, len(c))) {
+			t.Fatalf("the tool output was kept: %q", c)
+		}
 	}
 	var l struct {
 		V, Turn   int

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,9 +114,19 @@ func TestToolRunsDirectlyWithTheApprovedArgumentsAndNoInheritedEnvironment(t *te
 	each(t, s, func(t *testing.T, r *toolrun.Runner) {
 		hostile := []string{"; touch pwned", "$(touch pwned)", "`id`", "a b", "*", "--", ""}
 		out := run(t, r, false, hostile...)
-		want := "-fixed|a b|; touch pwned|$(touch pwned)|`id`|a b|*|--|;2" // the helper variable and KEEP
-		if string(out.Data) != want || out.Exit != 0 || out.Truncated {
+		i := strings.LastIndex(string(out.Data), ";")
+		got, names := string(out.Data)[:i], string(out.Data)[i+1:]
+		if got != "-fixed|a b|; touch pwned|$(touch pwned)|`id`|a b|*|--|" || out.Exit != 0 || out.Truncated {
 			t.Fatalf("%q exit %d", out.Data, out.Exit)
+		}
+		// Only the configured variables, and what the system adds to every process (Windows: SYSTEMROOT; the Linux sandbox: PWD).
+		for _, n := range strings.Split(names, ",") {
+			if n != helperEnv && n != "KEEP" && !strings.EqualFold(n, "SYSTEMROOT") && n != "PWD" {
+				t.Errorf("the tool has the variable %q", n)
+			}
+		}
+		if !strings.Contains(names, "KEEP") {
+			t.Errorf("the configured variable is missing: %q", names)
 		}
 		if _, err := os.Stat(filepath.Join(s.Dir, "pwned")); err == nil {
 			t.Fatal("an argument was run by a shell")

@@ -228,7 +228,9 @@ func converse(ctx context.Context, p peer, s bot.Session, tc *toolConv) ([]byte,
 			if err != nil {
 				return nil, err
 			}
-			if err = tc.send(ctx, toolResultLine(tc.task.ID, requests, r)); err != nil {
+			err = tc.send(ctx, toolResultLine(tc.task.ID, requests, r))
+			clear(r.Content) // the output of a tool is task data: no copy of ours outlives its use
+			if err != nil {
 				return nil, err
 			}
 		case typeResult:

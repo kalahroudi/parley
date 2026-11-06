@@ -549,6 +549,7 @@ func (b *Broker) run(ctx, gctx context.Context, task [16]byte, n int, t Tool, ar
 	}
 	b.audit(task, n, t.Name, StateRan)
 	data, rerr := Frame(t.Name, out.Data, t.Output, b.cfg.Rand)
+	clear(out.Data) // the raw output is ours: only the framed copy goes on
 	if rerr != nil {
 		return Reply{Outcome: OutcomeFailed}, nil
 	}

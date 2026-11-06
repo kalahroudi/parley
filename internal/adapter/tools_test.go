@@ -39,7 +39,9 @@ func (r *recordingTools) Call(_ context.Context, t bot.Task, tool string, args [
 	if r.wait {
 		onWait()
 	}
-	return r.reply, r.err
+	rep := r.reply
+	rep.Content = append([]byte(nil), rep.Content...) // the adapter clears what it is given
+	return rep, r.err
 }
 
 func (r *recordingTools) End(id [16]byte) { r.mu.Lock(); r.ended = append(r.ended, id); r.mu.Unlock() }

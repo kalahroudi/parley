@@ -28,14 +28,12 @@ func TestMain(m *testing.M) {
 func helper(mode string) {
 	args := os.Args[1:]
 	switch mode {
-	case "args": // the arguments, and how many variables the environment has (Windows adds SYSTEMROOT to any explicit one)
-		n := 0
+	case "args": // the arguments, then the names of the environment variables
+		var names []string
 		for _, e := range os.Environ() {
-			if !strings.EqualFold(strings.SplitN(e, "=", 2)[0], "SYSTEMROOT") {
-				n++
-			}
+			names = append(names, strings.SplitN(e, "=", 2)[0])
 		}
-		fmt.Print(strings.Join(args, "|"), ";", n)
+		fmt.Print(strings.Join(args, "|"), ";", strings.Join(names, ","))
 	case "cwd":
 		d, _ := os.Getwd()
 		fmt.Print(d)

@@ -990,3 +990,20 @@ func TestADenialNeedsNoDigestButAnApprovalDoes(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestRawOutputIsClearedOnceFramed(t *testing.T) {
+	e := newEnv(t, nil)
+	raw := []byte("SECRET-OUTPUT")
+	e.r.run = func(context.Context, toolgate.Tool, []string) (toolgate.Output, error) {
+		return toolgate.Output{Data: raw}, nil
+	}
+	ch := e.call(context.Background(), toolgate.Request{Tool: "fetch"})
+	approveFirst(t, e, "")
+	r := get(t, ch)
+	if !bytes.Contains(r.r.Data, []byte("SECRET-OUTPUT")) && !bytes.Contains(r.r.Data, []byte("SECRET-")) {
+		t.Fatalf("framed output lost: %q", r.r.Data)
+	}
+	if !bytes.Equal(raw, make([]byte, len(raw))) {
+		t.Fatalf("the raw output was kept: %q", raw)
+	}
+}
