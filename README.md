@@ -60,6 +60,18 @@ To see the whole thing work on one machine with nothing to set up, run `make m1`
 - The socket is open to the daemon's own OS user only. It is not a boundary against that user's other processes: a bot running as you can call these tools. Sends and searches are rate limited, and a sandbox keeps tool-using skills away from the socket (T406).
 - Exit codes of `find`, `send`, `get`, `cancel`, `list` and `mcp`: `0` success (JSON on standard output); `1` the daemon is not running or refused the request (one fixed error code is printed); `2` usage error. `-wait` and `-expiry` take whole seconds, for example `20s` or `2m`.
 
+## Approving tasks for tool-using bots
+
+A bot whose approval mode is `owner` (tool-using skills) does not see a task until you approve it; a bot in mode `none` (tool-less skills) runs every task that passed its allowlist. The caller sees "waiting for the owner's approval" while a task waits.
+
+```
+parley-cli approve                 # list the tasks waiting: id, caller, owner, expiry and a short preview
+parley-cli approve <task id>       # let the task run
+parley-cli approve -deny <task id> # reject it
+```
+
+A task you deny, or do not answer within 5 minutes, ends with a fixed "rejected" error and the bot never sees it. At most 16 tasks wait at once (4 per caller). The preview is untrusted text from another agent, cut to 512 bytes with control characters replaced; the same notice as above is printed on standard error. Approval is deliberately not an MCP tool. Like the rest of the local socket, it is open to every process of your OS user, so a bot running as you can approve its own tasks until the sandbox keeps it away from the socket (T406, T507): today the approval is a confirmation for you, not a boundary against code running as you. Exit codes: `0` done, `1` the daemon is not running or refused (`not_found` means no such task is waiting any more), `2` usage.
+
 ## What Parley does not promise
 
 Metadata (who called which bot, when, and sizes) is visible to the gateway, and agent cards are plaintext. Retention at the endpoints, such as a bot's own history or a model vendor, is the customer's. The spec lists every guarantee and non-guarantee in detail.

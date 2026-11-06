@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kalahroudi/parley/internal/approval"
 	"github.com/kalahroudi/parley/internal/caller"
 	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/localsock"
@@ -29,7 +30,7 @@ import (
 // callerCommand says whether name is one of the commands that talk to the daemon.
 func callerCommand(name string) bool {
 	switch name {
-	case "mcp", "find", "send", "get", "cancel", "list", "test":
+	case "mcp", "find", "send", "get", "cancel", "list", "test", "approve":
 		return true
 	}
 	return false
@@ -100,6 +101,8 @@ func (s *session) run(ctx context.Context, args []string) int {
 		return s.do(ctx, "send_task", caller.SendParams{Agent: *to, TaskID: *task, Text: text, ExpirySeconds: secs})
 	case "test":
 		return s.selfTest(ctx, rest)
+	case "approve":
+		return s.approve(ctx, fs, rest)
 	case "get":
 		wait := fs.Duration("wait", 0, "wait up to this long (at most 20s) for a final state or a question")
 		id, ok := s.oneID(fs, rest)
@@ -137,24 +140,53 @@ func (s *session) seconds(flagName string, d time.Duration) (int64, bool) {
 	return int64(d / time.Second), true
 }
 
-// oneID parses a command line that has a task id as its only argument.
-func (s *session) oneID(fs *flag.FlagSet, rest []string) (string, bool) {
-	// Flags may follow the id: `get <id> -wait 10s`.
+// positional collects the arguments that are not flags; flags may follow them
+// (`get <id> -wait 10s`).
+func positional(fs *flag.FlagSet, rest []string) ([]string, bool) {
 	var pos []string
 	for len(rest) > 0 {
 		if err := fs.Parse(rest); err != nil {
-			return "", false
+			return nil, false
 		}
 		if fs.NArg() == 0 {
 			break
 		}
 		pos, rest = append(pos, fs.Arg(0)), fs.Args()[1:]
 	}
+	return pos, true
+}
+
+// oneID parses a command line that has a task id as its only argument.
+func (s *session) oneID(fs *flag.FlagSet, rest []string) (string, bool) {
+	pos, ok := positional(fs, rest)
+	if !ok {
+		return "", false
+	}
 	if len(pos) != 1 {
 		fmt.Fprintf(s.errw, "usage: parley-cli %s [flags] <task id>\n", fs.Name())
 		return "", false
 	}
 	return pos[0], true
+}
+
+// approve is the owner's answer to a task a bot holds for approval (journey G):
+// `approve` lists what waits (with a bounded preview, control characters
+// replaced), `approve <id>` lets the task run, `approve -deny <id>` rejects it.
+// A task nobody answers is rejected after five minutes. It is deliberately not an
+// MCP tool: a model that calls tools must not be able to approve its own work.
+func (s *session) approve(ctx context.Context, fs *flag.FlagSet, rest []string) int {
+	deny := fs.Bool("deny", false, "reject the task instead of approving it")
+	pos, ok := positional(fs, rest)
+	switch {
+	case !ok || len(pos) > 1 || (len(pos) == 0 && *deny):
+		fmt.Fprintln(s.errw, "usage: parley-cli approve [-deny] [<task id>]   (without an id: list the tasks waiting)")
+		return 2
+	case len(pos) == 0:
+		return s.do(ctx, "approvals", nil)
+	case *deny:
+		return s.do(ctx, "deny", approval.DecideParams{TaskID: pos[0]})
+	}
+	return s.do(ctx, "approve", approval.DecideParams{TaskID: pos[0]})
 }
 
 // text is the task text: the arguments joined, or all of stdin for "-".
