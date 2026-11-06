@@ -19,3 +19,4 @@
 ./internal/mcp        FuzzServe          10s
 ./internal/adapter  FuzzReadMessage  10s
 ./internal/approval FuzzPrintable 10s
+./internal/localsock  FuzzExactKeys  5s

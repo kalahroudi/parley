@@ -41,9 +41,15 @@ func isFinal(t envelope.Type) bool {
 // was sent up to and including the final message. It fails if no final message comes.
 func converseThroughHost(t *testing.T, b bot.Bot, content []byte) []bottest.Message {
 	t.Helper()
+	return converseWithin(t, b, content, 30*time.Second)
+}
+
+// converseWithin is converseThroughHost with the longest a task may run.
+func converseWithin(t *testing.T, b bot.Bot, content []byte, limit time.Duration) []bottest.Message {
+	t.Helper()
 	rec := bottest.NewRecorder()
 	base := runtime.NumGoroutine()
-	h, err := bot.NewHost(bot.Config{Bot: b, Responder: rec, Timeout: 30 * time.Second})
+	h, err := bot.NewHost(bot.Config{Bot: b, Responder: rec, Timeout: limit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +270,33 @@ func TestHostileTaskFieldsReachTheBotAsOneWellFormedLine(t *testing.T) {
 				t.Fatal(err)
 			}
 			check(t, tk, raw)
+		})
+	}
+}
+
+// A bot that takes the task and never answers (a child that does not read, a service that holds the request open) is
+// ended at the host's limit with the fixed error, and its child process, reader and request are gone with it. The limit
+// is real time, kept short here; the wait for it is generous, so a slow machine only takes longer.
+func TestHostileStalledBotIsEndedAtTheLimitAndLeavesNothing(t *testing.T) {
+	hold := make(chan struct{})
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		bufio.NewReaderSize(r.Body, 1<<22).ReadBytes('\n') // take the task, as a bot would
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+		}
+	})
+	t.Cleanup(func() { close(hold) }) // after serve, so it runs before the server's Close waits for this handler
+	for name, b := range map[string]bot.Bot{
+		"API": api(t, srv.URL, ""),
+		"CLI": cli(t, "deaf"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			msgs := converseWithin(t, b, []byte("x"), time.Second)
+			last := msgs[len(msgs)-1]
+			if len(msgs) != 1 || last.Type != envelope.TypeError || len(last.Content) == 0 || len(last.Content) > bot.MaxFailure || strings.Contains(last.Content, canary) {
+				t.Fatalf("%+v", msgs)
+			}
 		})
 	}
 }
