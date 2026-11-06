@@ -41,7 +41,7 @@ func checkPeer(c net.Conn, _ int) error {
 	if err != nil {
 		return errPeer
 	}
-	pid, err := peerPID(c)
+	pid, err := peerPIDFn(c)
 	if err != nil || pid <= 0 {
 		return errPeer
 	}
