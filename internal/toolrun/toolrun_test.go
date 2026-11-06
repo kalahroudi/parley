@@ -119,9 +119,9 @@ func TestToolRunsDirectlyWithTheApprovedArgumentsAndNoInheritedEnvironment(t *te
 		if got != "-fixed|a b|; touch pwned|$(touch pwned)|`id`|a b|*|--|" || out.Exit != 0 || out.Truncated {
 			t.Fatalf("%q exit %d", out.Data, out.Exit)
 		}
-		// Only the configured variables, and what the system adds to every process (Windows: SYSTEMROOT; the Linux sandbox: PWD).
+		// Only the configured variables, and what the system adds to every process (Windows: SYSTEMROOT; a sandbox: PWD and the like).
 		for _, n := range strings.Split(names, ",") {
-			if n != helperEnv && n != "KEEP" && !strings.EqualFold(n, "SYSTEMROOT") && n != "PWD" {
+			if n != helperEnv && n != "KEEP" && !strings.EqualFold(n, "SYSTEMROOT") && n != "PWD" && n != "OLDPWD" && n != "SHLVL" && n != "_" {
 				t.Errorf("the tool has the variable %q", n)
 			}
 		}
