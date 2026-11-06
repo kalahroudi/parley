@@ -23,7 +23,7 @@ Both endpoints count against the per-source budget (`RATE_CONNECT_PER_MIN`, defa
 
 ## What this does not cover
 
-- A live tunnel socket is not closed when its device is revoked afterwards; the revoked device gets no new token and no new connection, and the signed revocation list is what peers enforce (G4). Closing sockets belongs with the offboarding cascade.
+- A revoked device gets no new token and no new connection, and the offboarding cascade (T503) closes the socket it already has the moment the gateway stores the list that revokes it. The signed revocation list is what peers enforce (G4).
 - The root public key at the gateway is the admin's registration, a gateway-side copy: a malicious gateway can register its own and let in devices the real root never approved. Such a device still cannot read or forge task content, because peers verify bindings against the pinned root. The token only gates which sockets and requests the gateway serves.
 - Anyone who asks for challenges for a device can fill its 4 outstanding slots and make the device's own pending challenge fail once; the device retries. The per-device rate limit bounds how often.
 - Tokens are bearer credentials: whoever holds one can use it until it expires (a `connect` token once). They are in no log or stored record (the canary test scans for the secrets).

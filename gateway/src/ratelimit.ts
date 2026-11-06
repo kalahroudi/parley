@@ -95,6 +95,16 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
   return take(env, "session", source, limitFor(env.RATE_SESSION_PER_MIN, DEFAULTS.session));
 }
 
+// The admin's bulk routes (export, audit CSV, tenant deletion), counted per tenant after the admin session is
+// verified, so only a signed-in admin of that tenant spends the budget. Deletion has a far smaller one: each try at
+// the confirmation (including a wrong name) counts, so the typed name cannot be guessed at speed.
+export type AdminRoute = "read" | "delete";
+const ADMIN = { read: { env: "RATE_ADMIN_PER_MIN", dflt: 60 }, delete: { env: "RATE_DELETE_PER_MIN", dflt: 3 } } as const;
+export async function limitAdmin(env: Env, tenant: string, route: AdminRoute): Promise<Response | null> {
+  const { env: v, dflt } = ADMIN[route];
+  return take(env, `admin-${route}`, `${tenant.length}:${tenant}`, limitFor(env[v], dflt));
+}
+
 // Requests that name a device (A2A sends, status, GetTask, CancelTask, directory search; prekey requests and answers, which the Device DO relays) are counted per scope against two budgets (three for prekey requests, which also spend the target's) in the same RateLimit DO:
 //  - the device's own, in a bucket named by a hash salted with the tenant, so the same device id in another
 //    tenant has its own and no name or id is stored;

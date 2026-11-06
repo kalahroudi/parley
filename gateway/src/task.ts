@@ -62,7 +62,7 @@ export interface TaskRecord {
   created: number;
   updated: number;
   expires_at: number;
-  reason?: "expired" | "canceled" | "target" | "disconnected";
+  reason?: "expired" | "canceled" | "target" | "disconnected" | "revoked";
   retention: Retention;
   // Earliest deadline among the sealed messages held for the caller (Queued).
   queue_until?: number;
@@ -158,6 +158,34 @@ export class Task extends DurableObject<Env> {
       if (!rec) return "not_found";
       if (device !== rec.caller) return "forbidden";
       return TERMINAL.has(rec.state) ? rec : this.move(rec, "FAILED", Date.now(), "disconnected");
+    });
+  }
+
+  // The root holder revoked `device`: a live task it takes part in is canceled at once and every held event is
+  // deleted. A task that has ended keeps its state, but a result still held for a revoked caller (Queued) is deleted
+  // too: nobody is left to acknowledge it. True when this call canceled the task; false for a task that is not that
+  // device's, is not here, or had already ended (so repeating the call, as the cascade may, changes nothing).
+  async revoke(tenant: string, device: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const rec = await this.open(tenant);
+      if (!rec || (device !== rec.caller && device !== rec.target)) return false;
+      if (TERMINAL.has(rec.state)) {
+        if (device === rec.caller) await this.settle(rec, await this.heldKeys());
+        return false;
+      }
+      await this.move(rec, "CANCELED", Date.now(), "revoked");
+      return true;
+    });
+  }
+
+  // Tenant deletion: the record, every held event and the alarm go. False (and nothing is touched) for another
+  // tenant's task or one that is not here.
+  async wipe(tenant: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (!(await this.open(tenant))) return false;
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      return true;
     });
   }
 
@@ -268,10 +296,14 @@ export class Task extends DurableObject<Env> {
     return rec;
   }
 
+  private async heldKeys(): Promise<string[]> {
+    return [...(await this.ctx.storage.list({ prefix: QP })).keys()];
+  }
+
   // A canceled, expired or abandoned task has no one left to deliver to: delete
   // every held event now instead of waiting for its TTL.
   private async release(rec: TaskRecord): Promise<void> {
-    const keys = [...(await this.ctx.storage.list({ prefix: QP })).keys()];
+    const keys = await this.heldKeys();
     if (!keys.length) return;
     await this.ctx.storage.delete(keys);
     delete rec.queue_until;

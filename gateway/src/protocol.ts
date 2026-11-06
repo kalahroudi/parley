@@ -13,6 +13,7 @@ export const MAX_FRAME_BYTES = 1 << 20;
 // WebSocket close codes (4000-4999 are application-defined).
 export const CLOSE_PROTOCOL = 4400;
 export const CLOSE_REPLACED = 4409;
+export const CLOSE_REVOKED = 4403;
 export const CLOSE_TOO_LARGE = 1009;
 
 // Daemon to gateway.

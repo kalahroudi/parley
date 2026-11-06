@@ -1,6 +1,7 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { handleAdmin } from "./admin";
 import { agentCard, handleA2A } from "./a2a";
 import { authenticate, handleConnectAuth } from "./connect";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
@@ -24,6 +25,9 @@ export interface Env extends AuthEnv {
   RATE_AUTH_PER_MIN?: string;
   RATE_TENANT_LOGIN_PER_MIN?: string;
   RATE_SESSION_PER_MIN?: string;
+  // Per-minute limits for a tenant's admin export and audit CSV (RATE_ADMIN_PER_MIN) and its deletion tries (RATE_DELETE_PER_MIN).
+  RATE_ADMIN_PER_MIN?: string;
+  RATE_DELETE_PER_MIN?: string;
   // Per-minute limits per device for new tasks, other task messages and directory searches (the tenant's are ten times these).
   RATE_TASK_PER_MIN?: string;
   RATE_MESSAGE_PER_MIN?: string;
@@ -55,6 +59,7 @@ export default {
     if (pathname === "/v1/connect/challenge" || pathname === "/v1/connect/token") return handleConnectAuth(request, env);
     if (pathname.startsWith("/v1/login/")) return handleLogin(request, env);
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
+    if (pathname === "/v1/admin/export" || pathname === "/v1/admin/audit/csv" || pathname === "/v1/admin/tenant/delete") return handleAdmin(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env, (req) => authenticate(req, env, "api"));
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations" || pathname === "/v1/root") return handleEnroll(request, env);
     if (pathname === "/.well-known/agent-card.json") {
