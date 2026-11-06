@@ -12,8 +12,12 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/kalahroudi/parley/internal/approval"
+	"github.com/kalahroudi/parley/internal/bot"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/logx"
 )
@@ -87,6 +91,10 @@ func TestCommandsSendTheRightRequests(t *testing.T) {
 		{[]string{"get", "abc", "-wait", "3s"}, "", "get_task", `{"task_id":"abc","wait_seconds":3}`},
 		{[]string{"cancel", "abc"}, "", "cancel_task", `{"task_id":"abc"}`},
 		{[]string{"list"}, "", "list_tasks", `null`},
+		{[]string{"approve"}, "", "approvals", `null`},
+		{[]string{"approve", "ab"}, "", "approve", `{"task_id":"ab"}`},
+		{[]string{"approve", "-deny", "ab"}, "", "deny", `{"task_id":"ab"}`},
+		{[]string{"approve", "ab", "-deny"}, "", "deny", `{"task_id":"ab"}`},
 		{[]string{"list", "-state", "TASK_STATE_COMPLETED", "-limit", "10", "-cursor", "00"}, "", "list_tasks", `{"state":"TASK_STATE_COMPLETED","limit":10,"cursor":"00"}`},
 	} {
 		var s seen
@@ -99,7 +107,7 @@ func TestCommandsSendTheRightRequests(t *testing.T) {
 		if want == `null` {
 			want = `{}`
 		}
-		if s.params != want && !(tc.method == "list_tasks" && s.params == "") {
+		if s.params != want && !((tc.method == "list_tasks" || tc.method == "approvals") && s.params == "") {
 			t.Errorf("%v sent %s, want %s", tc.args, s.params, want)
 		}
 	}
@@ -147,6 +155,7 @@ func TestBadUsage(t *testing.T) {
 		{"get"}, {"get", "a", "b"}, {"cancel"}, // task id missing or doubled
 		{"list", "extra"}, {"find", "-bogus"}, {"send", "-bogus"}, {"get", "-bogus", "x"}, {"list", "-bogus"},
 		{"mcp", "extra"},
+		{"approve", "a", "b"}, {"approve", "-deny"}, {"approve", "-bogus"},
 		{"send", "-to", "dev-2", "-expiry", "500ms", "x"}, {"send", "-to", "dev-2", "-expiry", "-5s", "x"},
 		{"get", "-wait", "1500ms", "abc"}, {"get", "-wait", "-1s", "abc"},
 	} {
@@ -202,5 +211,97 @@ func TestNoConfigDirectory(t *testing.T) {
 	code := execute(context.Background(), []string{"list"}, nil, &o, &e, func() (string, error) { return "", errors.New("no home") }, func(string) string { return "" }, tools{})
 	if code != 1 || e.String() != "error: daemon: no user config directory: no home\n" {
 		t.Fatalf("%d %q", code, e.String())
+	}
+}
+
+// holdBot counts how often the bot behind the gate ran.
+type holdBot struct{ ran atomic.Int32 }
+
+func (b *holdBot) Handle(context.Context, bot.Task, bot.Session) ([]byte, error) {
+	b.ran.Add(1)
+	return []byte("done"), nil
+}
+
+type quietSession struct{}
+
+func (quietSession) Status(context.Context, []byte) error        { return nil }
+func (quietSession) Ask(context.Context, []byte) ([]byte, error) { return nil, errors.New("unused") }
+
+// TestJG01OwnerApprovesAndDeniesThroughTheCLI is journey G over the real socket: a task held for the owner runs
+// only after `parley-cli approve <id>`, is rejected after `approve -deny <id>`, and the MCP server cannot approve.
+func TestJG01OwnerApprovesAndDeniesThroughTheCLI(t *testing.T) {
+	b := &holdBot{}
+	g, err := approval.New(approval.Config{Bot: b, Mode: approval.Owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := daemonWith(t, g.Methods())
+	hold := func(n byte, text string) <-chan error {
+		ch := make(chan error, 1)
+		go func() {
+			_, err := g.Handle(context.Background(), bot.Task{ID: [16]byte{n}, Caller: "dev-2", Owner: "ann@example.com", Content: []byte(text)}, quietSession{})
+			ch <- err
+		}()
+		return ch
+	}
+	waitFor := func(n int) {
+		for i := 0; i < 2000 && len(g.List()) != n; i++ {
+			time.Sleep(time.Millisecond)
+		}
+		if len(g.List()) != n {
+			t.Fatalf("%d tasks never waited", n)
+		}
+	}
+
+	ch := hold(1, "run the tests\x1b[2J")
+	waitFor(1)
+	code, out, errw := run(t, home, "", "approve")
+	if code != 0 || !strings.Contains(out, "run the tests.[2J") || strings.Contains(out, "\x1b") || !strings.Contains(errw, "UNTRUSTED") {
+		t.Fatalf("list: %d %q %q", code, out, errw)
+	}
+	id := "01000000000000000000000000000000"
+	if b.ran.Load() != 0 {
+		t.Fatal("ran before approval")
+	}
+	if code, out, errw = run(t, home, "", "approve", id); code != 0 || !strings.Contains(out, `"decision": "approved"`) || errw != "" {
+		t.Fatalf("approve: %d %q %q", code, out, errw)
+	}
+	if err := <-ch; err != nil || b.ran.Load() != 1 {
+		t.Fatalf("after approve: %v ran %d", err, b.ran.Load())
+	}
+	if code, _, errw = run(t, home, "", "approve", id); code != 1 || errw != "error: not_found\n" {
+		t.Fatalf("second approve: %d %q", code, errw)
+	}
+
+	ch = hold(2, "delete everything")
+	waitFor(1)
+	if code, out, _ = run(t, home, "", "approve", "-deny", "02000000000000000000000000000000"); code != 0 || !strings.Contains(out, `"decision": "denied"`) {
+		t.Fatalf("deny: %d %q", code, out)
+	}
+	var f *bot.Failure
+	if err := <-ch; !errors.As(err, &f) || f.Message != approval.TextDenied || b.ran.Load() != 1 {
+		t.Fatalf("after deny: %v ran %d", err, b.ran.Load())
+	}
+	if code, _, errw = run(t, home, "", "approve", "nonsense"); code != 1 || errw != "error: bad_params\n" {
+		t.Fatalf("bad id: %d %q", code, errw)
+	}
+
+	// A model that talks MCP cannot approve its own work: there is no such tool.
+	in := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"approve","arguments":{"task_id":"` + id + `"}}}` + "\n" +
+		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}` + "\n"
+	_, out, _ = run(t, home, in, "mcp")
+	if strings.Contains(out, `"name":"approve"`) || strings.Contains(out, `"name":"deny"`) || strings.Contains(out, `"name":"approvals"`) {
+		t.Fatalf("approval is reachable through MCP: %s", out)
+	}
+}
+
+func TestJG01NoAnswerRejectsTheTask(t *testing.T) {
+	b := &holdBot{}
+	g, _ := approval.New(approval.Config{Bot: b, Mode: approval.Owner, Timeout: 30 * time.Millisecond})
+	_, err := g.Handle(context.Background(), bot.Task{ID: [16]byte{3}}, quietSession{})
+	var f *bot.Failure
+	if !errors.As(err, &f) || f.Message != approval.TextTimedOut || b.ran.Load() != 0 {
+		t.Fatalf("%v ran %d", err, b.ran.Load())
 	}
 }
