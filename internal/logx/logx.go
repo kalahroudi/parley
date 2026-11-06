@@ -25,7 +25,7 @@ const maxIDLen = 64
 // Keys is the allowlist of field names.
 var Keys = map[string]bool{
 	"tenant": true, "device": true, "bot": true, "task": true, "context": true,
-	"prekey": true, "request": true, "seq": true,
+	"prekey": true, "request": true, "seq": true, "tool": true, "call": true,
 	"state": true, "type": true, "retention": true,
 	"size": true, "bucket": true, "count": true, "component": true,
 	"at": true, "issued_at": true, "expires_at": true, "deadline": true,
@@ -40,6 +40,11 @@ var States = map[string]bool{
 	"TASK":                true, "STATUS": true, "INPUT_REQUIRED": true, "RESULT": true,
 	"ERROR": true, "CANCEL": true,
 	"strict": true, "queued": true,
+	// The owner's approvals (internal/approval) and tool calls (internal/toolgate): what happened, never to what.
+	"APPROVAL_WAITING": true, "APPROVAL_APPROVED": true, "APPROVAL_DENIED": true, "APPROVAL_NO_ANSWER": true, "APPROVAL_REFUSED": true,
+	"TOOL_REQUESTED": true, "TOOL_APPROVED": true, "TOOL_DENIED": true, "TOOL_REFUSED": true, "TOOL_NO_ANSWER": true,
+	"TOOL_GRANTED": true, "TOOL_GRANT_USED": true, "TOOL_REVOKED": true, "TOOL_RAN": true, "TOOL_FAILED": true,
+	"TOOL_TIMEOUT": true, "TOOL_CANCELED": true,
 }
 
 // Field is one log attribute. It can only be built by ID, State, Size or Time.

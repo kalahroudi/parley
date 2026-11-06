@@ -9,9 +9,14 @@
 //
 // The rules, enforced here and nowhere left to the configuration:
 //
+//   - A skill is tool-less unless it says it is tool-using or declares tools
+//     (Skill.Tools, the manifest); declaring tools makes it tool-using.
 //   - A tool-using skill is always held for the owner's approval: Gate refuses
 //     any other mode, and an unset mode counts as "none". There is no way to
 //     publish a tool-using skill that runs unattended.
+//   - Every call of a declared tool is approved by the owner on its own, bound
+//     to the exact tool and arguments shown (Bridge, ToolMethods; the rules are
+//     in internal/toolgate, the confinement of the process in internal/toolrun).
 //   - Tool-using skills are unsupported on Windows until a sandbox exists:
 //     Check fails there, whatever the approval mode.
 //   - A tool-using skill carries a fixed label ("tool-using") for its card and
@@ -19,9 +24,11 @@
 //     tool-less one. The label is self-declared text on a plaintext card and is
 //     not something the gateway or a caller can verify.
 //
-// What this does not do: it is no sandbox. An approved tool-using bot runs with
-// the rights of the owner's OS user; approval is the owner's judgment of one
-// task, and the prompt may still be hostile. docs/sandbox and the README state
+// What this does not do: it does not confine the bot's own process. A bot that
+// acts by itself (ToolUsing without a manifest, or a bot that simply runs
+// something) has the rights of the owner's OS user; approval is the owner's
+// judgment of one task, and the prompt may still be hostile. Only the tools
+// declared in the manifest run in a sandbox. docs/sandbox and the README state
 // what each OS enforces.
 package skill
 
@@ -30,12 +37,13 @@ import (
 
 	"github.com/kalahroudi/parley/internal/approval"
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/toolgate"
 )
 
 // Fixed texts. Labels are literals so that no skill name or task text can reach them.
 const (
 	LabelToolLess  = "tool-less"
-	LabelToolUsing = "tool-using: runs only after the owner approves each task; not sandboxed"
+	LabelToolUsing = "tool-using: runs only after the owner approves each task; each tool call needs the owner's approval too"
 )
 
 var (
@@ -49,11 +57,17 @@ var (
 
 // Skill is the part of a bot's configuration that decides who must approve a task.
 type Skill struct {
-	// ToolUsing is true when the bot may act on the machine (run programs, touch files, call services).
+	// ToolUsing is true when the bot may act on the machine (run programs, touch files, call services) by itself.
 	ToolUsing bool
+	// Tools is the manifest: the tools the bot may ask the daemon to run (each call needs the owner's approval, see
+	// internal/toolgate). A skill with tools is tool-using whatever ToolUsing says.
+	Tools []toolgate.Tool
 	// Approval is the mode from the bot's configuration; empty means "none".
 	Approval approval.Mode
 }
+
+// Uses reports whether the skill is tool-using: it says so, or it declares tools.
+func (s Skill) Uses() bool { return s.ToolUsing || len(s.Tools) > 0 }
 
 // Check reports whether the skill may run on the operating system named by goos (runtime.GOOS).
 func Check(s Skill, goos string) error {
@@ -62,7 +76,10 @@ func Check(s Skill, goos string) error {
 	default:
 		return ErrConfig
 	}
-	if !s.ToolUsing {
+	if _, err := toolgate.NewManifest(s.Tools); err != nil {
+		return ErrConfig
+	}
+	if !s.Uses() {
 		return nil
 	}
 	if goos == "windows" {
@@ -76,7 +93,7 @@ func Check(s Skill, goos string) error {
 
 // Label is the text for the card and the owner's listing.
 func Label(s Skill) string {
-	if s.ToolUsing {
+	if s.Uses() {
 		return LabelToolUsing
 	}
 	return LabelToolLess

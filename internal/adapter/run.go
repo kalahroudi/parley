@@ -52,17 +52,11 @@ func RunContained(ctx context.Context, cmd *exec.Cmd, limit int) (RunResult, err
 	out, _ := io.ReadAll(io.LimitReader(stdout, int64(limit)+1)) // a read error is the command being killed: the exit tells
 	res := RunResult{Output: out}
 	if len(out) > limit {
-		res.Output, res.Truncated = out[:limit], true
-		p.terminate()
+		res.Output, res.Truncated = out[:limit], true // reap kills it
 	}
-	err := p.reap()
-	var ee *exec.ExitError
-	switch {
-	case ctx.Err() != nil:
-		res.Exit = -1
-	case errors.As(err, &ee):
-		res.Exit = ee.ExitCode() // -1 if a signal ended it
-	case err != nil:
+	_ = p.reap()
+	res.Exit = cmd.ProcessState.ExitCode() // -1 if a signal ended it (set once Wait has returned, whatever it returned)
+	if ctx.Err() != nil {
 		res.Exit = -1
 	}
 	return res, ctx.Err()

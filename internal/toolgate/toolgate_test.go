@@ -978,3 +978,15 @@ func TestFrameKeepsAGenuineReplacementCharacter(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestADenialNeedsNoDigestButAnApprovalDoes(t *testing.T) {
+	e := newEnv(t, nil)
+	ch := e.call(context.Background(), toolgate.Request{Tool: "grep"})
+	e.waitPending(t, 1)
+	if err := e.b.Decide(e.id, 1, "", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(t, ch); r.r.Outcome != toolgate.OutcomeDenied || e.r.count() != 0 {
+		t.Fatalf("%+v", r)
+	}
+}

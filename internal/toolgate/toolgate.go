@@ -575,7 +575,7 @@ func (b *Broker) End(task [16]byte) {
 	}
 }
 
-// Decide records the owner's answer to the call task/call. digest must be the one the owner was shown.
+// Decide records the owner's answer to the call task/call. An approval must carry the digest the owner was shown.
 func (b *Broker) Decide(task [16]byte, call int, digest string, approve bool, scope Scope) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -583,7 +583,7 @@ func (b *Broker) Decide(task [16]byte, call int, digest string, approve bool, sc
 	if e == nil || e.decided || !b.cfg.Now().Before(e.deadline) {
 		return ErrNotPending
 	}
-	if e.digest != digest {
+	if approve && e.digest != digest { // a denial can run nothing, so it needs no proof of what was shown
 		return ErrDigest
 	}
 	if scope == "" {

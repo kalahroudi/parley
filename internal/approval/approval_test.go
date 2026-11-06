@@ -575,3 +575,56 @@ func TestAnExpiredTaskIsNotListed(t *testing.T) {
 	cancel()
 	get(t, ch)
 }
+
+// auditLog records the Audit calls.
+type auditLog struct {
+	mu sync.Mutex
+	l  []string
+}
+
+func (a *auditLog) add(id [16]byte, state string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.l = append(a.l, hex.EncodeToString(id[:1])+" "+state)
+}
+
+func (a *auditLog) get() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return strings.Join(a.l, ", ")
+}
+
+// Every step of an approval is audited with the task id and a state, and nothing else.
+func TestApprovalIsAudited(t *testing.T) {
+	a := &auditLog{}
+	g, _ := newGate(t, Config{Mode: Owner, Audit: a.add, Timeout: 100 * time.Millisecond, MaxPending: 1})
+	// approved
+	ch := start(g, context.Background(), task(1, "c", "o", "secret text"), &session{})
+	waitPending(t, g, 1)
+	if o := get(t, start(g, context.Background(), task(2, "d", "p", "x"), &session{})); failureText(t, o.err) != TextTooMany {
+		t.Fatal("not refused")
+	}
+	_ = g.Decide(id(1), true)
+	get(t, ch)
+	// denied
+	ch = start(g, context.Background(), task(3, "c", "o", "x"), &session{})
+	waitPending(t, g, 1)
+	_ = g.Decide(id(3), false)
+	get(t, ch)
+	// no answer
+	get(t, start(g, context.Background(), task(4, "c", "o", "x"), &session{}))
+	want := "02 APPROVAL_REFUSED, 01 APPROVAL_WAITING, 01 APPROVAL_APPROVED, 03 APPROVAL_WAITING, 03 APPROVAL_DENIED, 04 APPROVAL_WAITING, 04 APPROVAL_NO_ANSWER"
+	if got := a.get(); got != want && got != strings.Replace(want, "02 APPROVAL_REFUSED, 01 APPROVAL_WAITING", "01 APPROVAL_WAITING, 02 APPROVAL_REFUSED", 1) {
+		t.Fatalf("audit\n got %s\nwant %s", got, want)
+	}
+	if strings.Contains(a.get(), "secret") {
+		t.Fatal("task text in the audit")
+	}
+	// A transparent gate asks nobody and audits nothing.
+	a2 := &auditLog{}
+	g2, _ := newGate(t, Config{Mode: None, Audit: a2.add})
+	get(t, start(g2, context.Background(), task(5, "c", "o", "x"), &session{}))
+	if a2.get() != "" {
+		t.Fatalf("audit in mode none: %s", a2.get())
+	}
+}

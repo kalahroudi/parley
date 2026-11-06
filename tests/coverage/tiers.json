@@ -6,7 +6,7 @@
     },
     "2": {
       "line": 95,
-      "packages": ["internal/daemon", "internal/root", "internal/trust", "internal/tunnel", "internal/release", "internal/reviewer"]
+      "packages": ["internal/daemon", "internal/root", "internal/trust", "internal/tunnel", "internal/release", "internal/reviewer", "internal/toolrun"]
     },
     "3": {
       "line": 85,

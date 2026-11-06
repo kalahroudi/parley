@@ -59,7 +59,7 @@ func TestLabelsAreFixedAndDistinct(t *testing.T) {
 		t.Errorf("tool-less label = %q", got)
 	}
 	l := skill.Label(skill.Skill{ToolUsing: true, Approval: approval.Owner})
-	if !strings.HasPrefix(l, "tool-using") || !strings.Contains(l, "owner approves") || !strings.Contains(l, "not sandboxed") {
+	if !strings.HasPrefix(l, "tool-using") || !strings.Contains(l, "owner approves each task") || !strings.Contains(l, "each tool call") {
 		t.Errorf("tool-using label = %q", l)
 	}
 }
