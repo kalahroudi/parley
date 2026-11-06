@@ -64,6 +64,12 @@ To see the whole thing work on one machine with nothing to set up, run `make m1`
 
 A bot whose approval mode is `owner` (tool-using skills) does not see a task until you approve it; a bot in mode `none` (tool-less skills) runs every task that passed its allowlist. The caller sees "waiting for the owner's approval" while a task waits.
 
+The rule is enforced in code (`internal/skill`), not left to configuration: a **tool-using** skill (a bot that may run programs, touch files or call services on your machine) cannot be published in mode `none` or with the mode unset, and it carries the label "tool-using: runs only after the owner approves each task; not sandboxed" on its card and in your listing (self-declared text on a plaintext card, not something the gateway verifies). **Tool-using skills are unsupported on Windows** and refused there whatever the mode, until a sandbox exists. Approval is no sandbox: an approved tool-using bot runs with your OS user's rights.
+
+### Reference bot: a tool-less reviewer
+
+`cmd/parley-reviewer` (package `internal/reviewer`) is the template for a bot run by the CLI adapter. It reads a unified diff and lists findings (possible secrets, leftover debug output, TODO markers, trailing whitespace) as `file:line: rule`. It is **tool-less**: a pure function of the task, importing nothing that runs programs or reaches the file system or network, and tests pin that. The task is data: a matched secret is reported by file and line, never echoed, and file names are cut to a safe alphabet. Its mode is `none`. It uses fixed rules, not a model; a model-backed reviewer would speak the same line protocol and must treat the diff as untrusted input too.
+
 ```
 parley-cli approve                 # list the tasks waiting: id, caller, owner, expiry and a short preview
 parley-cli approve <task id>       # show the task, ask you at the terminal, then let it run
@@ -101,7 +107,7 @@ For tool-using bots that Parley does not start, there are operating-system sandb
 | Linux: `docs/sandbox/linux-bwrap.sh <state directory> <bot command>` (needs bubblewrap and unprivileged user namespaces) | Run against a live daemon in CI on Linux, which fails if the sandbox cannot start; the CI log says whether it ran. Outside CI the test says explicitly when it skipped. |
 | Windows: `docs/sandbox/windows.ps1 -Bot <path>` (runs the bot as another user) | **Not verified on a second user account.** Only its syntax and its dry run are tested. No claim of enforcement. |
 
-The unverified profiles are tracked as a follow-up. Tool-using skills are unsupported on Windows until a sandbox exists (T507).
+The unverified profiles are tracked as a follow-up. Tool-using skills are unsupported on Windows until a sandbox exists; the daemon's skill check refuses them there.
 
 ## What Parley does not promise
 
