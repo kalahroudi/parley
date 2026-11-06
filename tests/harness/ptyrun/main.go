@@ -10,17 +10,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"time"
-
-	"github.com/kalahroudi/parley/internal/ptytest"
 )
 
 func main() { os.Exit(serve(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -39,37 +35,10 @@ func serve(args []string, out, errw io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, fs.Arg(0), fs.Args()[1:]...)
-	master, err := ptytest.Start(cmd)
+	exit, err := drive(cmd, out, *after, *typed)
 	if err != nil {
 		fmt.Fprintln(errw, "ptyrun:", err)
 		return 125
 	}
-	defer master.Close()
-	var seen []byte
-	answered := *typed == ""
-	buf := make([]byte, 4096)
-	for {
-		n, err := master.Read(buf)
-		out.Write(buf[:n])
-		if !answered {
-			seen = append(seen, buf[:n]...)
-			if bytes.Contains(seen, []byte(*after)) {
-				answered = true
-				master.WriteString(*typed + "\n")
-			}
-		}
-		if err != nil { // the command ended (end of file, or an I/O error once the terminal's far side is closed)
-			break
-		}
-	}
-	var exit *exec.ExitError
-	switch err := cmd.Wait(); {
-	case err == nil:
-		return 0
-	case errors.As(err, &exit):
-		return exit.ExitCode()
-	default:
-		fmt.Fprintln(errw, "ptyrun:", err)
-		return 125
-	}
+	return exit
 }
