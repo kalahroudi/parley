@@ -98,3 +98,16 @@ func TestWindowsPeerSID(t *testing.T) {
 		t.Error("a pid that does not exist was resolved")
 	}
 }
+
+// A process whose token cannot be opened, and a token whose user cannot be read, are errors, never a match.
+func TestWindowsPeerSIDTokenErrors(t *testing.T) {
+	old := openProcessToken
+	t.Cleanup(func() { openProcessToken = old })
+	openProcessToken = func(windows.Handle, uint32, *windows.Token) error { return errors.New("denied") }
+	if _, err := peerSID(uint32(os.Getpid())); err == nil {
+		t.Error("a token that cannot be opened was accepted")
+	}
+	if _, err := tokenSID(windows.Token(0)); err == nil {
+		t.Error("an invalid token yielded a user")
+	}
+}

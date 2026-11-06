@@ -20,6 +20,8 @@ var errPeer = errors.New("localsock: connection from another user refused")
 var (
 	ownSIDFn  = func() (*windows.SID, error) { return tokenSID(windows.GetCurrentProcessToken()) }
 	peerSIDFn = peerSID
+
+	openProcessToken = windows.OpenProcessToken
 )
 
 // checkPeer accepts only connections from processes whose token belongs to the
@@ -58,7 +60,7 @@ func peerSID(pid uint32) (*windows.SID, error) {
 	}
 	defer windows.CloseHandle(h)
 	var tok windows.Token
-	if err := windows.OpenProcessToken(h, windows.TOKEN_QUERY, &tok); err != nil {
+	if err := openProcessToken(h, windows.TOKEN_QUERY, &tok); err != nil {
 		return nil, err
 	}
 	defer tok.Close()
