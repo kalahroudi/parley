@@ -27,3 +27,5 @@ jobs:
         run: go test -count=1 -v -run 'TestWindowsDaemonLifecycle' ./internal/acceptance
       - name: Key-memory scan (in-process scan, kernel lock state, minidump of the child)
         run: go test -count=1 -v -run 'TestWindowsKeyMemoryScan' ./internal/acceptance
+      - name: Per-user install, autostart and uninstall (docs/windows/install.ps1)
+        run: go test -count=1 -v -run 'TestWindowsInstall' ./internal/acceptance
