@@ -36,6 +36,7 @@ import (
 	"github.com/kalahroudi/parley/internal/adapter"
 	"github.com/kalahroudi/parley/internal/adapter/adaptertest"
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/fsperm"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/mcp"
 )
@@ -177,19 +178,33 @@ func TestSandboxedBotIsGivenNoWayToTheLocalSocket(t *testing.T) {
 // The socket and its directory are closed to other OS users on a real daemon (the
 // kernel-attested uid check is in internal/localsock's tests).
 func TestDaemonSocketIsClosedToOtherUsers(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows uses a protected-DACL directory; its limits are pinned by TestPending_WindowsDaemonPeerRestriction")
-	}
 	g := newPipeGW(t)
 	n := g.startOK("sbx2", nodeOpts{})
 	sock := n.dirs.SocketPath()
+	dir := filepath.Dir(sock)
+	// On every platform the directory passes the same check the daemon makes at each start (owner-only mode on
+	// Unix, a protected DACL for the current user, SYSTEM and Administrators on Windows).
+	if err := fsperm.CheckDir(dir); err != nil {
+		t.Errorf("the socket directory is not private: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return // the Unix modes below do not exist there; the peer-check gap is pinned by TestPending_WindowsDaemonPeerRestriction
+	}
 	si, err := os.Stat(sock)
 	if err != nil || si.Mode().Perm() != 0o600 || si.Mode()&os.ModeSocket == 0 {
 		t.Errorf("socket: %v %v", si, err)
 	}
-	di, err := os.Stat(filepath.Dir(sock))
+	di, err := os.Stat(dir)
 	if err != nil || di.Mode().Perm() != 0o700 {
 		t.Errorf("socket directory: %v %v", di, err)
+	}
+	// The check is not vacuous: a directory open to others is refused.
+	open := t.TempDir()
+	if err := os.Chmod(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if fsperm.CheckDir(open) == nil {
+		t.Error("fsperm accepted a world-readable directory")
 	}
 }
 
