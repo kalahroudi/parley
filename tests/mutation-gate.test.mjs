@@ -92,7 +92,7 @@ test("CI runs the mutation parts as separate jobs with their own time limits", (
   assert.deepEqual(Object.keys(jobs).sort(), ["mutation-changed", "mutation-crash-points", "mutation-os", "test", "workflows"]);
   assert.ok(!/mutation\.sh|malgw-mutations\.sh/.test(jobs.test), "the test job must not run mutation");
   const want = {
-    "mutation-changed": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /runs-on: ubuntu-latest/, /npm ci/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
+    "mutation-changed": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /MUTATION_PART: \$\{\{ matrix\.part \}\}/, /part: "go:0\/4"/, /part: "go:1\/4"/, /part: "go:2\/4"/, /part: "go:3\/4"/, /part: "ts"/, /runs-on: ubuntu-latest/, /npm ci/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
     "mutation-os": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /MUTATION_TS: "0"/, /os: \[macos-latest, windows-latest\]/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
     "mutation-crash-points": [/scripts\/malgw-mutations\.sh/, /runs-on: ubuntu-latest/],
   };

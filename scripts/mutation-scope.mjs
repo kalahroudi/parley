@@ -21,7 +21,23 @@ const git = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio
 // `owns(pkg)` says whether this runner owns any Go file of the package (see mutation-gate.mjs): a runner has
 // nothing to judge in a package whose files all belong to an earlier one, so it skips it, which keeps the
 // macOS and Windows runs to the few packages with OS-specific files.
-export function select({ scope, base = "origin/main", pkgs: all, files, cwd = ".", owns = () => true }) {
+export function select({ scope, base = "origin/main", pkgs: all, files, cwd = ".", owns = () => true, part = "" }) {
+  return take(choose({ scope, base, pkgs: all, files, cwd, owns }), part);
+}
+
+// `part` splits one run over several jobs, so that none is held up by the others or hits a job's time limit: "" is
+// everything, "ts" only the TypeScript files, "go:i/n" the Go packages at positions i, i+n, i+2n, ... of the selected
+// list (i from 0) and no TypeScript. The parts together are exactly the whole.
+export function take(r, part) {
+  if (!part) return r;
+  if (part === "ts") return { ...r, packages: [] };
+  const m = /^go:(\d+)\/(\d+)$/.exec(part);
+  if (!m || Number(m[2]) < 1 || Number(m[1]) >= Number(m[2])) throw new Error(`MUTATION_PART must be empty, ts or go:i/n with i < n, not ${part}`);
+  const [i, n] = [Number(m[1]), Number(m[2])];
+  return { ...r, files: [], packages: r.packages.filter((_, k) => k % n === i) };
+}
+
+function choose({ scope, base, pkgs: all, files, cwd, owns }) {
   const pkgs = all.filter(owns);
   const run = (...a) => git(cwd, ...a);
   const full = (reason) => ({ scope: "all", reason, packages: pkgs, files });
@@ -61,7 +77,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const files = JSON.parse(readFileSync("tests/coverage/gateway-tier1.json", "utf8")).files;
   const [goos, goarch] = execFileSync("go", ["env", "GOOS", "GOARCH"], { encoding: "utf8" }).split("\n");
   try {
-    const r = select({ scope: process.argv[2] ?? "all", base: process.argv[3], pkgs, files, owns: (p) => owned(p, { goos, goarch }).size > 0 });
+    const r = select({ scope: process.argv[2] ?? "all", base: process.argv[3], part: process.argv[4] ?? "", pkgs, files, owns: (p) => owned(p, { goos, goarch }).size > 0 });
     console.error(`mutation scope: ${r.scope} (${r.reason})`);
     console.log(JSON.stringify(r));
   } catch (e) {
