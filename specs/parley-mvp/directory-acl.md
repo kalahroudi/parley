@@ -16,7 +16,7 @@ There are no allow or deny rules, so no precedence between them. A card has one 
 4. `groups`: visible only if the viewer is in a listed group that exists now; deleted, renamed, empty and unknown groups match nobody
 5. `private`, or any unknown or malformed mode: hidden
 
-Identities and group names compare case-insensitively (names are trimmed). Matrix: `canSee matrix` in `gateway/test/acl.test.ts`; lifecycle (delete, rename, empty, unknown group) in `directory.test.ts`. The end-to-end matrix against a daemon allowlist is T307.
+Identities and group names compare case-insensitively (names are trimmed). Matrix: `canSee matrix` in `gateway/test/acl.test.ts`; lifecycle (delete, rename, empty, unknown group) in `directory.test.ts`. The whole matrix (viewer x card x group state, through `find`, `resolve` and the prekey relay, against an independent oracle) is `gateway/test/acl.acceptance.test.ts`; the end-to-end matrix with real daemons applying their own allowlist is `tests/acl-matrix.test.mjs` (T307): a card the gateway shows grants nothing (the daemon refuses), and a card it hides never reaches the daemon.
 
 ## Isolation
 

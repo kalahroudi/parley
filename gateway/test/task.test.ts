@@ -765,8 +765,5 @@ describe("retention", () => {
   });
 });
 
-// Parts of the retention acceptance that need the whole system (daemon, R2 file store) come with T307.
-describe("T307 retention deletion acceptance", () => {
-  it.todo("T307: a daemon-acknowledged result is gone from Task DO storage and the encrypted-file R2 objects are deleted and verified absent");
-  it.todo("T307: Queued TTL deletion with a real daemon reconnect after the TTL receives nothing");
-});
+// Retention deletion at acknowledgment and TTL, through the whole gateway: retention.acceptance.test.ts (T307). What it cannot
+// cover yet is named in tests/pending-t307.test.mjs.
