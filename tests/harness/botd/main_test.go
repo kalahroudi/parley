@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,17 +76,17 @@ func TestRunRefusesBadStartups(t *testing.T) {
 func TestRunServesUntilCanceled(t *testing.T) {
 	dir := shortDir(t)
 	writeConfig(t, dir, "http://127.0.0.1:1")
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	var log strings.Builder
+	log := &syncLog{started: cancel}
 	err := run(ctx, []string{"-owner", "svc-ci", "-command", self(t)}, func(k string) string {
 		if k == "PARLEY_HOME" {
 			return dir
 		}
 		return ""
-	}, &log)
+	}, log)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%v: %s", err, log.String())
 	}
 	if !strings.Contains(log.String(), "parleyd started") {
 		t.Fatalf("the daemon did not start: %q", log.String())
@@ -112,11 +113,39 @@ func TestServeReportsFailureAndStopsWhenTold(t *testing.T) {
 		t.Fatalf("code %d, output %q", code, out.String())
 	}
 	writeConfig(t, dir, "http://127.0.0.1:1")
-	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	// Stopped once it says it started, not after a fixed time: a slow runner may need seconds to start.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if code := serve(ctx, []string{"-command", self(t)}, env, io.Discard); code != 0 {
-		t.Fatalf("a daemon told to stop exited with %d", code)
+	log := &syncLog{started: cancel}
+	if code := serve(ctx, []string{"-command", self(t)}, env, log); code != 0 {
+		t.Fatalf("a daemon told to stop exited with %d: %s", code, log.String())
 	}
+	if !strings.Contains(log.String(), "parleyd started") {
+		t.Fatalf("the daemon did not start: %q", log.String())
+	}
+}
+
+// syncLog is a log the daemon writes from several goroutines; it calls started the first time the daemon says so.
+type syncLog struct {
+	mu      sync.Mutex
+	b       strings.Builder
+	started func()
+}
+
+func (l *syncLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n, err := l.b.Write(p)
+	if strings.Contains(l.b.String(), "parleyd started") {
+		l.started()
+	}
+	return n, err
+}
+
+func (l *syncLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 func TestResponderFailsBeforeEnrollment(t *testing.T) {
