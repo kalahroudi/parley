@@ -70,10 +70,11 @@ const (
 // What the caller sees. The first is a status while the task waits; the others
 // end the task.
 const (
-	TextWaiting  = "waiting for the owner's approval"
-	TextDenied   = "rejected: the owner did not approve the task"
-	TextTimedOut = "rejected: no approval within the time allowed"
-	TextTooMany  = "rejected: too many tasks are waiting for approval"
+	TextWaiting   = "waiting for the owner's approval"
+	TextDenied    = "rejected: the owner did not approve the task"
+	TextTimedOut  = "rejected: no approval within the time allowed"
+	TextTooMany   = "rejected: too many tasks are waiting for approval"
+	TextDuplicate = "rejected: a task with this id is already waiting for approval"
 )
 
 // Error codes the owner's commands receive (fixed identifiers).
@@ -159,9 +160,9 @@ func (g *Gate) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, e
 	if g.cfg.Mode == None {
 		return g.cfg.Bot.Handle(ctx, t, s)
 	}
-	e, ok := g.enter(t)
-	if !ok {
-		return nil, &bot.Failure{Message: TextTooMany}
+	e, why := g.enter(t)
+	if why != "" {
+		return nil, &bot.Failure{Message: why}
 	}
 	defer g.leave(e)
 	// Best effort: the caller learns the task is waiting for a person. If the
@@ -187,12 +188,17 @@ func (g *Gate) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, e
 	return nil, &bot.Failure{Message: TextDenied}
 }
 
-// enter records a waiting task, or refuses it when too many wait.
-func (g *Gate) enter(t bot.Task) (*entry, bool) {
+// enter records a waiting task, or returns the text that refuses it: too many
+// wait, or a task with the same id already waits (it must not replace the entry
+// the owner was shown, nor have its own end remove it).
+func (g *Gate) enter(t bot.Task) (*entry, string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.waiting[t.ID] != nil {
+		return nil, TextDuplicate
+	}
 	if len(g.waiting) >= g.cfg.MaxPending {
-		return nil, false
+		return nil, TextTooMany
 	}
 	same := 0
 	for _, w := range g.waiting {
@@ -201,14 +207,14 @@ func (g *Gate) enter(t bot.Task) (*entry, bool) {
 		}
 	}
 	if same >= g.cfg.MaxPerCaller {
-		return nil, false
+		return nil, TextTooMany
 	}
 	now := g.cfg.Now()
 	e := &entry{id: t.ID, caller: t.Caller, owner: t.Owner, received: now, deadline: now.Add(g.cfg.Timeout), result: make(chan decision, 1)}
 	n := min(len(t.Content), MaxPreview)
 	e.preview, e.more = append([]byte(nil), t.Content[:n]...), len(t.Content) > n
 	g.waiting[t.ID] = e
-	return e, true
+	return e, ""
 }
 
 // leave forgets a task and zeroes its preview.
@@ -266,8 +272,9 @@ func (g *Gate) List() []Pending {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	out := make([]Pending, 0, len(g.waiting))
+	now := g.cfg.Now()
 	for _, e := range g.waiting {
-		if !e.decided {
+		if !e.decided && now.Before(e.deadline) { // past the deadline Decide refuses, so it is not offered
 			out = append(out, Pending{TaskID: hex.EncodeToString(e.id[:]), Caller: printable(e.caller, maxIdentity), Owner: printable(e.owner, maxIdentity),
 				Received: e.received, Expires: e.deadline, Preview: printable(string(e.preview), MaxPreview), Truncated: e.more})
 		}

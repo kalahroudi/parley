@@ -297,8 +297,8 @@ func TestAFailedStatusSendDoesNotStopTheWait(t *testing.T) {
 
 func TestTheTimerLosingTheRaceToAnApprovalStillRunsTheTask(t *testing.T) {
 	g, r := newGate(t, Config{Mode: Owner})
-	e, ok := g.enter(task(1, "c", "o", "x"))
-	if !ok {
+	e, why := g.enter(task(1, "c", "o", "x"))
+	if why != "" {
 		t.Fatal("refused")
 	}
 	if err := g.Decide(id(1), true); err != nil {
@@ -349,7 +349,7 @@ func TestLimitsOnWaitingTasks(t *testing.T) {
 		get(t, c)
 	}
 	// Room again once they ended.
-	if _, ok := g.enter(task(7, "dev-a", "ann", "x")); !ok {
+	if _, why := g.enter(task(7, "dev-a", "ann", "x")); why != "" {
 		t.Fatal("no room after the others ended")
 	}
 }
@@ -534,4 +534,44 @@ func FuzzPrintable(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestADuplicateTaskIDIsRefusedAndKeepsTheFirstEntry(t *testing.T) {
+	g, r := newGate(t, Config{Mode: Owner})
+	ctx, cancel := context.WithCancel(context.Background())
+	first := start(g, ctx, task(1, "c", "o", "first"), &session{})
+	waitPending(t, g, 1)
+	o := get(t, start(g, context.Background(), task(1, "c", "o", "second"), &session{}))
+	if failureText(t, o.err) != TextDuplicate {
+		t.Fatalf("duplicate: %v", o.err)
+	}
+	l := g.List()
+	if len(l) != 1 || l[0].Preview != "first" {
+		t.Fatalf("the entry the owner saw was replaced or removed: %+v", l)
+	}
+	if err := g.Decide(id(1), true); err != nil {
+		t.Fatal(err)
+	}
+	if o := get(t, first); o.err != nil || string(o.res) != "ran: first" || r.calls.Load() != 1 {
+		t.Fatalf("%v %q", o.err, o.res)
+	}
+	cancel()
+}
+
+func TestAnExpiredTaskIsNotListed(t *testing.T) {
+	c := &clock{t: time.Unix(1000, 0)}
+	g, _ := newGate(t, Config{Mode: Owner, Now: c.now, Timeout: time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := start(g, ctx, task(1, "c", "o", "x"), &session{})
+	waitPending(t, g, 1)
+	c.add(time.Hour - time.Second)
+	if len(g.List()) != 1 {
+		t.Fatal("not listed a second before the deadline")
+	}
+	c.add(time.Second)
+	if len(g.List()) != 0 {
+		t.Fatal("listed at the deadline, where Decide refuses")
+	}
+	cancel()
+	get(t, ch)
 }
