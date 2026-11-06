@@ -1,0 +1,27 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Windows daemon (T505)
+
+# The real parleyd on a real Windows runner, apart from the full CI run so that it answers in minutes: shutdown on
+# CTRL_BREAK with the lock and socket released, the key-memory scan, and the per-user install with autostart. The full
+# suite (including the M1 echo through the real gateway) is ci.yml's Windows job; these tests run there too.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Daemon lifecycle (CTRL_BREAK, single instance, restart)
+        run: go test -count=1 -v -run 'TestWindowsDaemonLifecycle' ./internal/acceptance
