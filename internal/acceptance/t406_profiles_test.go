@@ -141,8 +141,10 @@ func TestWindowsSandboxScriptParsesAndDryRuns(t *testing.T) {
 		t.Skip("PowerShell's parser is checked on the Windows runners")
 	}
 	script := sandboxFile(t, "windows.ps1")
-	parse := `$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$t,[ref]$e);if($e.Count){$e|%{$_.Message};exit 1}`
-	if out, err := exec.Command("powershell", "-NoProfile", "-Command", parse, script).CombinedOutput(); err != nil {
+	parse := `$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($env:PARLEY_PS1,[ref]$t,[ref]$e);if($e.Count){$e|%{$_.Message};exit 1}`
+	check := exec.Command("powershell", "-NoProfile", "-Command", parse)
+	check.Env = append(os.Environ(), "PARLEY_PS1="+script)
+	if out, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("does not parse: %v: %s", err, out)
 	}
 	run := func(args ...string) (string, error) {
