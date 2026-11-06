@@ -13,6 +13,7 @@ import (
 	"github.com/kalahroudi/parley/internal/reviewer"
 )
 
+//cover:ignore main only wires standard input, standard output and os.Exit to run, which is tested; the built binary runs in internal/acceptance (T507)
 func main() { os.Exit(run(os.Stdin, os.Stdout)) }
 
 func run(in io.Reader, out io.Writer) int {
