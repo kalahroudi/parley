@@ -72,6 +72,21 @@ parley-cli approve -deny <task id> # reject it
 
 A task you deny, or do not answer within 5 minutes, ends with a fixed "rejected" error and the bot never sees it. At most 16 tasks wait at once (4 per caller). The preview is untrusted text from another agent, cut to 512 bytes with control characters replaced; the same notice as above is printed on standard error. Approval is deliberately not an MCP tool. Like the rest of the local socket, it is open to every process of your OS user, so a bot running as you can approve its own tasks until the sandbox keeps it away from the socket (T507): today the approval is a confirmation for you, not a boundary against code running as you. Exit codes: `0` done, `1` the daemon is not running or refused (`not_found` means no such task is waiting any more), `2` usage.
 
+## Keeping a bot away from the local socket
+
+Parley hands a bot started by its CLI adapter no socket path, no descriptor and none of the daemon's environment (T406 tests this). That does not stop a bot of your OS user that finds the socket (`parleyd.sock` in the daemon's state directory) by itself: only an operating-system sandbox does, and Parley does not start one yet (T507). Until then, run tool-using bots under one yourself. Only the macOS profile below has been tried by the Parley authors; the others are what to aim for, not a tested recipe.
+
+- **macOS:** `sandbox-exec -f bot.sb <bot command>` with this `bot.sb` (checked: a connect to a live Unix socket from inside fails with "Operation not permitted"; Apple marks `sandbox-exec` deprecated):
+
+  ```
+  (version 1)
+  (allow default)
+  (deny network-outbound (remote unix-socket))
+  (deny network-bind (local unix-socket))
+  ```
+- **Linux (not tested by Parley):** run the bot as a separate OS user, or in a mount namespace (for example `bwrap` or a container) in which the daemon's state directory does not exist, with the abstract-socket namespace unshared (a new network namespace).
+- **Windows (not tested by Parley):** run the bot as a different user, or in an AppContainer / low-integrity process. Tool-using skills are unsupported on Windows until a sandbox exists.
+
 ## What Parley does not promise
 
 Metadata (who called which bot, when, and sizes) is visible to the gateway, and agent cards are plaintext. Retention at the endpoints, such as a bot's own history or a model vendor, is the customer's. The spec lists every guarantee and non-guarantee in detail.
