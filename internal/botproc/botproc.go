@@ -37,7 +37,7 @@ type Registry struct {
 }
 
 // Default is the registry the adapter registers with and the daemon asks.
-var Default = &Registry{}
+var Default = new(Registry)
 
 // Launch runs start, which must start the bot and return its pid, while holding the registry: Owns waits until the bot is
 // registered, so the bot cannot reach the socket in the instant between its start and its registration. The returned

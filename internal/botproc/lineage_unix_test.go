@@ -137,3 +137,66 @@ func TestOwnsWalkIsBounded(t *testing.T) {
 		t.Errorf("pid 0: %v %v", own, err)
 	}
 }
+
+func withTree(t *testing.T, tree func(pid int) (info, error)) {
+	t.Helper()
+	old := lookupFn
+	lookupFn = tree
+	t.Cleanup(func() { lookupFn = old })
+}
+
+// The walk looks at no more than maxDepth processes, however long or cyclic the chain, and never at init.
+func TestOwnsWalkLooksAtMaxDepthProcessesAtMost(t *testing.T) {
+	var looked []int
+	withTree(t, func(pid int) (info, error) {
+		looked = append(looked, pid)
+		return info{ppid: pid + 1, groups: []int{-1}}, nil // an endless chain upwards
+	})
+	if own, err := owns(map[int]int{5000: 1}, 2); own || err != nil {
+		t.Fatalf("%v %v", own, err)
+	}
+	if len(looked) != maxDepth {
+		t.Errorf("looked at %d processes, want %d", len(looked), maxDepth)
+	}
+	looked = nil
+	withTree(t, func(pid int) (info, error) {
+		looked = append(looked, pid)
+		return info{ppid: pid, groups: []int{-1}}, nil
+	}) // a cycle
+	if own, err := owns(map[int]int{5000: 1}, 2); own || err != nil || len(looked) != maxDepth {
+		t.Errorf("a cycle: %v %v after %d lookups", own, err, len(looked))
+	}
+}
+
+func TestOwnsWalkStopsBeforeInit(t *testing.T) {
+	var looked []int
+	withTree(t, func(pid int) (info, error) {
+		looked = append(looked, pid)
+		return info{ppid: 1, groups: []int{-1}}, nil
+	})
+	if own, err := owns(map[int]int{5000: 1}, 2); own || err != nil {
+		t.Fatalf("%v %v", own, err)
+	}
+	if len(looked) != 1 || looked[0] != 2 {
+		t.Errorf("looked at %v; init must not be looked at", looked)
+	}
+}
+
+// A bot's id is found among the groups of a process, and as an ancestor.
+func TestOwnsFindsTheBotInGroupsAndParents(t *testing.T) {
+	withTree(t, func(pid int) (info, error) {
+		switch pid {
+		case 20:
+			return info{ppid: 21, groups: []int{-1, 700}}, nil // in the bot's group
+		case 30:
+			return info{ppid: 31, groups: []int{-1}}, nil
+		}
+		return info{ppid: 700, groups: []int{-1}}, nil // 31's parent is the bot
+	})
+	roots := map[int]int{700: 1}
+	for pid, want := range map[int]bool{20: true, 30: true, 40: true, 700: true} {
+		if own, err := owns(roots, pid); own != want || err != nil {
+			t.Errorf("%d: %v %v", pid, own, err)
+		}
+	}
+}

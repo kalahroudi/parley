@@ -52,10 +52,7 @@ func AskOn(rw io.ReadWriter, prompt string) (bool, error) {
 	if _, err := fmt.Fprint(rw, prompt); err != nil {
 		return false, ErrNoTerminal
 	}
-	line, err := bufio.NewReaderSize(io.LimitReader(rw, maxAnswer), maxAnswer).ReadString('\n')
-	if err != nil && line == "" {
-		return false, nil
-	}
+	line, _ := bufio.NewReaderSize(io.LimitReader(rw, maxAnswer), maxAnswer).ReadString('\n') // end of input: line is empty, which is a no
 	switch strings.ToLower(strings.TrimSpace(line)) {
 	case "y", "yes":
 		return true, nil

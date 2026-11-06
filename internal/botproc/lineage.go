@@ -14,12 +14,15 @@ type info struct {
 
 // owns walks pid and its parents. roots holds the pid of each running bot, which is also the id of the session or
 // process group it was started in.
+// lookupFn is lookup, replaceable so that the walk can be tested on trees no real process list gives (very deep, cyclic).
+var lookupFn = lookup
+
 func owns(roots map[int]int, pid int) (bool, error) {
 	for depth := 0; depth < maxDepth && pid > 1; depth++ {
 		if _, ok := roots[pid]; ok {
 			return true, nil
 		}
-		in, err := lookup(pid)
+		in, err := lookupFn(pid)
 		if err != nil {
 			return false, ErrUnknown
 		}

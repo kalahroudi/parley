@@ -37,6 +37,20 @@ func TestLookupReadsParentGroupAndSession(t *testing.T) {
 	}
 }
 
+// The edges of the format that are still valid: the shortest line with four fields after the name, and a name that is empty.
+func TestLookupAcceptsTheShortestValidLines(t *testing.T) {
+	for stat, want := range map[string]info{
+		"77 (a) S 1 2 3": {ppid: 1, groups: []int{2, 3}},
+		") S 4 5 6":      {ppid: 4, groups: []int{5, 6}}, // the closing parenthesis is the first byte
+	} {
+		fakeProc(t, 77, stat)
+		in, err := lookup(77)
+		if err != nil || in.ppid != want.ppid || !slices.Equal(in.groups, want.groups) {
+			t.Errorf("%q: %+v %v, want %+v", stat, in, err, want)
+		}
+	}
+}
+
 func TestLookupRefusesWhatItCannotRead(t *testing.T) {
 	for name, stat := range map[string]string{
 		"no such process":  "",
