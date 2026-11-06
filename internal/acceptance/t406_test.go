@@ -65,6 +65,15 @@ func t406Bot(mode string) {
 		}
 		b, _ := json.Marshal(probeReport{Env: env, Args: os.Args[1:], Cwd: cwd, Sockets: openSockets()})
 		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: b})
+	case "dial": // connects to the socket it is told about, as any process of the daemon's user can
+		out := "connected"
+		c, err := net.Dial("unix", os.Getenv("PARLEY_T406_SOCK"))
+		if err != nil {
+			out = "refused"
+		} else {
+			c.Close()
+		}
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: []byte(out)})
 	case "noline": // endless output without a newline
 		buf := []byte(strings.Repeat("A", 1<<16))
 		for {
@@ -449,6 +458,25 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
+// Until T507 (the operating-system sandbox for tool-using skills) is ticked, a bot of the same OS user that is told
+// where the socket is can use it. This test runs, passes and states that limit; it FAILS once T507 is ticked, so the
+// real sandbox assertions must replace it: connecting to the daemon's socket from inside the sandbox fails (unix
+// path, abstract name, a guess of the default location), the sandbox cannot be escaped through the approval command,
+// and Windows refuses tool-using skills until a sandbox exists.
 func TestPending_SandboxKeepsToolUsingSkillsAwayFromTheSocket(t *testing.T) {
-	pending(t, "T507", "a bot of the same OS user can connect to the control socket if it guesses where it is, and can approve its own tasks. When tool-using skills get an operating-system sandbox, assert from inside it that connecting to the daemon's socket (unix path, abstract name, and a descriptor-less guess of the default location) fails, that the sandbox cannot be escaped through the approval command, and that Windows refuses to run tool-using skills until a sandbox exists")
+	b, err := os.ReadFile(filepath.Join("..", "..", "specs", "parley-mvp", "tasks.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskTicked(strings.ReplaceAll(string(b), "\r", ""), "T507") {
+		t.Fatal("T507 is ticked but the sandbox acceptance test is still the placeholder: replace it with assertions made from inside the sandbox")
+	}
+	g := newPipeGW(t)
+	n := g.startOK("sbx5", nodeOpts{})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := t406CLI(t, "dial", t.TempDir(), "PARLEY_T406_SOCK="+n.dirs.SocketPath()).Handle(ctx, t406Task, &countSession{})
+	if err != nil || string(res) != "connected" {
+		t.Fatalf("the documented limit changed (a same-user bot given the path used to connect): %q %v", res, err)
+	}
 }
