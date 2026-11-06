@@ -28,6 +28,7 @@ const token = randomBytes(24).toString("hex");
 const result = { name, bucket, startedAt: new Date().toISOString() };
 
 let failure;
+let call;
 const created = { bucket: false, worker: false };
 try {
   requireOptIn();
@@ -45,7 +46,7 @@ try {
     if (Date.now() - t0 > 90_000) throw new Error(`healthz ${r.status} after 90 s`);
     await new Promise((r) => setTimeout(r, 3000));
   }
-  const call = async (path, body) => {
+  call = async (path, body) => {
     const r = await fetch(`${origin}${path}`, { method: "POST", headers: { "x-probe-token": token, "content-type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(`${path} ${r.status}: ${j.error ?? ""}`);
@@ -62,17 +63,25 @@ try {
   log(`FAILED: ${err.message}`);
 } finally {
   log("cleanup");
-  const step = (what, fn) => {
+  const step = async (what, fn) => {
     try {
-      fn();
+      await fn();
     } catch (err) {
       log(`${what} failed: ${err.message}`);
       failure ??= err;
     }
   };
-  if (created.worker) step("worker delete", () => destroyRetention(name, bucket));
-  if (created.bucket) step("bucket delete", () => deleteBucket(name, bucket));
-  step("verify", () => {
+  // A run that failed midway can leave objects behind, and R2 refuses to delete a bucket that is not empty: empty it
+  // through the Worker while the Worker still exists.
+  if (created.worker && call) {
+    await step("empty bucket", async () => {
+      const keys = (await call("/__r2", { op: "list", prefix: "" })).keys;
+      for (let i = 0; i < keys.length; i += 100) await call("/__r2", { op: "delete", keys: keys.slice(i, i + 100) });
+    });
+  }
+  if (created.worker) await step("worker delete", () => destroyRetention(name, bucket));
+  if (created.bucket) await step("bucket delete", () => deleteBucket(name, bucket));
+  await step("verify", () => {
     result.remainingWorkers = remaining();
     result.remainingBuckets = remainingBuckets(name);
     if (result.remainingWorkers.length || result.remainingBuckets.length) throw new Error(`parley-test-* resources remain: ${JSON.stringify([result.remainingWorkers, result.remainingBuckets])}`);
