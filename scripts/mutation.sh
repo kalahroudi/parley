@@ -20,6 +20,8 @@
 #   MUTATION_SCOPE=changed BASE=origin/main scripts/mutation.sh
 #                                       # only tier 1 packages and files changed
 #                                       # since BASE (pull requests)
+#   MUTATION_PART=ts | go:0/4 ...       # only a part of the selected work (see mutation-scope.mjs), so
+#                                       # that CI can run the parts as jobs of their own
 set -eu
 cd "$(dirname "$0")/.."
 scope=${MUTATION_SCOPE:-all}
@@ -29,7 +31,7 @@ trap 'rm -rf "$out"' EXIT INT TERM
 
 # The scope is chosen by scripts/mutation-scope.mjs, which fails closed: when it cannot
 # prove what changed, it returns everything.
-node scripts/mutation-scope.mjs "$scope" "$base" > "$out/scope.json" || exit 2
+node scripts/mutation-scope.mjs "$scope" "$base" "${MUTATION_PART:-}" > "$out/scope.json" || exit 2
 scope=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope' "$out/scope.json")
 pkgs=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).packages.join(" ")' "$out/scope.json")
 mutate=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).files.map((f) => f.replace(/^gateway\//, "")).join(" ")' "$out/scope.json")

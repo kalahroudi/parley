@@ -97,7 +97,7 @@ func buildPadFileVectors(t *testing.T) padFileVectors {
 	key := bytes.Repeat([]byte{fileVectorKeyByte}, FileKeySize)
 	for _, c := range fileLens {
 		pt := vectorPlaintext(c.n)
-		var ct bytes.Buffer
+		var ct capBuffer
 		if _, _, err := EncryptFile(key, bytes.NewReader(pt), &ct); err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,7 @@ func TestPublishedPadFileVectors(t *testing.T) {
 	key := unhex(t, got.FileKey)
 	for _, v := range got.File {
 		pt := vectorPlaintext(v.PlaintextLen)
-		var ct bytes.Buffer
+		var ct capBuffer
 		sum, size, err := EncryptFile(key, bytes.NewReader(pt), &ct)
 		if err != nil || hex.EncodeToString(sum[:]) != v.PlaintextSHA256 || size != uint64(v.PlaintextLen) ||
 			ct.Len() != v.CiphertextLen || sha(ct.Bytes()) != v.CiphertextSHA {

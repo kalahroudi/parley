@@ -145,35 +145,141 @@ jobs:
         run: node scripts/check-dev-auth.mjs
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
-      # Slow and Linux-only. A pull request mutates only the tier 1 packages and
-      # files it changes (needs the base branch and its history); the full run is
-      # mutation.yml, on every push to main and nightly.
+
+  # Mutation testing is slow, so each part is a job of its own, running in parallel with the tests and with each other, each
+  # with its own time limit (one job holding all three ran into the 90 minute limit of a job). Together they judge exactly
+  # what the single Ubuntu job did, and the ownership rules of scripts/mutation-scope.mjs and scripts/mutation-gate.mjs are unchanged: every Go
+  # file is judged on the runner that owns it, TypeScript and the crash-point mutants are Linux's, and a pull request
+  # mutates only the tier 1 packages and files it changes. The full run, which also fails on a stale allowlist entry,
+  # is mutation.yml, on every push to main and nightly. Job names (for the required checks):
+  #   workflow lint, test (ubuntu-latest), test (macos-latest), test (windows-latest),
+  #   mutation: changed code (linux, go-01) .. (linux, go-12), mutation: changed code (linux, typescript), mutation: this OS's Go files (macos-latest), mutation: this OS's Go files (windows-latest),
+  #   mutation: crash points (linux)
+  # and one stable name that covers them all: all-mutation-gates (require that one, not the list above, which changes
+  # whenever the split changes).
+  mutation-changed:
+    name: "mutation: changed code (linux, ${{ matrix.label }})"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # One job over all the changed tier 1 code died on its runner after 46 minutes whenever the whole of tier 1 was in scope
+    # (a change to the mutation gates or this file puts it all in scope; the nightly full run on main dies the same way),
+    # so the work is split: the Go packages into twelve jobs by position in the selected list (so that a package that kills its runner
+    # shows up alone), and the TypeScript files into one. scripts/mutation-scope.mjs gives each its share (MUTATION_PART); together they are exactly what one job did.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: go-01, part: "go:0/12" }
+          - { label: go-02, part: "go:1/12" }
+          - { label: go-03, part: "go:2/12" }
+          - { label: go-04, part: "go:3/12" }
+          - { label: go-05, part: "go:4/12" }
+          - { label: go-06, part: "go:5/12" }
+          - { label: go-07, part: "go:6/12" }
+          - { label: go-08, part: "go:7/12" }
+          - { label: go-09, part: "go:8/12" }
+          - { label: go-10, part: "go:9/12" }
+          - { label: go-11, part: "go:10/12" }
+          - { label: go-12, part: "go:11/12" }
+          - { label: typescript, part: "ts" }
+    steps:
+      # Full history: the scope is the files changed since the merge base with the base branch.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
       # The history is already complete; this makes sure origin/<base> exists as a ref. If the merge base
       # still cannot be computed, scripts/mutation.sh runs everything instead of skipping.
       - name: Fetch the base branch
-        if: runner.os == 'Linux' && github.event_name == 'pull_request'
         env:
           BASE: ${{ github.base_ref }}
         run: git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
       - name: Mutation testing (tier 1, changed code)
-        if: runner.os == 'Linux' && github.event_name == 'pull_request'
         env:
           MUTATION_SCOPE: changed
+          MUTATION_PART: ${{ matrix.part }}
           BASE: origin/${{ github.base_ref }}
         run: scripts/mutation.sh
-      # Each OS judges the Go files only it builds (lock_windows.go on Windows, and so on): gremlins
-      # parses every file, so on the wrong OS they only show as "not covered". The gate keeps failing
-      # on any not-covered or surviving mutant there (scripts/mutation-gate.mjs). TypeScript is Linux's.
-      - name: Mutation testing (tier 1, this OS's Go files)
-        if: runner.os != 'Linux' && github.event_name == 'pull_request'
+
+  # Each OS judges the Go files only it builds (lock_windows.go on Windows, and so on): gremlins parses every file, so on
+  # the wrong OS they only show as "not covered". The gate keeps failing on any not-covered or surviving mutant there
+  # (scripts/mutation-gate.mjs). TypeScript is Linux's (the job above).
+  mutation-os:
+    name: "mutation: this OS's Go files (${{ matrix.os }})"
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
         shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch the base branch
+        env:
+          BASE: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+      - name: Mutation testing (tier 1, this OS's Go files)
         env:
           MUTATION_SCOPE: changed
           BASE: origin/${{ github.base_ref }}
           MUTATION_TS: "0"
         run: scripts/mutation.sh
-      # Slow and Linux-only: each defence the malicious-gateway and prekey crash
-      # tests exercise is removed in turn and the acceptance suite must go red.
+
+  # Linux only: each defence the malicious-gateway and prekey crash tests exercise is removed in turn and the acceptance
+  # suite must go red. It runs on every push and pull request, as before.
+  mutation-crash-points:
+    name: "mutation: crash points (linux)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Mutation testing (malicious gateway and prekey crash points)
-        if: runner.os == 'Linux'
         run: scripts/malgw-mutations.sh
+
+  # One required check for every mutation job. It fails when a needed job failed, was cancelled or was skipped where it
+  # must have run (a skipped job counts as passing for a required check, which would silently drop a gate): on a pull
+  # request all three must succeed; on a push to main only the crash points run, the changed-code jobs are skipped.
+  all-mutation-gates:
+    name: all-mutation-gates
+    if: always()
+    needs: [mutation-changed, mutation-os, mutation-crash-points]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every mutation job ran and passed
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGED: ${{ needs.mutation-changed.result }}
+          OS: ${{ needs.mutation-os.result }}
+          CRASH: ${{ needs.mutation-crash-points.result }}
+        run: |
+          set -eu
+          echo "event=$EVENT changed=$CHANGED os=$OS crash=$CRASH"
+          want_changed=success
+          [ "$EVENT" = pull_request ] || want_changed=skipped
+          [ "$CRASH" = success ] && [ "$CHANGED" = "$want_changed" ] && [ "$OS" = "$want_changed" ]

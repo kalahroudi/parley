@@ -122,3 +122,28 @@ test("CI lints every workflow with a pinned, checksum-verified actionlint", asyn
   assert.match(ci, /sha256sum -c -\n/);
   assert.match(ci, /actionlint" -color\n/); // no file arguments: every file in .github/workflows
 });
+
+test("mutation scope: the parts of a run together are exactly the whole, each package in one part", async () => {
+  const { take } = await import("../scripts/mutation-scope.mjs");
+  const whole = { scope: "all", reason: "r", packages: ["a", "b", "c", "d", "e", "f", "g"], files: ["x.ts", "y.ts"] };
+  assert.deepEqual(take(whole, ""), whole);
+  const ts = take(whole, "ts");
+  assert.deepEqual([ts.packages, ts.files], [[], ["x.ts", "y.ts"]]);
+  const parts = [0, 1, 2, 3].map((i) => take(whole, `go:${i}/4`));
+  assert.deepEqual(parts.map((p) => p.packages), [["a", "e"], ["b", "f"], ["c", "g"], ["d"]]);
+  assert.ok(parts.every((p) => p.files.length === 0 && p.scope === "all" && p.reason === "r"));
+  assert.deepEqual(parts.flatMap((p) => p.packages).sort(), whole.packages);
+  assert.deepEqual(take(whole, "go:0/1").packages, whole.packages);
+  assert.deepEqual(take({ ...whole, packages: [] }, "go:3/4").packages, []); // an empty share is fine
+  for (const bad of ["go", "go:4/4", "go:0/0", "go:-1/4", "go:a/b", "ts:1", "TS", "go:0/4 "]) {
+    assert.throws(() => take(whole, bad), /MUTATION_PART/, bad);
+  }
+});
+
+test("mutation scope: select applies the part after the scope", async () => {
+  const { select } = await import("../scripts/mutation-scope.mjs");
+  const a = select({ scope: "all", pkgs: ["p", "q", "r"], files: ["f.ts"], part: "go:1/2" });
+  assert.deepEqual([a.packages, a.files], [["q"], []]);
+  const b = select({ scope: "all", pkgs: ["p", "q", "r"], files: ["f.ts"], part: "ts" });
+  assert.deepEqual([b.packages, b.files], [[], ["f.ts"]]);
+});
