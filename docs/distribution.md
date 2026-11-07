@@ -1,5 +1,9 @@
 # Self-update
 
+**Status: updater building blocks, not yet wired, not enabled.** `internal/update` is library code only. Nothing in
+`parleyd` or `parley-cli` calls it, so no installed program updates itself today. What is still owed is listed at the
+end of this page.
+
 Releases are signed with the project's own Ed25519 key (minisign format). Its public half is `release/release.pub`
 and is compiled into the binaries (`release/key.go`); nothing fetched at run time can replace it.
 
