@@ -148,3 +148,29 @@ if [ "$2" = set ]; then cat > "${dir}/$3.value"; echo "$3" >> "${dir}/set.log"; 
   // A second run refuses to overwrite the key.
   assert.notEqual(spawnSync("sh", ["scripts/release-setup.sh", "--no-commit"], { cwd: root, env: e }).status, 0);
 });
+
+test("release.sh signs a manifest header with the version and a validity window", opts, () => {
+  const dir = tmp();
+  const secret = join(dir, "release.key");
+  const pub = join(dir, "release.pub");
+  assert.equal(tool("keygen", secret, pub).status, 0);
+  const out = join(dir, "o");
+  const e = { ...env, PARLEY_ISSUED: "1800000000", PARLEY_VALID_DAYS: "30" };
+  execFileSync("sh", ["scripts/release.sh", "v1.2.3", out, secret], { cwd: root, env: e, stdio: "pipe" });
+  const v = tool("verify", pub, join(out, "SHA256SUMS"));
+  assert.equal(v.status, 0);
+  // 1800000000 + 30 days. The text is what internal/update.FormatComment writes (a Go test pins that format).
+  assert.equal(v.stdout.trim(), "signature ok: parley release v1.2.3 issued=1800000000 expires=1802592000");
+});
+
+test("release.sh refuses a validity window outside 1 to 400 days", opts, () => {
+  for (const days of ["0", "401", "abc", "-5", "1.5", "010"]) {
+    const r = spawnSync("sh", ["scripts/release.sh", "v1.2.3", join(tmp(), "o")], {
+      cwd: root,
+      env: { ...env, PARLEY_VALID_DAYS: days },
+      encoding: "utf8",
+    });
+    assert.notEqual(r.status, 0, `days=${days}`);
+    assert.match(r.stderr, /PARLEY_VALID_DAYS/, `days=${days}`);
+  }
+});

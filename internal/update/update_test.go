@@ -51,6 +51,14 @@ func (f *fakeSource) Fetch(_ context.Context, version, name string, limit int64,
 	return err
 }
 
+// testNow is the clock of every updater under test; cm gives a manifest header valid around it.
+var testNow = time.Unix(1_800_000_000, 0)
+
+func cm(v string) string {
+	ver, _ := ParseVersion(v)
+	return FormatComment(ver, testNow.Add(-time.Hour), testNow.Add(90*24*time.Hour))
+}
+
 type testRelease struct {
 	key  release.SecretKey
 	pub  release.PublicKey
@@ -102,7 +110,7 @@ func newRelease(t *testing.T) *testRelease {
 }
 
 func (r *testRelease) updater(current, pin string) *Updater {
-	return &Updater{Key: r.pub, Source: r.src, Current: current, Pin: pin, Dir: r.dir,
+	return &Updater{Now: func() time.Time { return testNow }, Key: r.pub, Source: r.src, Current: current, Pin: pin, Dir: r.dir,
 		Names: []string{"parleyd", "parley-cli"}, OS: runtime.GOOS, Arch: runtime.GOARCH}
 }
 
@@ -122,7 +130,7 @@ func newBins(v string) map[string]string {
 // JJ-01: an update signed by the pinned key is installed.
 func TestJJ01UpdateInstallsReleaseSignedByPinnedKey(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	v, err := r.updater("v1.0.0", "").Update(context.Background())
 	if err != nil || v.String() != "v1.1.0" {
 		t.Fatalf("update: %v %v", v, err)
@@ -154,7 +162,7 @@ func TestJJ01UpdateInstallsReleaseSignedByPinnedKey(t *testing.T) {
 func TestJJ01UpdateRejectsOtherKeys(t *testing.T) {
 	r := newRelease(t)
 	other, _, _ := release.GenerateKey()
-	r.publish(t, "v1.1.0", true, other, "parley release v1.1.0", newBins("evil"))
+	r.publish(t, "v1.1.0", true, other, cm("v1.1.0"), newBins("evil"))
 	_, err := r.updater("v1.0.0", "").Update(context.Background())
 	if !errors.Is(err, ErrSignature) {
 		t.Fatalf("got %v", err)
@@ -164,7 +172,7 @@ func TestJJ01UpdateRejectsOtherKeys(t *testing.T) {
 	}
 	// The same key id with different key material is rejected too.
 	other.ID = r.key.ID
-	r.publish(t, "v1.1.0", true, other, "parley release v1.1.0", newBins("evil"))
+	r.publish(t, "v1.1.0", true, other, cm("v1.1.0"), newBins("evil"))
 	if _, err := r.updater("v1.0.0", "").Update(context.Background()); !errors.Is(err, ErrSignature) {
 		t.Fatalf("got %v", err)
 	}
@@ -173,7 +181,7 @@ func TestJJ01UpdateRejectsOtherKeys(t *testing.T) {
 // A signature over other content (a different SHA256SUMS) does not authorize these checksums.
 func TestUpdateRejectsTamperedChecksums(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	for _, p := range []string{"latest/", "v1.1.0/"} {
 		r.src.files[p+"SHA256SUMS"] = append([]byte("0"), r.src.files[p+"SHA256SUMS"][1:]...)
 	}
@@ -185,7 +193,7 @@ func TestUpdateRejectsTamperedChecksums(t *testing.T) {
 // A binary that does not match the signed checksum is never installed, and nothing is left half done.
 func TestUpdateRejectsSwappedBinary(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	asset := fmt.Sprintf("parley-cli_v1.1.0_%s_%s%s", runtime.GOOS, runtime.GOARCH, exeSuffix(runtime.GOOS))
 	r.src.files["v1.1.0/"+asset] = []byte("malicious")
 	_, err := r.updater("v1.0.0", "").Update(context.Background())
@@ -205,7 +213,7 @@ func TestUpdateRejectsSwappedBinary(t *testing.T) {
 func TestUpdateBindsChecksumsToVersion(t *testing.T) {
 	r := newRelease(t)
 	// v1.0.5's genuine files, offered as the latest release: not newer than what runs.
-	r.publish(t, "v1.0.5", true, r.key, "parley release v1.0.5", newBins("v1.0.5"))
+	r.publish(t, "v1.0.5", true, r.key, cm("v1.0.5"), newBins("v1.0.5"))
 	if _, err := r.updater("v1.0.5", "").Check(context.Background()); !errors.Is(err, ErrUpToDate) {
 		t.Fatalf("got %v", err)
 	}
@@ -218,8 +226,12 @@ func TestUpdateBindsChecksumsToVersion(t *testing.T) {
 	if _, err := r.updater("v1.0.0", "v9.9.9").Check(context.Background()); !errors.Is(err, ErrSignature) {
 		t.Fatalf("got %v", err)
 	}
-	// Comments that are not exactly "parley release vX.Y.Z".
-	for _, c := range []string{"parley release 1.1.0", "parley release v1.1.0 ", "release v1.1.0", "parley release v1.1", "x", "parley release v01.1.0"} {
+	// Comments that are not exactly the canonical manifest header.
+	good := cm("v1.1.0")
+	for _, c := range []string{"parley release v1.1.0", "parley release 1.1.0", good + " ", " " + good, "release" + good[len("parley release"):], strings.Replace(good, "v1.1.0", "v1.1", 1),
+		"x", strings.Replace(good, "v1.1.0", "v01.1.0", 1), strings.Replace(good, "issued=", "issued=+", 1), strings.Replace(good, "issued=", "since=", 1),
+		strings.Replace(good, "expires=", "until=", 1), good + " extra=1", strings.Replace(good, " expires=", "  expires=", 1),
+		"parley release v1.1.0 expires=1807776000 issued=1799996400", "parley release v1.1.0 issued=-1 expires=1807776000", "parley release v1.1.0 issued=1799996400 expires=99999999999999", "parley release v1.1.0 issued=x expires=1807776000", "parley release v1.1.0 issued=1799996400 expires=x", "parley release v1.1.0 issued=1799996400 expires=1099511627777"} {
 		r.publish(t, "v1.1.0", true, r.key, c, newBins("x"))
 		if _, err := r.updater("v1.0.0", "").Check(context.Background()); !errors.Is(err, ErrSignature) {
 			t.Fatalf("comment %q: got %v", c, err)
@@ -230,7 +242,7 @@ func TestUpdateBindsChecksumsToVersion(t *testing.T) {
 // Auto-update never goes backwards; only an explicit pin may select an older version.
 func TestUpdateNeverDowngradesButPinMay(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.0.0", true, r.key, "parley release v1.0.0", newBins("v1.0.0"))
+	r.publish(t, "v1.0.0", true, r.key, cm("v1.0.0"), newBins("v1.0.0"))
 	if _, err := r.updater("v2.0.0", "").Update(context.Background()); !errors.Is(err, ErrUpToDate) {
 		t.Fatalf("got %v", err)
 	}
@@ -248,8 +260,8 @@ func TestUpdateNeverDowngradesButPinMay(t *testing.T) {
 // one ever fetched; when it is already running there is nothing to do.
 func TestJJ01PinToVersionHolds(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.0.0", false, r.key, "parley release v1.0.0", newBins("v1.0.0"))
-	r.publish(t, "v2.0.0", true, r.key, "parley release v2.0.0", newBins("v2.0.0"))
+	r.publish(t, "v1.0.0", false, r.key, cm("v1.0.0"), newBins("v1.0.0"))
+	r.publish(t, "v2.0.0", true, r.key, cm("v2.0.0"), newBins("v2.0.0"))
 	u := r.updater("v1.0.0", "v1.0.0")
 	if _, err := u.Update(context.Background()); !errors.Is(err, ErrUpToDate) {
 		t.Fatalf("got %v", err)
@@ -293,7 +305,7 @@ func TestUpdateSourceErrorsAndMalformedSums(t *testing.T) {
 		strings.Repeat("a", 64) + "  ../parleyd\n", strings.Repeat("a", 64) + "  \n", strings.Repeat("a", 64) + " parleyd\n",
 		strings.Repeat("a", 64) + "  a\\b\n", "ab  parleyd\n", strings.Repeat("a", 66) + "  parleyd\n",
 		strings.Repeat("a", 64) + "  parleyd\n" + strings.Repeat("a", 64) + "  parleyd\n"} {
-		sig, _ := r.key.Sign([]byte(body), "parley release v1.1.0")
+		sig, _ := r.key.Sign([]byte(body), cm("v1.1.0"))
 		r.src.files["latest/SHA256SUMS"] = []byte(body)
 		r.src.files["latest/SHA256SUMS.minisig"] = sig
 		if _, err := r.updater("v1.0.0", "").Check(context.Background()); !errors.Is(err, ErrSignature) {
@@ -306,7 +318,7 @@ func TestApplyFailures(t *testing.T) {
 	ctx := context.Background()
 	// The required binary is not installed in Dir.
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	rel, err := r.updater("v1.0.0", "").Check(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +362,7 @@ func TestApplyFailures(t *testing.T) {
 func TestApplyWithoutOptionalBinary(t *testing.T) {
 	r := newRelease(t)
 	os.Remove(filepath.Join(r.dir, "parley-cli"+exeSuffix(runtime.GOOS)))
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", map[string]string{"parleyd": "daemon v1.1.0"})
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), map[string]string{"parleyd": "daemon v1.1.0"})
 	if _, err := r.updater("v1.0.0", "").Update(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +377,7 @@ func TestApplyWithoutOptionalBinary(t *testing.T) {
 // If one swap fails, the ones already done are put back: the two programs never end up on different versions.
 func TestApplyRollsBackWhenASwapFails(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	rel, err := r.updater("v1.0.0", "").Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -420,7 +432,7 @@ func TestSwapRestoresOldFileWhenStagedIsMissing(t *testing.T) {
 func TestApplyReplacesStaleOldFile(t *testing.T) {
 	r := newRelease(t)
 	os.WriteFile(filepath.Join(r.dir, "parleyd"+exeSuffix(runtime.GOOS)+".old"), []byte("stale"), 0o600)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	if _, err := r.updater("v1.0.0", "").Update(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +440,7 @@ func TestApplyReplacesStaleOldFile(t *testing.T) {
 
 func TestLoopReportsAndStops(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	type res struct {
 		v   Version
 		err error
@@ -468,7 +480,7 @@ func TestLoopReportsAndStops(t *testing.T) {
 
 func TestLoopStaysSilentWhenUpToDate(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.0.0", true, r.key, "parley release v1.0.0", newBins("v1.0.0"))
+	r.publish(t, "v1.0.0", true, r.key, cm("v1.0.0"), newBins("v1.0.0"))
 	ctx, cancel := context.WithCancel(context.Background())
 	u := r.updater("v1.0.0", "")
 	done := make(chan struct{})
@@ -498,7 +510,7 @@ func TestExeSuffix(t *testing.T) {
 // An optional binary that is missing does not stop the ones after it in the list.
 func TestApplySkipsMissingOptionalBinaryInTheMiddle(t *testing.T) {
 	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, "parley release v1.1.0", newBins("v1.1.0"))
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
 	u := r.updater("v1.0.0", "")
 	u.Names = []string{"parleyd", "absent", "parley-cli"}
 	if _, err := u.Update(context.Background()); err != nil {
@@ -506,5 +518,148 @@ func TestApplySkipsMissingOptionalBinaryInTheMiddle(t *testing.T) {
 	}
 	if r.read(t, "parley-cli") != "cli v1.1.0" {
 		t.Fatal("the binary after the missing one was not updated")
+	}
+}
+
+// publishWindow publishes v1.1.0 as the latest release with a manifest valid from issued to expires.
+func (r *testRelease) publishWindow(t *testing.T, issued, expires time.Time) {
+	t.Helper()
+	r.publish(t, "v1.1.0", true, r.key, FormatComment(Version{1, 1, 0}, issued, expires), newBins("v1.1.0"))
+}
+
+// A manifest past its expiry is refused, to the second: a frozen feed cannot keep serving it.
+func TestUpdateRefusesExpiredManifest(t *testing.T) {
+	r := newRelease(t)
+	exp := testNow.Add(24 * time.Hour)
+	r.publishWindow(t, testNow.Add(-time.Hour), exp)
+	u := r.updater("v1.0.0", "")
+	for name, at := range map[string]time.Time{"after": exp.Add(time.Second), "exactly": exp, "long after": exp.Add(1000 * time.Hour)} {
+		u.Now = func() time.Time { return at }
+		if _, err := u.Update(context.Background()); !errors.Is(err, ErrExpired) {
+			t.Fatalf("%s: got %v", name, err)
+		}
+	}
+	if r.read(t, "parleyd") != "old parleyd" {
+		t.Fatal("installed from an expired manifest")
+	}
+	u.Now = func() time.Time { return exp.Add(-time.Second) }
+	if _, err := u.Update(context.Background()); err != nil {
+		t.Fatalf("one second before expiry: %v", err)
+	}
+}
+
+// An expired manifest is refused even when it names the running version: that is how a stale feed is noticed.
+func TestUpdateExpiredManifestOfTheRunningVersionIsReported(t *testing.T) {
+	r := newRelease(t)
+	r.publishWindow(t, testNow.Add(-48*time.Hour), testNow.Add(-time.Hour))
+	if _, err := r.updater("v1.1.0", "").Check(context.Background()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("got %v", err)
+	}
+	// The pin path is held to the same window.
+	if _, err := r.updater("v1.0.0", "v1.1.0").Check(context.Background()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("pinned: got %v", err)
+	}
+}
+
+// A manifest issued in the future (beyond clock skew) is not valid yet; skew inside the tolerance is accepted.
+func TestUpdateRefusesManifestNotYetValid(t *testing.T) {
+	r := newRelease(t)
+	r.publishWindow(t, testNow.Add(maxSkew+time.Second), testNow.Add(24*time.Hour))
+	if _, err := r.updater("v1.0.0", "").Check(context.Background()); !errors.Is(err, ErrNotYetValid) {
+		t.Fatalf("got %v", err)
+	}
+	r.publishWindow(t, testNow.Add(maxSkew), testNow.Add(24*time.Hour))
+	if _, err := r.updater("v1.0.0", "").Check(context.Background()); err != nil {
+		t.Fatalf("within skew: %v", err)
+	}
+}
+
+// A window that is empty, backwards or longer than the maximum is malformed whoever signed it.
+func TestUpdateRefusesUnreasonableWindows(t *testing.T) {
+	r := newRelease(t)
+	for name, w := range map[string][2]time.Time{
+		"empty":    {testNow, testNow},
+		"backward": {testNow, testNow.Add(-time.Hour)},
+		"too long": {testNow.Add(-time.Hour), testNow.Add(-time.Hour).Add(maxValidity + time.Second)},
+	} {
+		r.publishWindow(t, w[0], w[1])
+		if _, err := r.updater("v1.0.0", "").Check(context.Background()); !errors.Is(err, ErrSignature) {
+			t.Fatalf("%s: got %v", name, err)
+		}
+	}
+	r.publishWindow(t, testNow.Add(-time.Hour), testNow.Add(-time.Hour).Add(maxValidity))
+	if _, err := r.updater("v1.0.0", "").Check(context.Background()); err != nil {
+		t.Fatalf("longest allowed window: %v", err)
+	}
+}
+
+// The validity window cannot be stretched by whoever serves the files: it is inside the signature.
+func TestUpdateWindowIsCoveredBySignature(t *testing.T) {
+	r := newRelease(t)
+	soon := testNow.Add(time.Hour)
+	r.publishWindow(t, testNow.Add(-time.Hour), soon)
+	forged := strings.Replace(string(r.src.files["latest/SHA256SUMS.minisig"]), fmt.Sprintf("expires=%d", soon.Unix()), fmt.Sprintf("expires=%d", soon.Add(1000*time.Hour).Unix()), 1)
+	r.src.files["latest/SHA256SUMS.minisig"] = []byte(forged)
+	u := r.updater("v1.0.0", "")
+	u.Now = func() time.Time { return soon.Add(time.Minute) }
+	if _, err := u.Check(context.Background()); !errors.Is(err, ErrSignature) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Versions only go forward: neither an older release nor a replay of the running one is installed by auto-update,
+// even with a fresh manifest.
+func TestUpdateVersionIsMonotonic(t *testing.T) {
+	r := newRelease(t)
+	r.publish(t, "v1.0.0", true, r.key, cm("v1.0.0"), newBins("v1.0.0"))
+	for _, cur := range []string{"v1.0.0", "v1.0.1", "v1.1.0", "v2.0.0"} {
+		if _, err := r.updater(cur, "").Check(context.Background()); !errors.Is(err, ErrUpToDate) {
+			t.Fatalf("running %s: got %v", cur, err)
+		}
+	}
+	if _, err := r.updater("v0.9.9", "").Check(context.Background()); err != nil {
+		t.Fatalf("running older: %v", err)
+	}
+}
+
+func TestParseCommentRoundTrip(t *testing.T) {
+	m, err := ParseComment(FormatComment(Version{1, 2, 3}, time.Unix(100, 0), time.Unix(200, 0)))
+	if err != nil || m.Version != (Version{1, 2, 3}) || m.Issued.Unix() != 100 || m.Expires.Unix() != 200 {
+		t.Fatalf("%+v %v", m, err)
+	}
+	for _, edge := range []string{"parley release v1.2.3 issued=0 expires=1", "parley release v1.2.3 issued=1 expires=1099511627776"} { // the ends of the accepted range
+		if _, err := ParseComment(edge); err != nil {
+			t.Fatalf("%s: %v", edge, err)
+		}
+	}
+	for _, bad := range []string{"parley release v1.2.3 issued=-1 expires=5", "parley release v1.2.3 issued=1 expires=1099511627777"} { // just outside it
+		if _, err := ParseComment(bad); err == nil {
+			t.Fatalf("%s accepted", bad)
+		}
+	}
+	if _, err := ParseComment("parley release v1.2.3 issued=0100 expires=200"); err == nil {
+		t.Fatal("leading zero accepted")
+	}
+}
+
+// Without a test clock the updater uses the real one.
+func TestUpdateUsesTheRealClockByDefault(t *testing.T) {
+	r := newRelease(t)
+	r.publishWindow(t, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	u := r.updater("v1.0.0", "")
+	u.Now = nil
+	if _, err := u.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.publishWindow(t, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+	if _, err := u.Check(context.Background()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// scripts/release.sh writes this exact text (tests/release.test.mjs); the updater only accepts this spelling.
+func TestFormatCommentIsThePublishedFormat(t *testing.T) {
+	if got := FormatComment(Version{1, 2, 3}, time.Unix(1800000000, 0), time.Unix(1802592000, 0)); got != "parley release v1.2.3 issued=1800000000 expires=1802592000" {
+		t.Fatal(got)
 	}
 }
