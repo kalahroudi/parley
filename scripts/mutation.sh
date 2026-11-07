@@ -49,7 +49,13 @@ for p in $pkgs; do
 	go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
 		--workers 2 --timeout-coefficient "$coef" \
 		--invert-assignments --invert-bitwise --invert-bwassign --invert-logical \
-		--invert-loopctrl --remove-self-assignments -o "$json" "./$p" || status=1
+		--invert-loopctrl --remove-self-assignments -o "$json" "./$p" > "$out/gremlins.log" 2>&1 || status=1
+	cat "$out/gremlins.log"
+	# A package with no mutable code (a single embed and copy, such as release) makes gremlins print this and
+	# write no file. That is an empty result; any other missing file stays a failure for the gate to report.
+	if [ ! -e "$json" ] && grep -q '^No results to report' "$out/gremlins.log"; then
+		echo '{"files":[]}' > "$json"
+	fi
 	node scripts/mutation-gate.mjs "$p" "$json" $stale || status=1
 done
 

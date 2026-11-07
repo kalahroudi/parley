@@ -74,3 +74,21 @@ func (s FileStore) Save(priv ed25519.PrivateKey) error {
 	}
 	return nil
 }
+
+// ErrNoRoot is returned when no root key is stored.
+var ErrNoRoot = errors.New("root: no root key stored here")
+
+// Load reads the root key back. Only the local signer uses it.
+func (s FileStore) Load() (ed25519.PrivateKey, error) {
+	seed, err := os.ReadFile(s.path())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNoRoot
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("root: stored key has the wrong length")
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
