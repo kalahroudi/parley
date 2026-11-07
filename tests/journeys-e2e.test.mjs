@@ -1,7 +1,7 @@
 // Copyright 2026 The Parley Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// T509: journeys that run end to end on macOS, Linux and Windows, with real `parleyd`-based daemons and the real
+// Journey JH-01 (part of T509): journeys that run end to end on macOS, Linux and Windows, with real `parleyd`-based daemons and the real
 // gateway (`wrangler dev`). Nothing here needs a pseudo-terminal, so the same file runs on all three systems.
 //  JH-01  Pods: an admin-minted single-use token enrolls a headless device under a named service owner; the binding is
 //         signed by the root and posted by the admin; the token cannot be used a second time; the pod then publishes a
@@ -22,7 +22,7 @@ import { Scan } from "./canary/canary.mjs";
 import { signBinding, startGateway } from "./harness/gateway.mjs";
 import { build, capture, newTenant, post, repo, sleep, testOptions, waitFor } from "./harness/e2e.mjs";
 
-test("JH-01, pods (T509): single-use token, named service owner, root-signed binding, token reuse fails", testOptions(300000), async () => {
+test("JH-01, pods: single-use token, named service owner, root-signed binding, token reuse fails", testOptions(300000), async () => {
   const { bin, exe } = build({ "parley-cli": "./cmd/parley-cli", parleyd: "./cmd/parleyd", botd: "./tests/harness/botd" });
   const gw = await startGateway({ admins: "acme:admin@acme.test" });
   const scratch = mkdtempSync(join(tmpdir(), "parley-pods-"));
@@ -30,6 +30,28 @@ test("JH-01, pods (T509): single-use token, named service owner, root-signed bin
   mkdirSync(botRuns);
   const children = [];
   let tenant;
+  let codes;
+  const stopAll = async () => {
+    if (codes) return;
+    codes = [];
+    for (const c of children) {
+      c.child.kill("SIGTERM");
+      codes.push(await Promise.race([c.done.then((r) => r.code), sleep(15000).then(() => "hung")]));
+      c.child.kill("SIGKILL");
+    }
+    await gw.close();
+  };
+  // A just-stopped process can hold a file for a moment on Windows: retry a locked read, never skip it.
+  const scanFiles = async (scan, path) => {
+    for (let i = 0; ; i++) {
+      try {
+        return scan.path(path);
+      } catch (e) {
+        if (i >= 40 || (e.code !== "EBUSY" && e.code !== "EPERM")) throw e;
+        await sleep(250);
+      }
+    }
+  };
   const canary = `CANARY-pod-${randomBytes(8).toString("hex")}`;
   try {
     tenant = await newTenant(gw, exe);
@@ -58,7 +80,11 @@ test("JH-01, pods (T509): single-use token, named service owner, root-signed bin
     // Token reuse fails, and leaves no request for the admin to approve and no identity on disk.
     const home2 = mkdtempSync(join(tmpdir(), "parley-home-"));
     tenant.homes.push(home2);
-    const reused = await cli(home2, [...enrollArgs, "-name", "pod-reuse"], { PARLEY_ENROLL_TOKEN: token }).done;
+    // A gateway that accepted the token again would leave this command waiting for approval: bound it, and fail.
+    const again = cli(home2, [...enrollArgs, "-name", "pod-reuse"], { PARLEY_ENROLL_TOKEN: token });
+    const reused = await Promise.race([again.done, sleep(30000).then(() => null)]);
+    if (reused === null) again.child.kill("SIGKILL");
+    assert.notEqual(reused, null, "a used token was accepted again: the second enrollment is waiting for approval");
     assert.notEqual(reused.code, 0, `a used token enrolled a second device:\n${reused.out}`);
     assert.equal(existsSync(join(home2, "config.json")), false);
     const left = (await post(gw.url, "/v1/admin/enrollments", admin, {})).body.pending ?? [];
@@ -96,9 +122,11 @@ test("JH-01, pods (T509): single-use token, named service owner, root-signed bin
     assert.equal(result.content, `bot heard: ${canary}`);
     assert.equal(result.untrusted, true);
 
+    // Stop everything first and scan the files at rest: on Windows a running gateway holds its storage files open.
+    await stopAll();
     const scan = new Scan({ task: canary, heard: "bot heard: " });
-    scan.path(gw.state);
-    scan.path(gw.log);
+    await scanFiles(scan, gw.state);
+    await scanFiles(scan, gw.log);
     for (const [i, d] of [callerD, botD].entries()) scan.bytes(`daemon ${i} output`, d.output());
     scan.assertClean();
     assert.ok(scan.sinks.length > 2, "the scan looked at the gateway's real state and log");
@@ -106,12 +134,7 @@ test("JH-01, pods (T509): single-use token, named service owner, root-signed bin
     control.bytes("planted", `x ${canary} y`);
     assert.equal(control.report().length, 1, "the scan can see the text it looks for");
   } finally {
-    const codes = [];
-    for (const c of children) {
-      c.child.kill("SIGTERM");
-      codes.push(await Promise.race([c.done.then((r) => r.code), sleep(15000).then(() => "hung")]));
-      c.child.kill("SIGKILL");
-    }
+    await stopAll();
     await gw.close();
     for (const dir of [bin, scratch, gw.state, gw.log, ...(tenant ? tenant.homes : [])]) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     assert.deepEqual(codes.filter((c) => c !== 0 && c !== null), [], "a process did not shut down cleanly");
