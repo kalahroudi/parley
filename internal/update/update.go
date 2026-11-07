@@ -67,13 +67,6 @@ func (u *Updater) now() time.Time {
 	return time.Now()
 }
 
-func (u *Updater) now() time.Time {
-	if u.Now != nil {
-		return u.Now()
-	}
-	return time.Now()
-}
-
 // Release is a verified release: its version and the signed checksum of each file.
 type Release struct {
 	Version Version
