@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { registerRoot, signBinding, signRevocations } from "./gateway.mjs";
+import { registerRoot, signBinding, signRevocations, subscribe } from "./gateway.mjs";
 
 export const repo = join(fileURLToPath(import.meta.url), "..", "..", "..");
 export const isWindows = process.platform === "win32";
@@ -71,6 +71,7 @@ export function build(targets) {
 
 // One tenant, "acme", on `gw`, with its root registered and an empty signed revocation list posted.
 export async function newTenant(gw, exe) {
+  await subscribe(gw.url, "acme"); // past the free tier's 3 devices
   const admin = (await gw.signIn({ tenant: "acme", role: "admin", email: "admin@acme.test" })).token;
   const rootKey = await registerRoot(gw.url, admin);
   const fp = fingerprint(rootKey.publicKey);
