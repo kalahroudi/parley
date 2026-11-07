@@ -100,6 +100,7 @@ export async function handleEnroll(req: Request, env: Env): Promise<Response> {
     if (d !== "approved" && d !== "rejected") return json(400, { error: "bad_request" });
     const r = await stub.decide(str(b.id) ?? "", d);
     if (r === null) return json(404, { error: "not_found" });
+    if (r === "seat_limit") return json(402, { error: "seat_limit" });
     return r === "conflict" ? json(409, { error: "already_decided" }) : json(200, r);
   }
   if (pathname === "/v1/admin/bindings") {

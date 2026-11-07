@@ -95,11 +95,11 @@ export async function limitAuth(req: Request, env: Env): Promise<Response | null
   return take(env, "session", source, limitFor(env.RATE_SESSION_PER_MIN, DEFAULTS.session));
 }
 
-// The admin's bulk routes (export, audit CSV, tenant deletion), counted per tenant after the admin session is
+// The admin's bulk routes (export, audit CSV, tenant deletion) and billing routes (each Checkout or Portal call makes one request to Stripe), counted per tenant after the admin session is
 // verified, so only a signed-in admin of that tenant spends the budget. Deletion has a far smaller one: each try at
 // the confirmation (including a wrong name) counts, so the typed name cannot be guessed at speed.
-export type AdminRoute = "read" | "delete";
-const ADMIN = { read: { env: "RATE_ADMIN_PER_MIN", dflt: 60 }, delete: { env: "RATE_DELETE_PER_MIN", dflt: 3 } } as const;
+export type AdminRoute = "read" | "delete" | "billing";
+const ADMIN = { read: { env: "RATE_ADMIN_PER_MIN", dflt: 60 }, delete: { env: "RATE_DELETE_PER_MIN", dflt: 3 }, billing: { env: "RATE_BILLING_PER_MIN", dflt: 10 } } as const;
 export async function limitAdmin(env: Env, tenant: string, route: AdminRoute): Promise<Response | null> {
   const { env: v, dflt } = ADMIN[route];
   return take(env, `admin-${route}`, `${tenant.length}:${tenant}`, limitFor(env[v], dflt));
