@@ -70,6 +70,11 @@ function outcome(r) {
   assert.doesNotMatch(r.out, /PASS/);
   if (/the test bot answers only devices of its own owner/.test(r.out)) return "refused";
   if (/was not reachable/.test(r.out)) return "hidden";
+  // The gateway marks a task to an unreachable device expired when its own clock says so, which on a slow runner can
+  // come after the CLI's wait (the task's expiry plus two seconds) has run out: the CLI then says so instead. It is
+  // the same outcome, the request never got an answer, and only a "hidden" row can end that way: the other two
+  // outcomes answer in about a second, so a timeout on those rows is still a mismatch.
+  if (/^FAIL: no answer in time$/m.test(r.out) && !/the task ended as/.test(r.out)) return "hidden";
   return `other: ${r.out}`;
 }
 
