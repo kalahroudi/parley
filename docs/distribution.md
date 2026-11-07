@@ -1,4 +1,45 @@
-# Self-update
+# Install channels and self-update
+
+Parley depends on no app store and no signing vendor. Every release is signed with the project's own Ed25519 key
+(minisign format); its public half is `release/release.pub` and is compiled into the binaries.
+
+## Channels
+
+| Channel | Install | Updates |
+|---|---|---|
+| GitHub release | Download `parleyd_<tag>_<os>_<arch>` and `parley-cli_<tag>_<os>_<arch>` (`.exe` on Windows) and check them (below). | The programs update themselves (below). |
+| Homebrew (macOS, Linux) | `brew install kalahroudi/parley/parley` | `brew upgrade`. Self-update stays out of Homebrew's files. |
+| Debian package (amd64, arm64) | `sudo apt install ./parley_<version>_<arch>.deb` after checking it. | Install the next `.deb`. Self-update stays out of `/usr/bin`. |
+| `go install` | `go install github.com/kalahroudi/parley/cmd/parleyd@latest` (and `cmd/parley-cli`) | Run `go install` again. A Go-built binary is not a release build and never replaces itself. |
+| Source | `git clone`, then `go build ./cmd/parleyd ./cmd/parley-cli` | Pull and rebuild. Same: never self-updates. |
+| Windows | See [windows/install.md](windows/install.md). | Self-update, or reinstall. |
+
+The Homebrew formula (`parley.rb`) and the Debian packages are built by `scripts/release.sh` from the same binaries
+that `SHA256SUMS` covers, so the signed checksums cover them too. The formula carries each binary's SHA-256, which
+Homebrew checks on download. The package holds `/usr/bin/parleyd` and `/usr/bin/parley-cli` and runs no scripts; it
+starts nothing. Enroll the device with `parley-cli login`, then start the daemon the way your site starts services.
+
+### Check a download
+
+```sh
+parley-release verify release/release.pub SHA256SUMS      # signature of the checksum file (needs SHA256SUMS.minisig)
+parley-release verify-checksums SHA256SUMS                # or: sha256sum -c SHA256SUMS
+```
+
+`minisign -Vm SHA256SUMS -p release/release.pub` works as well. Compare the key id (`26364667D369282A`) with the one in
+this repository, not with one that came with the download.
+
+### Publishing a tag (maintainers)
+
+`scripts/release.sh <tag> <dir> <key>` makes the signed release directory (binaries, `SHA256SUMS` and `.minisig`, SBOM
+and, for a plain `vX.Y.Z` tag, `parley.rb` and the `.deb` files). Publishing to a channel is a script that verifies
+before it writes anything, takes no credentials of its own, and has a `--dry-run`:
+
+- `scripts/publish-tap.sh <dist-dir> <tap-checkout> [--dry-run]` checks the signature against the project key, every
+  checksum, that `parley.rb` is covered and is the formula of the signed version, then commits `Formula/parley.rb`
+  to the tap checkout and pushes with the checkout's own git credentials.
+
+## Self-update
 
 **Status:** `parleyd` checks for updates in the background and `parley-cli update` checks and applies them, both
 through `internal/update`. What is still owed is at the end of this page.

@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -173,4 +173,134 @@ test("release.sh refuses a validity window outside 1 to 400 days", opts, () => {
     assert.notEqual(r.status, 0, `days=${days}`);
     assert.match(r.stderr, /PARLEY_VALID_DAYS/, `days=${days}`);
   }
+});
+
+// A signed plain-tag release with every default target, built once and shared by the channel tests below.
+let shared;
+function signedRelease() {
+  if (shared) return shared;
+  const dir = tmp();
+  const secret = join(dir, "release.key");
+  const pub = join(dir, "release.pub");
+  assert.equal(tool("keygen", secret, pub).status, 0);
+  const out = join(dir, "dist");
+  const e = { ...process.env, PARLEY_RELEASE_KEY_PASSWORD: "test-password" };
+  delete e.PARLEY_TARGETS;
+  execFileSync("sh", ["scripts/release.sh", "v1.2.3", out, secret], { cwd: root, env: e, stdio: "pipe" });
+  return (shared = { dir, out, pub, secret });
+}
+
+test("a plain release tag also builds the Homebrew formula and Debian packages, all covered by SHA256SUMS", opts, () => {
+  const { out } = signedRelease();
+  const sums = readFileSync(join(out, "SHA256SUMS"), "utf8");
+  for (const f of ["parley.rb", "parley_1.2.3_amd64.deb", "parley_1.2.3_arm64.deb", "parleyd_v1.2.3_darwin_arm64"]) {
+    assert.ok(existsSync(join(out, f)), f);
+    assert.ok(sums.includes("  " + f + "\n"), `${f} is not in SHA256SUMS`);
+  }
+  const formula = readFileSync(join(out, "parley.rb"), "utf8");
+  const sha = (f) => sums.split("\n").find((l) => l.endsWith("  " + f)).split("  ")[0];
+  assert.ok(formula.includes(`sha256 "${sha("parleyd_v1.2.3_darwin_arm64")}"`), "formula hash differs from the signed one");
+  assert.ok(formula.includes(`sha256 "${sha("parley-cli_v1.2.3_linux_amd64")}"`));
+  assert.equal(tool("verify-checksums", join(out, "SHA256SUMS")).status, 0);
+});
+
+// ---- scripts/publish-tap.sh -------------------------------------------------------------------------------------
+
+function git(cwd, ...args) {
+  return execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+// A tap checkout whose "origin" is a local bare repository, so a real push can be observed without a network.
+function tapCheckout() {
+  const d = tmp();
+  const bare = join(d, "origin.git");
+  git(d, "init", "-q", "--bare", "-b", "main", bare);
+  const work = join(d, "tap");
+  git(d, "clone", "-q", bare, work);
+  writeFileSync(join(work, "README.md"), "tap\n");
+  git(work, "add", "README.md");
+  git(work, "commit", "-q", "-m", "init");
+  git(work, "push", "-q", "origin", "HEAD:main");
+  return { bare, work };
+}
+function publishTap(dist, tap, pub, ...extra) {
+  return spawnSync("sh", ["scripts/publish-tap.sh", dist, tap, ...extra], {
+    cwd: root,
+    env: { ...process.env, PARLEY_RELEASE_PUB: pub },
+    encoding: "utf8",
+  });
+}
+
+test("publish-tap.sh --dry-run verifies the release and changes nothing", opts, () => {
+  const { out, pub } = signedRelease();
+  const { work, bare } = tapCheckout();
+  const before = git(bare, "rev-parse", "main");
+  const r = publishTap(out, work, pub, "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /dry run: would publish parley v1\.2\.3/);
+  assert.equal(git(work, "status", "--porcelain"), "");
+  assert.ok(!existsSync(join(work, "Formula")));
+  assert.equal(git(bare, "rev-parse", "main"), before);
+});
+
+test("publish-tap.sh commits and pushes the verified formula once", opts, () => {
+  const { out, pub } = signedRelease();
+  const { work, bare } = tapCheckout();
+  const r = publishTap(out, work, pub);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /published parley v1\.2\.3/);
+  assert.equal(git(bare, "log", "-1", "--format=%s", "main").trim(), "parley v1.2.3");
+  assert.equal(git(bare, "show", "main:Formula/parley.rb"), readFileSync(join(out, "parley.rb"), "utf8"));
+  const again = publishTap(out, work, pub);
+  assert.equal(again.status, 0);
+  assert.match(again.stdout, /already in the tap/);
+  assert.equal(git(bare, "rev-list", "--count", "main").trim(), "2");
+});
+
+test("publish-tap.sh refuses what does not verify", opts, () => {
+  const { out, pub, dir } = signedRelease();
+  const { work, bare } = tapCheckout();
+  const before = git(bare, "rev-parse", "main");
+  // Another project key.
+  const other = join(dir, "other.pub");
+  assert.equal(tool("keygen", join(dir, "other.key"), other).status, 0);
+  let r = publishTap(out, work, other);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /not signed by the project key/);
+  // A formula changed after signing, and one that is not covered by the checksums.
+  const copy = join(tmp(), "dist");
+  execFileSync("cp", ["-R", out, copy]);
+  writeFileSync(join(copy, "parley.rb"), readFileSync(join(copy, "parley.rb"), "utf8") + "# tampered\n");
+  r = publishTap(copy, work, pub);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /does not match SHA256SUMS/);
+  // Not a release directory, not a git checkout, and bad arguments.
+  assert.notEqual(publishTap(tmp(), work, pub).status, 0);
+  r = publishTap(out, tmp(), pub);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /not a git checkout/);
+  assert.equal(publishTap(out, work, pub, "--force").status, 2);
+  assert.equal(spawnSync("sh", ["scripts/publish-tap.sh", out], { cwd: root }).status, 2);
+  assert.equal(git(bare, "rev-parse", "main"), before);
+  assert.equal(git(work, "status", "--porcelain"), "");
+});
+
+test("publish-tap.sh refuses a formula the signature does not cover or that is for another version", opts, () => {
+  const { out, pub, secret } = signedRelease();
+  const { work } = tapCheckout();
+  // Signed, but built for a target list that makes no formula: the formula is not covered.
+  const partial = join(tmp(), "dist");
+  execFileSync("sh", ["scripts/release.sh", "v1.2.3", partial, secret], { cwd: root, env, stdio: "pipe" });
+  let r = publishTap(partial, work, pub);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /parley\.rb is not covered/);
+  // A correctly signed release whose formula is the formula of another version.
+  const copy = join(tmp(), "dist");
+  execFileSync("cp", ["-R", out, copy]);
+  writeFileSync(join(copy, "parley.rb"), readFileSync(join(copy, "parley.rb"), "utf8").replace('version "1.2.3"', 'version "9.9.9"'));
+  const files = readdirSync(copy).filter((f) => !f.startsWith("SHA256SUMS"));
+  assert.equal(tool("checksums", copy, join(copy, "SHA256SUMS"), ...files).status, 0);
+  assert.equal(tool("sign", secret, join(copy, "SHA256SUMS"), "parley release v1.2.3 issued=1800000000 expires=1810000000").status, 0);
+  r = publishTap(copy, work, pub);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /not the formula of v1\.2\.3/);
 });
