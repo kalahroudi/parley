@@ -39,7 +39,7 @@ func start(t *testing.T) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	secret := NewSecret()
-	s := &Server{Store: root.FileStore{Dir: dir}, BackupPath: filepath.Join(dir, "sub", "root-backup.json"), Secret: secret, Clock: func() time.Time { return fixedNow }}
+	s := &Server{Store: root.FileStore{Dir: dir}, Revocations: revocation.NewFileStore(filepath.Join(dir, "issued.json")), BackupPath: filepath.Join(dir, "sub", "root-backup.json"), Secret: secret, Clock: func() time.Time { return fixedNow }}
 	l, err := s.Listen("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -488,8 +488,33 @@ func TestSignRevocation(t *testing.T) {
 		t.Errorf("foreign prev: %d", code)
 	}
 	// A previous list for another tenant is refused.
-	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t2", Prev: &l1}); code != 400 {
+	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t2", Prev: &l3}); code != 400 {
 		t.Errorf("wrong tenant: %d", code)
+	}
+	// An outdated list (or none) is not a base: re-issuing from it would drop the later revocations.
+	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t1", Prev: &l1}); code != 409 {
+		t.Errorf("stale prev: %d", code)
+	}
+	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t1"}); code != 409 {
+		t.Errorf("no prev after a list was issued: %d", code)
+	}
+	// The newest list that was issued is the base, and a failing store stops issuing.
+	good := h.s.Revocations
+	h.s.Revocations = failRevocations{Store: good, load: errors.New("io")}
+	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t1", Prev: &l3}); code != 500 {
+		t.Errorf("load failure: %d", code)
+	}
+	h.s.Revocations = failRevocations{Store: good, save: errors.New("disk")}
+	if code, b := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t1", Prev: &l3}); code != 500 || strings.Contains(string(b), `"signature"`) {
+		t.Errorf("save failure released a list: %d %s", code, b)
+	}
+	h.s.Revocations = nil
+	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t1", Prev: &l3}); code != 500 {
+		t.Errorf("no store: %d", code)
+	}
+	h.s.Revocations = good
+	if code, _ := h.call("POST", "/v1/revocations/sign", revocationReq{Tenant: "t1", Prev: &l3}); code != 200 {
+		t.Errorf("recovered: %d", code)
 	}
 	if code := rawPost(h, "/v1/revocations/sign", "[]"); code != 400 {
 		t.Errorf("bad json: %d", code)
@@ -593,4 +618,81 @@ func TestReusesRootPackages(t *testing.T) {
 	if strings.Contains(string(src), "ed25519.Sign(") {
 		t.Error("signer signs directly instead of through the packages")
 	}
+}
+
+func TestRateLimits(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	limiterNow = func() time.Time { return now }
+	t.Cleanup(func() { limiterNow = time.Now })
+
+	// Failed recovery attempts are capped, then refused even with the right code.
+	h := start(t)
+	r := h.init()
+	os.Remove(filepath.Join(h.dir, "root.key"))
+	for i := 0; i < maxRecovery; i++ {
+		if code, _ := h.call("POST", "/v1/root/recover", recoverReq{RecoveryCode: "WRONG-CODE"}); code != http.StatusForbidden {
+			t.Fatalf("attempt %d: %d", i, code)
+		}
+	}
+	if code, _ := h.call("POST", "/v1/root/recover", recoverReq{RecoveryCode: r.RecoveryCode}); code != http.StatusTooManyRequests {
+		t.Fatalf("after %d failures: %d", maxRecovery, code)
+	}
+	if ok, _ := h.s.Store.Exists(); ok {
+		t.Fatal("a refused attempt stored a key")
+	}
+	now = now.Add(rateWindow) // a new window
+	if code, _ := h.call("POST", "/v1/root/recover", recoverReq{RecoveryCode: r.RecoveryCode}); code != 200 {
+		t.Fatalf("after the window: %d", code)
+	}
+
+	// Every admitted request counts against the overall cap: exactly maxRequests get through in a window.
+	now = now.Add(rateWindow)
+	for i := 0; i < maxRequests; i++ {
+		if code, _ := h.call("GET", "/v1/root", nil); code != 200 {
+			t.Fatalf("request %d of %d: %d", i+1, maxRequests, code)
+		}
+	}
+	if code, _ := h.call("GET", "/v1/root", nil); code != http.StatusTooManyRequests {
+		t.Fatalf("over the cap: %d", code)
+	}
+	now = now.Add(rateWindow)
+	if code, _ := h.call("GET", "/v1/root", nil); code != 200 {
+		t.Fatalf("after the window: %d", code)
+	}
+
+	// A request that fails admission does not use up the budget of the real caller.
+	for i := 0; i < maxRequests+10; i++ {
+		req, _ := http.NewRequest("GET", h.url+"/v1/root", nil)
+		req.Header.Set("Authorization", "Bearer wrong")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("unauthenticated: %d", resp.StatusCode)
+		}
+	}
+	if code, _ := h.call("GET", "/v1/root", nil); code != 200 {
+		t.Fatalf("budget drained by strangers: %d", code)
+	}
+}
+
+type failRevocations struct {
+	revocation.Store
+	load, save error
+}
+
+func (f failRevocations) Load() (*revocation.Signed, error) {
+	if f.load != nil {
+		return nil, f.load
+	}
+	return f.Store.Load()
+}
+
+func (f failRevocations) Save(l *revocation.Signed) error {
+	if f.save != nil {
+		return f.save
+	}
+	return f.Store.Save(l)
 }

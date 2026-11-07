@@ -19,5 +19,7 @@ and `go install` builds have no release version and are never replaced; files ow
 
 **Not done yet (tracked by `TestPending_T504WiringAndChannels`):** the daemon's background check, `parley-cli
 update`, the Homebrew formula and tap, the Debian package and apt repository. The new version would run from the
-next start: the updater does not restart a process. An attacker who blocks the network can keep a device on an old
+next start: the updater does not restart a process.
+The release comment carries no expiry yet, and the updater does not yet check that it runs as the owner of the install
+directory; both, and an operator opt-out, are owed by the wiring above. An attacker who blocks the network can keep a device on an old
 version; the gateway's protocol-version check bounds that.

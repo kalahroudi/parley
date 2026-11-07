@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/kalahroudi/parley/internal/revocation"
@@ -32,6 +33,56 @@ import (
 var ErrNotLoopback = errors.New("signer: listen address must be loopback")
 
 const maxBody = 64 << 10
+
+// Request limits per window. A person clicking in the dashboard stays far below them; a script that holds the
+// session secret cannot use the signer as a signing oracle at machine speed or grind recovery codes.
+const (
+	rateWindow  = time.Minute
+	maxRequests = 120
+	maxRecovery = 5 // failed attempts per window
+)
+
+// limiterNow is the clock of the rate limiter, apart from Server.Clock, which tests pin to a fixed time.
+var limiterNow = time.Now
+
+// limiter admits at most max calls in each fixed window.
+type limiter struct {
+	mu    sync.Mutex
+	start time.Time
+	n     int
+}
+
+// roll starts a new window once the old one has run out; the caller holds mu.
+func (l *limiter) roll() {
+	if now := limiterNow(); now.Sub(l.start) >= rateWindow {
+		l.start, l.n = now, 0
+	}
+}
+
+// allow counts a call and reports whether it is within max.
+func (l *limiter) allow(max int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.roll()
+	l.n++
+	return l.n <= max
+}
+
+// open reports whether fewer than max calls were counted in this window, without counting.
+func (l *limiter) open(max int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.roll()
+	return l.n < max
+}
+
+// hit counts one call.
+func (l *limiter) hit() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.roll()
+	l.n++
+}
 
 // Seams so tests can force failures that crypto/rand and the file system do
 // not produce on demand.
@@ -50,11 +101,17 @@ type KeyStore interface {
 
 // Server is the signer's HTTP handler.
 type Server struct {
-	Store      KeyStore
-	BackupPath string           // where root init writes the encrypted backup
-	Secret     string           // per-session bearer secret
-	Clock      func() time.Time // defaults to time.Now
-	host       string           // the only accepted Host header value
+	Store KeyStore
+	// Revocations holds the newest list this signer issued. Without it a caller could present an old list
+	// as the base and have the signer re-issue the chain minus later revocations, un-revoking devices.
+	Revocations revocation.Store
+	BackupPath  string           // where root init writes the encrypted backup
+	Secret      string           // per-session bearer secret
+	Clock       func() time.Time // defaults to time.Now
+	host        string           // the only accepted Host header value
+	all         limiter          // every admitted request
+	failures    limiter          // failed recovery attempts
+	issueMu     sync.Mutex       // one revocation list is issued at a time
 }
 
 // NewSecret returns a fresh random per-session secret (128 bits).
@@ -98,6 +155,11 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.admit(r) {
 			reply(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+		if !s.all.allow(maxRequests) {
+			w.Header().Set("Retry-After", "60")
+			reply(w, http.StatusTooManyRequests, errBody("too many requests"))
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
@@ -243,6 +305,11 @@ type recoverReq struct {
 // rootRecover restores the root key from a backup and the recovery code. It
 // refuses when a root already exists.
 func (s *Server) rootRecover(w http.ResponseWriter, r *http.Request) {
+	if !s.failures.open(maxRecovery) {
+		w.Header().Set("Retry-After", "60")
+		reply(w, http.StatusTooManyRequests, errBody("too many failed recovery attempts"))
+		return
+	}
 	var in recoverReq
 	if !decode(w, r, &in) {
 		return
@@ -264,6 +331,7 @@ func (s *Server) rootRecover(w http.ResponseWriter, r *http.Request) {
 	}
 	k, err := root.Recover(in.RecoveryCode, backup)
 	if err != nil {
+		s.failures.hit()
 		reply(w, http.StatusForbidden, errBody(root.ErrBadRecovery.Error()))
 		return
 	}
@@ -312,8 +380,8 @@ type revocationReq struct {
 }
 
 // signRevocation signs the successor of the list the caller holds. The previous
-// list must carry our own signature, so a caller cannot make us sign on top of
-// a list we never issued.
+// list must carry our own signature and be the newest we issued, so a caller
+// cannot make us sign on top of a list we never issued or an outdated one.
 func (s *Server) signRevocation(w http.ResponseWriter, r *http.Request) {
 	var in revocationReq
 	if !decode(w, r, &in) {
@@ -323,15 +391,35 @@ func (s *Server) signRevocation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.Revocations == nil {
+		reply(w, http.StatusInternalServerError, errBody("no revocation store configured"))
+		return
+	}
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	if in.Prev != nil {
 		if err := revocation.Verify(k.Public().(ed25519.PublicKey), in.Prev, s.now()); err != nil {
 			reply(w, http.StatusBadRequest, errBody("previous list does not verify against this root"))
 			return
 		}
 	}
+	cur, err := s.Revocations.Load()
+	if err != nil {
+		reply(w, http.StatusInternalServerError, errBody("cannot read the issued revocation list"))
+		return
+	}
+	if cur != nil && (in.Prev == nil || in.Prev.Version < cur.Version) {
+		reply(w, http.StatusConflict, errBody("previous list is not the newest issued; fetch the current list"))
+		return
+	}
 	l, err := revocation.Next(k, in.Tenant, in.Prev, in.Add, s.now())
 	if err != nil {
 		reply(w, http.StatusBadRequest, errBody(err.Error()))
+		return
+	}
+	// Durable before the caller sees it, so a restart cannot forget a list that is already out.
+	if err := s.Revocations.Save(l); err != nil {
+		reply(w, http.StatusInternalServerError, errBody("cannot save the issued revocation list"))
 		return
 	}
 	reply(w, http.StatusOK, l)

@@ -69,7 +69,7 @@ func TestSignerCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	info := filepath.Join(cfg, "parley", "signer.json")
 	// A stale, world-readable file from a dead signer must not survive as 0644.
-	os.MkdirAll(filepath.Dir(info), 0o755)
+	os.MkdirAll(filepath.Dir(info), 0o700)
 	os.WriteFile(info, []byte("{}"), 0o644)
 	var out, errw syncBuffer
 	done := make(chan int)
@@ -169,6 +169,25 @@ func TestSignerCommandErrors(t *testing.T) {
 	}
 	if code := runCtx(ctx, []string{"signer"}, &out, &errw, func() (string, error) { return "", errors.New("no home") }); code != 1 {
 		t.Errorf("no config dir: %d", code)
+	}
+}
+
+// The signer refuses a config directory that other users can reach, because it holds the root key and the secret.
+func TestSignerRefusesOpenConfigDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not apply; the Windows ACL check is covered in internal/fsperm")
+	}
+	cfg := t.TempDir()
+	open := filepath.Join(cfg, "parley")
+	os.Mkdir(open, 0o755)
+	os.Chmod(open, 0o755)
+	var out, errw bytes.Buffer
+	code := runCtx(context.Background(), []string{"signer"}, &out, &errw, func() (string, error) { return cfg, nil })
+	if code != 1 || !strings.Contains(errw.String(), "accessible to other users") {
+		t.Errorf("open dir accepted: %d %q", code, errw.String())
+	}
+	if _, err := os.Stat(filepath.Join(open, "signer.json")); err == nil {
+		t.Error("secret written into an open directory")
 	}
 }
 

@@ -128,3 +128,25 @@ func TestLimitsArePinned(t *testing.T) {
 		t.Fatal("a download limit changed: review it")
 	}
 }
+
+// A release address on https must not bounce the download down to plain http, even to a loopback host.
+func TestHTTPSourceRefusesDowngradeRedirect(t *testing.T) {
+	hit := false
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Write([]byte("ok"))
+	}))
+	defer plain.Close()
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/down") {
+			http.Redirect(w, r, plain.URL+"/x", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/rel/latest/download/ok", http.StatusFound)
+	}))
+	defer secure.Close()
+	s := HTTPSource{Base: secure.URL + "/rel", Client: secure.Client()}
+	if err := s.Fetch(context.Background(), "", "down", 10, &bytes.Buffer{}); err == nil || hit {
+		t.Fatalf("https to http redirect followed (hit=%v, err=%v)", hit, err)
+	}
+}

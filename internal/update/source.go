@@ -77,7 +77,9 @@ func (s HTTPSource) Fetch(ctx context.Context, version, name string, limit int64
 		c = *s.Client
 	}
 	c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || !allowedURL(r.URL) {
+		// A redirect may never lower the transport: from https it must stay https (a loopback http mirror
+		// may redirect within http).
+		if len(via) >= 5 || !allowedURL(r.URL) || (via[0].URL.Scheme == "https" && r.URL.Scheme != "https") {
 			return ErrSource
 		}
 		return nil

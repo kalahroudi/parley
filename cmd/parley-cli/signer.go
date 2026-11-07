@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/kalahroudi/parley/internal/fsperm"
+	"github.com/kalahroudi/parley/internal/revocation"
 	"github.com/kalahroudi/parley/internal/root"
 	"github.com/kalahroudi/parley/internal/signer"
 )
@@ -37,19 +39,21 @@ func runSigner(ctx context.Context, args []string, out, errw io.Writer, dir stri
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// The config directory holds the root key and the session secret: it must be ours and closed to other users.
+	for _, d := range []string{dir, filepath.Dir(*infoPath)} {
+		if err := fsperm.EnsureDir(d); err != nil {
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
+	}
 	secret := signer.NewSecret()
-	s := &signer.Server{Store: root.FileStore{Dir: dir}, BackupPath: filepath.Join(dir, "root-backup.json"), Secret: secret}
+	s := &signer.Server{Store: root.FileStore{Dir: dir}, Revocations: revocation.NewFileStore(filepath.Join(dir, "revocations-issued.json")), BackupPath: filepath.Join(dir, "root-backup.json"), Secret: secret}
 	l, err := s.Listen(*listen)
 	if err != nil {
 		fmt.Fprintln(errw, "error:", err)
 		return 1
 	}
 	info, _ := json.Marshal(signerInfo{l.Addr().String(), secret, os.Getpid()})
-	if err := os.MkdirAll(filepath.Dir(*infoPath), 0o700); err != nil {
-		l.Close()
-		fmt.Fprintln(errw, "error:", err)
-		return 1
-	}
 	// Replace any stale file from a dead signer; the new file is created 0600.
 	os.Remove(*infoPath)
 	if err := writeNew(*infoPath, info); err != nil {
