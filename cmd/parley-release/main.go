@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/kalahroudi/parley/internal/release"
 )
@@ -22,6 +24,9 @@ const usage = `usage:
   parley-release verify-checksums <sums-file>                  (files next to it)
   parley-release formula <tag> <dir> <out>                     (Homebrew formula from the binaries in <dir>)
   parley-release deb <tag> <amd64|arm64> <dir> <out>           (Debian package from the Linux binaries in <dir>)
+  parley-release apt <dir> <unix-time>                         (Packages and Release for the .deb files in <dir>)
+  parley-release apt-sign <secret-file> <dir>                  (Release.gpg and InRelease for <dir>/Release, signed with the release key)
+  parley-release apt-key <secret-file> <out>                   (the release key as an OpenPGP public key, armored; prints its fingerprint)
 
 The secret key file is encrypted; keygen and sign read its password from the
 environment variable ` + passwordEnv + ` (never from the command line).
@@ -58,6 +63,19 @@ func createFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return f.Close()
+}
+
+// loadSecret reads the encrypted release key with the password from the environment.
+func loadSecret(path string) (release.SecretKey, error) {
+	pw, err := password()
+	if err != nil {
+		return release.SecretKey{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return release.SecretKey{}, err
+	}
+	return release.ParseSecretKey(data, pw)
 }
 
 func run(a []string) error {
@@ -158,6 +176,44 @@ func run(a []string) error {
 			return err
 		}
 		return os.WriteFile(a[3], out, 0o644)
+	case cmd == "apt" && len(a) == 2:
+		secs, err := strconv.ParseInt(a[1], 10, 64)
+		if err != nil || secs < 0 {
+			return fmt.Errorf("apt: %q is not a unix time", a[1])
+		}
+		packages, rel, err := release.AptIndex(a[0], time.Unix(secs, 0))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(a[0], "Packages"), packages, 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(a[0], "Release"), rel, 0o644)
+	case cmd == "apt-sign" && len(a) == 2:
+		sk, err := loadSecret(a[0])
+		if err != nil {
+			return err
+		}
+		rel, err := os.ReadFile(filepath.Join(a[1], "Release"))
+		if err != nil {
+			return err
+		}
+		detached, inRelease := release.SignRelease(sk, rel)
+		if err := os.WriteFile(filepath.Join(a[1], "Release.gpg"), detached, 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(a[1], "InRelease"), inRelease, 0o644)
+	case cmd == "apt-key" && len(a) == 2:
+		sk, err := loadSecret(a[0])
+		if err != nil {
+			return err
+		}
+		block, fp := release.PublicKeyBlock(sk)
+		if err := os.WriteFile(a[1], block, 0o644); err != nil {
+			return err
+		}
+		fmt.Println("fingerprint:", fp)
+		return nil
 	case cmd == "verify-checksums" && len(a) == 1:
 		data, err := os.ReadFile(a[0])
 		if err != nil {

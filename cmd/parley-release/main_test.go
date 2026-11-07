@@ -164,3 +164,93 @@ func TestPackagingCommands(t *testing.T) {
 		t.Fatal("unwritable output accepted")
 	}
 }
+
+func TestAptCommands(t *testing.T) {
+	d := t.TempDir()
+	for _, arch := range []string{"amd64", "arm64"} {
+		os.WriteFile(filepath.Join(d, "parley_1.0.0_"+arch+".deb"), []byte("deb "+arch), 0o644)
+	}
+	if err := run([]string{"apt", d, "1800000000"}); err != nil {
+		t.Fatal(err)
+	}
+	rel, _ := os.ReadFile(filepath.Join(d, "Release"))
+	if !strings.Contains(string(rel), "Architectures: amd64 arm64") || !strings.Contains(string(rel), "Date: Fri, 15 Jan 2027 08:00:00 UTC") {
+		t.Fatalf("Release: %s", rel)
+	}
+	if b, _ := os.ReadFile(filepath.Join(d, "Packages")); strings.Count(string(b), "Filename: ./parley_1.0.0_") != 2 {
+		t.Fatalf("Packages: %s", b)
+	}
+	for _, bad := range []string{"yesterday", "-5", ""} {
+		if err := run([]string{"apt", d, bad}); err == nil {
+			t.Errorf("time %q accepted", bad)
+		}
+	}
+	if err := run([]string{"apt", t.TempDir(), "1"}); err == nil {
+		t.Fatal("empty repository accepted")
+	}
+	ro := t.TempDir()
+	os.WriteFile(filepath.Join(ro, "parley_1.0.0_amd64.deb"), []byte("x"), 0o644)
+	os.Mkdir(filepath.Join(ro, "Packages"), 0o755)
+	if err := run([]string{"apt", ro, "1"}); err == nil {
+		t.Fatal("unwritable Packages accepted")
+	}
+	os.Remove(filepath.Join(ro, "Packages"))
+	os.Mkdir(filepath.Join(ro, "Release"), 0o755)
+	if err := run([]string{"apt", ro, "1"}); err == nil {
+		t.Fatal("unwritable Release accepted")
+	}
+
+	// Key and signatures need the release key and its password.
+	sk, pk := filepath.Join(d, "k"), filepath.Join(d, "k.pub")
+	if err := run([]string{"apt-sign", sk, d}); err == nil {
+		t.Fatal("signing without a password accepted")
+	}
+	t.Setenv(passwordEnv, "test-password")
+	if err := run([]string{"keygen", sk, pk}); err != nil {
+		t.Fatal(err)
+	}
+	asc := filepath.Join(d, "parley.asc")
+	if err := run([]string{"apt-key", sk, asc}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(asc); !strings.HasPrefix(string(b), "-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+		t.Fatalf("key: %s", b)
+	}
+	if err := run([]string{"apt-sign", sk, d}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(d, "InRelease")); !strings.HasPrefix(string(b), "-----BEGIN PGP SIGNED MESSAGE-----") {
+		t.Fatalf("InRelease: %s", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(d, "Release.gpg")); !strings.HasPrefix(string(b), "-----BEGIN PGP SIGNATURE-----") {
+		t.Fatalf("Release.gpg: %s", b)
+	}
+	t.Setenv(passwordEnv, "wrong")
+	if err := run([]string{"apt-sign", sk, d}); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	if err := run([]string{"apt-key", sk, asc}); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	t.Setenv(passwordEnv, "test-password")
+	if err := run([]string{"apt-sign", sk, t.TempDir()}); err == nil {
+		t.Fatal("missing Release accepted")
+	}
+	if err := run([]string{"apt-sign", filepath.Join(d, "none"), d}); err == nil {
+		t.Fatal("missing key accepted")
+	}
+	if err := run([]string{"apt-key", sk, filepath.Join(d, "no", "such", "k.asc")}); err == nil {
+		t.Fatal("unwritable output accepted")
+	}
+	rw := t.TempDir()
+	os.WriteFile(filepath.Join(rw, "Release"), []byte("Origin: x\n"), 0o644)
+	os.Mkdir(filepath.Join(rw, "Release.gpg"), 0o755)
+	if err := run([]string{"apt-sign", sk, rw}); err == nil {
+		t.Fatal("unwritable Release.gpg accepted")
+	}
+	os.Remove(filepath.Join(rw, "Release.gpg"))
+	os.Mkdir(filepath.Join(rw, "InRelease"), 0o755)
+	if err := run([]string{"apt-sign", sk, rw}); err == nil {
+		t.Fatal("unwritable InRelease accepted")
+	}
+}

@@ -304,3 +304,126 @@ test("publish-tap.sh refuses a formula the signature does not cover or that is f
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /not the formula of v1\.2\.3/);
 });
+
+// ---- scripts/publish-apt.sh -------------------------------------------------------------------------------------
+
+const hasGpg = spawnSync("gpg", ["--version"]).status === 0;
+function publishApt(dist, repo, pub, extraEnv, ...args) {
+  return spawnSync("sh", ["scripts/publish-apt.sh", dist, repo, ...args], {
+    cwd: root,
+    env: { ...process.env, PARLEY_RELEASE_PUB: pub, ...extraEnv },
+    encoding: "utf8",
+  });
+}
+function signingEnv() {
+  const { secret } = signedRelease();
+  return { PARLEY_RELEASE_KEY: secret, PARLEY_RELEASE_KEY_PASSWORD: "test-password" };
+}
+
+test("publish-apt.sh --dry-run verifies and prepares everything and changes nothing", opts, () => {
+  const { out, pub } = signedRelease();
+  const { work, bare } = tapCheckout();
+  const before = git(bare, "rev-parse", "main");
+  let r = publishApt(out, work, pub, signingEnv(), "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /dry run: would publish parley v1\.2\.3 .*\(\d+ files, signed with the project key\)/);
+  // Without the key it still verifies, and says the repository would not be signed.
+  r = publishApt(out, work, pub, { PARLEY_RELEASE_KEY: "", PARLEY_RELEASE_KEY_PASSWORD: "" }, "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /not signed/);
+  assert.equal(git(work, "status", "--porcelain"), "");
+  assert.ok(!existsSync(join(work, "apt")));
+  assert.equal(git(bare, "rev-parse", "main"), before);
+});
+
+test("publish-apt.sh publishes a repository signed by the project key, once", opts, () => {
+  const { out, pub } = signedRelease();
+  const { work, bare } = tapCheckout();
+  const r = publishApt(out, work, pub, signingEnv());
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /published parley v1\.2\.3 to the apt repository/);
+  const files = git(bare, "ls-tree", "--name-only", "main:apt").trim().split("\n");
+  for (const f of ["InRelease", "Packages", "Release", "Release.gpg", "parley.asc", "parley_1.2.3_amd64.deb", "parley_1.2.3_arm64.deb"]) {
+    assert.ok(files.includes(f), `${f} missing from ${files}`);
+  }
+  assert.equal(git(bare, "log", "-1", "--format=%s", "main").trim(), "apt: parley v1.2.3");
+  const show = (f) => git(bare, "show", `main:apt/${f}`);
+  assert.match(show("Release"), /Date: .* UTC\n/);
+  assert.match(show("InRelease"), /^-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Parley\n/);
+  assert.match(show("Release.gpg"), /^-----BEGIN PGP SIGNATURE-----/);
+  assert.match(show("parley.asc"), /^-----BEGIN PGP PUBLIC KEY BLOCK-----/);
+  assert.match(show("Packages"), /Filename: \.\/parley_1\.2\.3_arm64\.deb\n/);
+  if (hasGpg) {
+    // What a client does: import the published key, verify the published signatures.
+    const home = mkdtempSync(join("/tmp", "pg"));
+    const g = (...a) => spawnSync("gpg", ["--homedir", home, "--batch", "--no-tty", ...a], { encoding: "utf8" });
+    const dir = tmp();
+    for (const f of ["InRelease", "Release", "Release.gpg", "parley.asc"]) writeFileSync(join(dir, f), show(f));
+    assert.equal(g("--import", join(dir, "parley.asc")).status, 0);
+    assert.equal(g("--verify", join(dir, "InRelease")).status, 0);
+    assert.equal(g("--verify", join(dir, "Release.gpg"), join(dir, "Release")).status, 0);
+  } else if (process.env.CI && process.platform === "linux") {
+    assert.fail("gpg is required on Linux CI to check the published apt signatures");
+  }
+  const again = publishApt(out, work, pub, signingEnv());
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /already in the apt repository/);
+  assert.equal(git(bare, "rev-list", "--count", "main").trim(), "2");
+});
+
+test("publish-apt.sh refuses what does not verify or cannot be signed", opts, () => {
+  const { out, pub, dir } = signedRelease();
+  const { work, bare } = tapCheckout();
+  const before = git(bare, "rev-parse", "main");
+  const key = signingEnv();
+  const other = join(dir, "other2.pub");
+  assert.equal(tool("keygen", join(dir, "other2.key"), other).status, 0);
+  let r = publishApt(out, work, other, key);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /not signed by the project key/);
+  const copy = join(tmp(), "dist");
+  execFileSync("cp", ["-R", out, copy]);
+  writeFileSync(join(copy, "parley_1.2.3_amd64.deb"), "tampered");
+  r = publishApt(copy, work, pub, key);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /does not match SHA256SUMS/);
+  r = publishApt(out, work, pub, { ...key, PARLEY_RELEASE_KEY_PASSWORD: "" });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /PARLEY_RELEASE_KEY_PASSWORD/);
+  r = publishApt(out, work, pub, { ...key, PARLEY_RELEASE_KEY_PASSWORD: "wrong" });
+  assert.notEqual(r.status, 0);
+  r = publishApt(out, work, pub, { PARLEY_RELEASE_KEY: "", PARLEY_RELEASE_KEY_PASSWORD: "" });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /set PARLEY_RELEASE_KEY/);
+  r = publishApt(out, work, pub, { ...key, PARLEY_RELEASE_KEY: join(dir, "missing.key") });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /names no file/);
+  r = publishApt(out, tmp(), pub, key);
+  assert.match(r.stderr, /not a git checkout/);
+  assert.notEqual(publishApt(tmp(), work, pub, key).status, 0);
+  // A release without the packages (built for a short target list) is refused too.
+  const { secret } = signedRelease();
+  const partial = join(tmp(), "dist");
+  execFileSync("sh", ["scripts/release.sh", "v1.2.3", partial, secret], { cwd: root, env, stdio: "pipe" });
+  r = publishApt(partial, work, pub, key);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /is missing from/);
+  assert.equal(publishApt(out, work, pub, key, "--force").status, 2);
+  assert.equal(spawnSync("sh", ["scripts/publish-apt.sh", out], { cwd: root }).status, 2);
+  assert.equal(git(bare, "rev-parse", "main"), before);
+  assert.equal(git(work, "status", "--porcelain"), "");
+});
+
+test("publish-apt.sh refuses a package the signature does not cover", opts, () => {
+  const { out, pub, secret } = signedRelease();
+  const { work } = tapCheckout();
+  const copy = join(tmp(), "dist");
+  execFileSync("cp", ["-R", out, copy]);
+  // Re-signed by the project key, but the arm64 package is no longer listed.
+  const files = readdirSync(copy).filter((f) => !f.startsWith("SHA256SUMS") && f !== "parley_1.2.3_arm64.deb");
+  assert.equal(tool("checksums", copy, join(copy, "SHA256SUMS"), ...files).status, 0);
+  assert.equal(tool("sign", secret, join(copy, "SHA256SUMS"), "parley release v1.2.3 issued=1800000000 expires=1810000000").status, 0);
+  const r = publishApt(copy, work, pub, signingEnv());
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /parley_1\.2\.3_arm64\.deb is not covered/);
+});
