@@ -116,22 +116,30 @@ type message struct {
 	Args    []string `json:"args"`
 }
 
-// readMessage reads and validates one line, refusing one longer than MaxLine
-// without buffering more than that.
-func readMessage(r *bufio.Reader) (message, error) {
+// readLine reads one line, refusing one longer than MaxLine without buffering more than that.
+func readLine(r *bufio.Reader) ([]byte, error) {
 	var line []byte
 	for {
 		part, more, err := r.ReadLine()
 		if err != nil {
-			return message{}, err
+			return nil, err
 		}
 		if len(line)+len(part) > MaxLine {
-			return message{}, errTooLong
+			return nil, errTooLong
 		}
 		line = append(line, part...)
 		if !more {
-			break
+			return line, nil
 		}
+	}
+}
+
+// readMessage reads and validates one line, refusing one longer than MaxLine
+// without buffering more than that.
+func readMessage(r *bufio.Reader) (message, error) {
+	line, err := readLine(r)
+	if err != nil {
+		return message{}, err
 	}
 	// Strict: unknown fields, trailing data and a second value are protocol errors, not ignored input.
 	var m message

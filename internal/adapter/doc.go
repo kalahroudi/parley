@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package adapter connects the daemon to the bot a customer brings. Adapters
-// implement bot.Bot. There are two: the API adapter (the bot is an HTTP service;
-// each task is a POST to one configured URL) and the CLI adapter (the bot is a
-// program run once per task). The ACP adapter comes as a separate change and
-// speaks the same line protocol.
+// implement bot.Bot. There are three: the API adapter (the bot is an HTTP service;
+// each task is a POST to one configured URL), the CLI adapter (the bot is a
+// program run once per task) and the ACP adapter (the bot is a program that speaks
+// the Agent Client Protocol, run once per task like a CLI bot). The API and CLI
+// adapters speak the line protocol below; the ACP adapter speaks ACP (see ACP).
 //
 // Host (package bot) owns everything the daemon promises about a task: limits,
 // the one final message, timeouts, redaction of errors. The adapters only
@@ -75,6 +76,26 @@
 // CLI: the task line, then each answer line, go to the program's standard input;
 // its standard output carries the bot's lines. There is no cancel line: the end
 // of the task is the end of the process.
+//
+// # ACP
+//
+// The ACP adapter starts the program exactly as the CLI adapter does (same containment, same registration, same
+// environment rules) and speaks JSON-RPC 2.0, one message per line (at most MaxLine bytes), as an ACP client: initialize
+// (protocol version 1 only), session/new (rooted in the configured directory, no MCP servers), and one session/prompt.
+// The task content, which must be valid UTF-8 or the task fails with TextACPNotText, is the prompt's single text block;
+// the caller, owner, context and expiry travel as JSON fields in the request's _meta, never inside text. The result is the
+// text of the agent's message chunks once it stops with end_turn; any other stop reason fails the task, and a reply larger
+// than a result may be is cut as soon as it is, the agent killed. The envelope of every message is read strictly (unknown
+// fields, trailing data, a wrong id, a long request id are protocol errors); the contents of params and result are read
+// leniently, because ACP lets either side add fields.
+//
+// Nothing is granted to the agent: the client offers no file system and no terminal, answers any request it receives with
+// "method not found", and denies every permission request (the reject option the agent offered, or "cancelled"), so an agent
+// cannot ask its way into acting on the machine through the client. What the agent does by itself, with its own tools, is
+// the customer's configuration and is a tool-using skill (owner approval; unsupported on Windows). Thoughts, plans,
+// tool progress and non-text blocks are dropped, at most MaxACPIgnored of them (and MaxACPPermissions permission requests)
+// per task. ACP has no question to the caller, and no status text that is not also the agent's thinking, so the caller sees
+// no status and no INPUT_REQUIRED from an ACP bot. The end of the task is the end of the process (no session/cancel).
 //
 // What this package cannot do: the bot receives the plaintext and keeps what it
 // likes; it is outside Parley's guarantees. Scrubbing of the buffers this

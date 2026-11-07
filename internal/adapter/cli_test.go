@@ -105,6 +105,8 @@ func helper(mode string) {
 		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: last})
 	case "toolgone": // asks for a tool and leaves without reading the reply
 		fmt.Println(`{"type":"tool","tool":"t"}`)
+	case "acp", "acp-noreject", "acp-echo", "acp-big", "acp-version", "acp-error", "acp-refuse", "acp-raw", "acp-flood", "acp-wrongsession", "acp-hang", "acp-closein":
+		acpAgent(mode)
 	case "beat":
 		f, _ := os.OpenFile(os.Getenv("PARLEY_BEAT"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		for {

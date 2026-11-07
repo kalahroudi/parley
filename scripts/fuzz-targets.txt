@@ -20,3 +20,4 @@
 ./internal/adapter  FuzzReadMessage  10s
 ./internal/approval FuzzPrintable 10s
 ./internal/localsock  FuzzExactKeys  5s
+./internal/adapter  FuzzParseRPC  10s
