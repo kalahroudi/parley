@@ -67,14 +67,14 @@ func TestSignerCommand(t *testing.T) {
 	cfg := t.TempDir()
 	dir := func() (string, error) { return cfg, nil }
 	ctx, cancel := context.WithCancel(context.Background())
-	var out, errw syncBuffer
-	done := make(chan int)
-	go func() { done <- runCtx(ctx, []string{"signer"}, &out, &errw, dir) }()
-
 	info := filepath.Join(cfg, "parley", "signer.json")
 	// A stale, world-readable file from a dead signer must not survive as 0644.
 	os.MkdirAll(filepath.Dir(info), 0o755)
 	os.WriteFile(info, []byte("{}"), 0o644)
+	var out, errw syncBuffer
+	done := make(chan int)
+	go func() { done <- runCtx(ctx, []string{"signer"}, &out, &errw, dir) }()
+
 	var si signerInfo
 	for i := 0; i < 1200; i++ {
 		if b, err := os.ReadFile(info); err == nil && json.Unmarshal(b, &si) == nil && si.Addr != "" {
