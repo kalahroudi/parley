@@ -141,8 +141,17 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
     const member = await enroll("svc-member");
     const stranger = await enroll("svc-stranger");
     const all = { target, own, member, stranger };
+    // When a daemon goes, take a snapshot of every process at that moment (what else is running, with its parent), so a daemon
+    // ended from outside can be traced; it is printed only if the test fails.
+    const deaths = [];
     for (const d of Object.values(all)) {
       const p = capture(spawn(exe("parleyd"), [], { env: { ...process.env, PARLEY_HOME: d.home }, stdio: ["ignore", "pipe", "pipe"] }));
+      p.child.once("exit", (code, sig) => {
+        if (process.platform !== "win32") return;
+        const ps = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+          "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Sort-Object ProcessId | Format-Table -AutoSize | Out-String -Width 300"], { encoding: "utf8" });
+        deaths.push(`daemon pid ${p.child.pid} exit ${code}/${sig} at ${new Date().toISOString()}; processes then:\n${ps.stdout}`);
+      });
       daemons.push(p);
     }
     await waitFor("the daemons to answer on their sockets", async () => {
@@ -186,7 +195,7 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
       for (const [i, d] of daemons.entries()) {
         if (d.child.exitCode === null && d.child.signalCode === null) continue;
         const { out } = await d.done;
-        assert.fail(`daemon ${i} (pid ${d.child.pid}) exited (${d.child.exitCode}, signal ${d.child.signalCode}) at ${new Date().toISOString()} during "${row.name}":\n${out}`);
+        assert.fail(`daemon ${i} (pid ${d.child.pid}) exited (${d.child.exitCode}, signal ${d.child.signalCode}) at ${new Date().toISOString()} during "${row.name}":\n${out}\n${deaths.join("\n")}`);
       }
       for (const [who, got] of results) {
         seen.push(`${row.name} / ${who}: ${got}`);
