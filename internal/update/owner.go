@@ -51,7 +51,7 @@ func checkInstall(dir string, files []string, inspect func(string) (fsowner.Info
 		// Group write counts too, unless the system owns the parent (like /Library on macOS): a group member could
 		// rename our directory away. A sticky parent only lets the owner of an entry rename it.
 		if !(pi.Owned || pi.Trusted) || !pi.Sticky && (pi.WorldWrite || pi.GroupOrOtherWrite && !pi.Trusted) {
-			return fmt.Errorf("%w: parent %s", ErrNotOwner, p)
+			return fmt.Errorf("%w: parent %s (%+v)", ErrNotOwner, p, pi)
 		}
 		if filepath.Dir(p) == p {
 			break

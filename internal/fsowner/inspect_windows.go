@@ -43,7 +43,7 @@ func Inspect(path string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	trusted := owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)
+	trusted := owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || owner.Equals(trustedInstaller)
 	return Info{
 		IsDir:     fi.IsDir(),
 		IsRegular: fi.Mode().IsRegular(),
@@ -54,6 +54,15 @@ func Inspect(path string) (Info, error) {
 		WorldWrite:        strong && !trusted, // what the system owns keeps the access list the system gave it (C:\ itself lets Users add entries)
 	}, nil
 }
+
+// trustedInstaller (NT SERVICE\TrustedInstaller) owns the system's own files and folders on current Windows.
+var trustedInstaller = func() *windows.SID {
+	sid, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+	if err != nil {
+		panic(err)
+	}
+	return sid
+}()
 
 // Access rights that let others change a file's contents (dataWrite) or take it over, delete it or its entries
 // (takeOver). Creating a subdirectory in a parent (FILE_APPEND_DATA alone is not enough to rename an entry away)
