@@ -39,3 +39,26 @@ update`, the Homebrew formula and tap, the Debian package and apt repository. Th
 next start: the updater does not restart a process.
 There is no operator opt-out yet; it is owed by the wiring above. An attacker who blocks the network can keep a device on an old version until
 the last manifest it saw expires; the gateway's protocol-version check bounds that too.
+
+## Configuration (operator opt-out and pin)
+
+In `config.json` (read by `parleyd` and `parley-cli`), all optional:
+
+```json
+"update": { "mode": "auto", "pin": "v1.4.2", "interval": "6h", "source": "https://mirror.example/parley/releases" }
+```
+
+- `mode`: `auto` (default: check and install a verified newer release), `check` (check and record what is
+  available, install only on `parley-cli update`) or `off` (never contact the release source).
+- `pin`: hold the device on exactly that version. It is installed even if older (that is what pinning is for), and no
+  other version ever is.
+- `interval`: 1h to 168h, default 6h.
+- `source`: a mirror with GitHub's release layout, https only (loopback http for tests). Releases from a mirror are
+  verified exactly like the project's own, so a mirror can withhold an update but never forge one.
+
+The environment variable `PARLEY_UPDATE` (`auto`, `check` or `off`) lets an operator restrict updates from a service
+unit or container without editing the file. It only tightens: `off` beats everything, `check` beats `auto`, and
+it can never turn on what the configuration turned off. A value it does not understand means `off`.
+
+This is the configuration and its resolution (`daemon.Config.Policy`); the background component and the CLI that
+follow it come next.

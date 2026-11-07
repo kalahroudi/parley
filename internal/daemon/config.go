@@ -88,6 +88,8 @@ type Config struct {
 	DisableTestBot bool `json:"disable_test_bot,omitempty"`
 	// Bot is the bot this device runs for its owners' callers (botconfig.go). Without it only the test bot runs.
 	Bot *BotConfig `json:"bot,omitempty"`
+	// Update controls self-update (updateconfig.go). Without it the defaults apply: auto, the project's releases.
+	Update *UpdateConfig `json:"update,omitempty"`
 
 	refresh time.Duration
 }
@@ -169,6 +171,11 @@ func (c *Config) validate() error {
 	}
 	if c.Bot != nil {
 		if err := c.Bot.validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrConfig, err)
+		}
+	}
+	if c.Update != nil {
+		if err := c.Update.validate(); err != nil {
 			return fmt.Errorf("%w: %v", ErrConfig, err)
 		}
 	}
