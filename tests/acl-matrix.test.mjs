@@ -28,7 +28,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { connectToken, registerRoot, signBinding, signRevocations, startGateway, subscribe } from "./harness/gateway.mjs";
+import { connectToken, registerRoot, signBinding, signRevocations, startGateway } from "./harness/gateway.mjs";
 
 const repo = join(fileURLToPath(import.meta.url), "..", "..");
 const isWindows = process.platform === "win32";
@@ -112,7 +112,6 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
   const daemons = [];
   try {
     const admin = (await gw.signIn({ tenant: "acme", role: "admin", email: "admin@acme.test" })).token;
-    await subscribe(gw.url, "acme"); // past the free tier's 3 devices
     const rootKey = await registerRoot(gw.url, admin);
     const fp = fingerprint(rootKey.publicKey);
     assert.equal((await post(gw.url, "/v1/admin/revocations", admin, { list: signRevocations(rootKey, { tenant: "acme" }) })).status, 200);

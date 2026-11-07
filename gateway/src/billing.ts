@@ -13,6 +13,7 @@ import { tenantStub } from "./tenant";
 // session); this file holds the three decisions that matter, each a pure function: is a webhook genuine, what does an
 // event change, and how many devices may the tenant approve now.
 
+// What a tenant keeps once a subscription it had has lapsed and its grace period is over.
 export const FREE_SEATS = 3;
 // A subscription that lapses (payment failed, canceled, unpaid) keeps its paid seat count for this long, counted from
 // the time Stripe says it lapsed, so a missed card payment does not stop the next hire from enrolling.
@@ -51,10 +52,11 @@ export interface SubUpdate {
   created: number; // Stripe event time, ms
 }
 
-// How many devices the tenant may have approved at `now`: the paid seats while the subscription is in good standing or
-// inside its grace period, never fewer than the free ones.
+// How many devices the tenant may have approved at `now`. A tenant that has never had a subscription is not metered at
+// all (self-hosted, development and test tenants: no billing record, no limit); once Stripe has reported one, the paid
+// seats while it is in good standing or inside its grace period, and otherwise the free ones. Never fewer than the free ones.
 export function limitOf(b: Billing | undefined, now: number): number {
-  if (!b) return FREE_SEATS;
+  if (!b) return Infinity;
   const paid = entitled(b.status) || now < (b.grace_until ?? 0);
   return paid ? Math.max(b.seats, FREE_SEATS) : FREE_SEATS;
 }

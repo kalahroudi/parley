@@ -432,11 +432,12 @@ export class Tenant extends DurableObject<Env> {
   }
 
   // The tenant's plan as the admin sees it: no ids, only the numbers and whether the subscription is in good standing.
-  async billingView(): Promise<{ status: string; limit: number; used: number; subscribed: boolean; grace_until?: number }> {
+  async billingView(): Promise<{ status: string; limit: number | null; used: number; subscribed: boolean; grace_until?: number }> {
     const b = await this.ctx.storage.get<Billing>("billing");
+    const limit = limitOf(b, Date.now());
     return {
-      status: b?.status ?? "free",
-      limit: limitOf(b, Date.now()),
+      status: b?.status ?? "none",
+      limit: Number.isFinite(limit) ? limit : null, // null: not metered (no subscription was ever reported)
       used: await this.seatsUsed(),
       subscribed: b?.status === "active" || b?.status === "trialing",
       ...(b?.grace_until === undefined ? {} : { grace_until: b.grace_until }),

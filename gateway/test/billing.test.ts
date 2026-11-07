@@ -186,7 +186,7 @@ const upd = (over: Partial<SubUpdate> = {}): SubUpdate => ({ tenant: "t", custom
 const rec = (over: Partial<Billing> = {}): Billing => ({ customer: "cus_1", subscription: "sub_1", status: "active", seats: 10, as_of: T0, ...over });
 
 describe("limitOf", () => {
-  it("is the free seats without a subscription", () => expect(limitOf(undefined, T0)).toBe(FREE_SEATS));
+  it("is not limited for a tenant that never had a subscription", () => expect(limitOf(undefined, T0)).toBe(Infinity));
   it("is the paid seats while active or trialing, never below the free ones", () => {
     expect(limitOf(rec(), T0)).toBe(10);
     expect(limitOf(rec({ status: "trialing" }), T0)).toBe(10);
@@ -307,6 +307,11 @@ const fresh = () => {
   return { t, stub, session, post, hook, enroll, decide, view, adminPost };
 };
 type World = ReturnType<typeof fresh>;
+// A tenant that once had a subscription, long lapsed: the only kind that is metered, at the free seats.
+const lapsed = async (w: World) => {
+  expect(await json(await w.hook({ status: "canceled" }, { created: nowS() - 90 * 86400 }))).toMatchObject({ applied: true });
+  return w;
+};
 const json = async (r: Response) => (await r.json()) as any;
 const storageOf = (w: World) => runInDurableObject(w.stub, async (_i, ctx) => Object.fromEntries(await ctx.storage.list()));
 const approveN = async (w: World, count: number) => {
@@ -322,7 +327,7 @@ const approveN = async (w: World, count: number) => {
 describe("the webhook endpoint", () => {
   it("applies a signed subscription event and shows it to the admin", async () => {
     const w = fresh();
-    expect(await w.view()).toEqual({ status: "free", limit: FREE_SEATS, used: 0, subscribed: false });
+    expect(await w.view()).toEqual({ status: "none", limit: null, used: 0, subscribed: false });
     const r = await w.hook();
     expect(r.status).toBe(200);
     expect(await json(r)).toEqual({ received: true, applied: true });
@@ -344,7 +349,7 @@ describe("the webhook endpoint", () => {
     }
     const r = await w.hook({}, { sig: "t=1,v1=00" });
     expect(r.status).toBe(400);
-    expect(await w.view()).toMatchObject({ status: "free" });
+    expect(await w.view()).toMatchObject({ status: "none" });
   });
 
   it("refuses signed bodies that are not JSON, and oversized ones unread", async () => {
@@ -367,7 +372,7 @@ describe("the webhook endpoint", () => {
       expect(r.status).toBe(200);
       expect(await json(r)).toEqual({ received: true, applied: false });
     }
-    expect(await w.view()).toMatchObject({ status: "free" });
+    expect(await w.view()).toMatchObject({ status: "none" });
   });
 
   it("takes only POST, and refuses a test deployment's live-mode events", async () => {
@@ -380,7 +385,7 @@ describe("the webhook endpoint", () => {
     const e = JSON.stringify({ ...sub({ metadata: { tenant: w.t } }), livemode: true });
     const r = await SELF.fetch("https://gw/v1/stripe/webhook", { method: "POST", headers: { "stripe-signature": await header(e) }, body: e });
     expect(await json(r)).toEqual({ received: true, applied: false });
-    expect(await w.view()).toMatchObject({ status: "free" });
+    expect(await w.view()).toMatchObject({ status: "none" });
   });
 
   it("expects test-mode events from a test key (or no key), and live-mode ones only from a live key that is allowed", async () => {
@@ -430,8 +435,14 @@ describe("the webhook endpoint", () => {
 });
 
 describe("seat enforcement at enrollment", () => {
-  it("allows the free seats and refuses the next approval, leaving the request pending", async () => {
+  it("does not meter a tenant that never had a subscription (self-hosted, development, tests)", async () => {
     const w = fresh();
+    await approveN(w, FREE_SEATS + 7);
+    expect(await w.view()).toEqual({ status: "none", limit: null, used: FREE_SEATS + 7, subscribed: false });
+  });
+
+  it("allows the free seats and refuses the next approval, leaving the request pending", async () => {
+    const w = await lapsed(fresh());
     await approveN(w, FREE_SEATS);
     const extra = await w.enroll("late@example.test");
     const r = await w.decide(extra);
@@ -442,7 +453,7 @@ describe("seat enforcement at enrollment", () => {
   });
 
   it("opens more seats when the subscription pays for them, and the same request can then be approved", async () => {
-    const w = fresh();
+    const w = await lapsed(fresh());
     await approveN(w, FREE_SEATS);
     const extra = await w.enroll("late@example.test");
     expect((await w.decide(extra)).status).toBe(402);
@@ -454,7 +465,7 @@ describe("seat enforcement at enrollment", () => {
   });
 
   it("never blocks rejecting, repeating a decision, or a device that already holds a seat", async () => {
-    const w = fresh();
+    const w = await lapsed(fresh());
     const ids = await approveN(w, FREE_SEATS);
     const extra = await w.enroll("late@example.test");
     expect((await w.decide(extra, "rejected")).status).toBe(200);
@@ -463,7 +474,7 @@ describe("seat enforcement at enrollment", () => {
   });
 
   it("frees a seat when a device is revoked", async () => {
-    const w = fresh();
+    const w = await lapsed(fresh());
     const ids = await approveN(w, FREE_SEATS);
     const extra = await w.enroll("late@example.test");
     expect((await w.decide(extra)).status).toBe(402);
@@ -474,7 +485,7 @@ describe("seat enforcement at enrollment", () => {
   });
 
   it("keeps counting an approved device after the enrollment retention, and drops a revoked one", async () => {
-    const w = fresh();
+    const w = await lapsed(fresh());
     const ids = await approveN(w, FREE_SEATS);
     await w.adminPost("/v1/admin/revocations", { list: { tenant: w.t, version: 1, revoked: [ids[0]], signature: "x" } });
     vi.useFakeTimers({ now: Date.now() + DECIDED_RETENTION_MS + 1000, toFake: ["Date"] });
@@ -496,7 +507,7 @@ describe("seat enforcement at enrollment", () => {
   });
 
   it("does not let two approvals share the last seat", async () => {
-    const w = fresh();
+    const w = await lapsed(fresh());
     await approveN(w, FREE_SEATS - 1);
     const [a, b] = [await w.enroll("a@example.test"), await w.enroll("b@example.test")];
     const codes = (await Promise.all([w.decide(a), w.decide(b)])).map((r) => r.status).sort();
@@ -562,7 +573,7 @@ describe("seat enforcement at enrollment", () => {
   });
 });
 
-describe("journeys A and K: the free tier, a subscription, a lapse", () => {
+describe("journeys A and K: a lapsed tenant on the free seats, a subscription, a lapse again", () => {
   // A tunnel the test holds open, as a daemon does; `closed` is set if the gateway ever closes it.
   async function tunnel(w: World, device: string) {
     const res = await gw("https://gw/v1/connect", { headers: { Upgrade: "websocket", Authorization: `Bearer dev:${w.t}:${device}` } });
@@ -576,8 +587,8 @@ describe("journeys A and K: the free tier, a subscription, a lapse", () => {
     return { ws, state };
   }
 
-  it("refuses a fourth device on the free tier, a subscription raises the limit, and no live tunnel is cut when the subscription lapses", async () => {
-    const w = fresh();
+  it("refuses a fourth device on the free seats, a subscription raises the limit, and no live tunnel is cut when the subscription lapses", async () => {
+    const w = await lapsed(fresh());
     const t = nowS();
     const ids = await approveN(w, FREE_SEATS);
     const live = await Promise.all(ids.map((id) => tunnel(w, id)));

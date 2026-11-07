@@ -4,7 +4,8 @@ Flat per-device seats. The seat limit is checked once, when an admin **approves*
 
 ## What the limit is
 
-- No subscription: 3 devices (the free tier).
+- **No billing record: not metered.** A tenant for which Stripe has never reported a subscription (self-hosted, development and test tenants, and every tenant before it first subscribes) has no seat limit, and the admin view shows `status: "none"`, `limit: null`. Billing is enforced only for tenants that have a record.
+- A tenant whose subscription has lapsed past its grace period (or whose first reported subscription never became good standing): 3 devices (the free seats).
 - A subscription in good standing (`active` or `trialing`): the quantity on the subscription, never fewer than 3.
 - A subscription that lapses (`past_due`, `unpaid`, `canceled`, `paused`, ...): the paid quantity still applies for **7 days**, counted from the time Stripe reports the first lapse (not from when we receive it, and not extended by the events that follow), then the limit is 3 again.
 - Devices over the limit stay enrolled. Approving another is refused (`402 seat_limit`) and the request stays pending, so approving works again once a seat frees up (revoking a device frees its seat) or the plan grows.

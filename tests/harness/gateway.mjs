@@ -6,7 +6,7 @@
 // gateway has no development bypass, so a test logs in the way a person does.
 
 import { spawn } from "node:child_process";
-import { createHmac, generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import { closeSync, mkdtempSync, openSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,25 +37,13 @@ function kill(child) {
   } catch {}
 }
 
-// The free tier allows 3 approved devices; a test that enrolls more subscribes its tenant first, with a subscription event
-// signed the way Stripe signs it (the gateway is started with this test secret and price).
-const WEBHOOK_SECRET = "whsec_" + "harness";
-const PRICE = "price_harness";
-export async function subscribe(url, tenant, seats = 20) {
-  const created = Math.floor(Date.now() / 1000);
-  const body = JSON.stringify({ id: "evt_harness", type: "customer.subscription.created", livemode: false, created, data: { object: { id: "sub_harness", customer: "cus_harness", status: "active", metadata: { tenant }, items: { data: [{ price: { id: PRICE }, quantity: seats }] } } } });
-  const v1 = createHmac("sha256", WEBHOOK_SECRET).update(`${created}.${body}`).digest("hex");
-  const res = await fetch(`${url}/v1/stripe/webhook`, { method: "POST", headers: { "stripe-signature": `t=${created},v1=${v1}` }, body });
-  if (res.status !== 200 || !(await res.json()).applied) throw new Error(`subscribing ${tenant} failed: ${res.status}`);
-}
-
 // `admins` is the gateway's ADMINS setting (`tenant:email,...`); `users` and `userDomains` are USERS and
 // USER_DOMAINS (`tenant:email` / `tenant:domain`), without which no user can sign in. The login rate limits are
 // raised out of the way (tests sign in dozens of times from one address); `extra` overrides any variable.
 export async function startGateway({ admins = "", users = "", userDomains = "", extra = {} } = {}) {
   const idp = await startMockOidc();
   const port = await freePort();
-  const vars = { FLOW_SECRET: "test-flow-secret", RATE_CONNECT_PER_MIN: "100000", RATE_CONNECT_DEVICE_PER_MIN: "100000", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users, USER_DOMAINS: userDomains, RATE_AUTH_PER_MIN: "100000", RATE_TENANT_LOGIN_PER_MIN: "100000", RATE_SESSION_PER_MIN: "100000", STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET, STRIPE_PRICE_ID: PRICE, ...extra };
+  const vars = { FLOW_SECRET: "test-flow-secret", RATE_CONNECT_PER_MIN: "100000", RATE_CONNECT_DEVICE_PER_MIN: "100000", GOOGLE_CLIENT_ID: "parley", GOOGLE_ISSUER: idp.issuer, ADMINS: admins, USERS: users, USER_DOMAINS: userDomains, RATE_AUTH_PER_MIN: "100000", RATE_TENANT_LOGIN_PER_MIN: "100000", RATE_SESSION_PER_MIN: "100000", ...extra };
   // Own state directory and inspector port, so several gateways can run side by side (node --test runs files in parallel).
   const state = mkdtempSync(join(tmpdir(), "parley-gw-"));
   const log = `${state}.log`; // beside the state, not in it: wrangler's output (what the gateway logs and what it was asked)
