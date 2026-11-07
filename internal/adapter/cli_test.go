@@ -41,6 +41,8 @@ func helper(mode string) {
 	switch mode {
 	case "ref":
 		adaptertest.ServeStdio(&bottest.Fake{}, os.Stdin, os.Stdout)
+	case "acp-ref":
+		adaptertest.ServeACP(&bottest.Fake{}, os.Stdin, os.Stdout)
 	case "exit":
 		os.Exit(3)
 	case "askexit": // asks, then leaves without reading the answer
@@ -105,6 +107,8 @@ func helper(mode string) {
 		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: last})
 	case "toolgone": // asks for a tool and leaves without reading the reply
 		fmt.Println(`{"type":"tool","tool":"t"}`)
+	case "acp-script":
+		scriptAgent()
 	case "acp", "acp-noreject", "acp-echo", "acp-big", "acp-version", "acp-error", "acp-refuse", "acp-raw", "acp-flood", "acp-wrongsession", "acp-hang", "acp-closein":
 		acpAgent(mode)
 	case "beat":

@@ -4,6 +4,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -119,7 +120,7 @@ func TestAppendJSONTextMatchesEncodingJSON(t *testing.T) {
 func TestPromptLineIsOneLineWithTheTaskAsDataFields(t *testing.T) {
 	tk := bot.Task{ID: [16]byte{0xab}, Context: "c\"1", Caller: "dev\nx", Owner: "o@example.com", Content: []byte("hi \"there\"\n\x01é"),
 		Expiry: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
-	line := promptLine("s\"1", tk)
+	line := promptLine(3, "s\"1", tk.Content, taskMeta(tk))
 	if line[len(line)-1] != '\n' || strings.Count(string(line), "\n") != 1 {
 		t.Fatalf("%q", line)
 	}
@@ -187,11 +188,11 @@ func TestEmptyChunksAreCounted(t *testing.T) {
 	c := &acpConv{sid: "s"}
 	empty := json.RawMessage(`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}}}`)
 	for i := 0; i < MaxACPIgnored; i++ {
-		if err := c.update(empty); err != nil {
+		if err := c.update(context.Background(), empty); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
-	if err := c.update(empty); err != errProtocol {
+	if err := c.update(context.Background(), empty); err != errProtocol {
 		t.Fatalf("one past the limit: %v", err)
 	}
 }
@@ -218,10 +219,10 @@ func TestACPLimitsAreExact(t *testing.T) {
 	text := func(n int) json.RawMessage {
 		return json.RawMessage(`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + strings.Repeat("a", n) + `"}}}`)
 	}
-	if err := c.update(text(pipeline.MaxContent)); err != nil || len(c.text) != pipeline.MaxContent {
+	if err := c.update(context.Background(), text(pipeline.MaxContent)); err != nil || len(c.text) != pipeline.MaxContent {
 		t.Fatalf("a result's size: %v", err)
 	}
-	if err := c.update(text(1)); err != errACPFull || len(c.text) != pipeline.MaxContent+1 {
+	if err := c.update(context.Background(), text(1)); err != errACPFull || len(c.text) != pipeline.MaxContent+1 {
 		t.Fatalf("one byte more: %v %d", err, len(c.text))
 	}
 }

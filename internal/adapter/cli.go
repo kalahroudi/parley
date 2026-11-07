@@ -67,7 +67,7 @@ func NewCLI(cfg CLIConfig) (*CLI, error) {
 
 // Handle implements bot.Bot.
 func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, error) {
-	p, stop, err := startBot(ctx, c.cfg, t.ID)
+	p, stop, err := startBot(ctx, c.cfg, t.ID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -91,8 +91,9 @@ func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, er
 // startBot starts the command of cfg for one task, contained and registered (see botproc), and returns it with the
 // function that ends the task's use of it: the command is killed with everything it started, reaped and unregistered,
 // and the lines written to it are scrubbed. Canceling ctx (or its deadline) kills the command, which unblocks a read or
-// write that is waiting on it. A command that cannot be started or contained does not run.
-func startBot(ctx context.Context, cfg CLIConfig, id [16]byte) (*cliPeer, func(), error) {
+// write that is waiting on it; onCancel, if given, does that itself (it must see to the kill) and stop waits for it. A
+// command that cannot be started or contained does not run.
+func startBot(ctx context.Context, cfg CLIConfig, id [16]byte, onCancel func(*cliPeer)) (*cliPeer, func(), error) {
 	cmd := exec.Command(cfg.Command, cfg.Args...) // no shell, no PATH lookup (the path is absolute)
 	cmd.Env, cmd.Dir, cmd.WaitDelay = cfg.Env, cfg.Dir, reapDelay
 	prepare(cmd)
@@ -118,10 +119,21 @@ func startBot(ctx context.Context, cfg CLIConfig, id [16]byte) (*cliPeer, func()
 		remove()
 		return nil, nil, errors.New("adapter: the bot command could not be contained")
 	}
-	unhook := context.AfterFunc(ctx, p.terminate)
+	fired := make(chan struct{})
+	unhook := context.AfterFunc(ctx, func() {
+		defer close(fired)
+		if onCancel == nil {
+			p.terminate()
+			return
+		}
+		onCancel(p)
+	})
 	return p, func() {
-		unhook()
+		started := !unhook()
 		p.close() // the command is reaped before it is unregistered
+		if started {
+			<-fired
+		}
 		remove()
 	}, nil
 }

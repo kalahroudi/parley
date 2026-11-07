@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -214,7 +215,17 @@ func (d *Daemon) initBot() error {
 	}
 	var program bot.Bot
 	if bc.Adapter == "acp" {
-		program, err = adapter.NewACP(adapter.ACPConfig{Command: bc.Command, Args: bc.Args, Dir: bc.Dir, Env: bc.Env})
+		b, err := d.newACPBroker()
+		if err != nil {
+			return err
+		}
+		for name, m := range skill.ToolMethods(b) {
+			d.srv.Methods[name] = m
+		}
+		program, err = adapter.NewACP(adapter.ACPConfig{Command: bc.Command, Args: bc.Args, Dir: bc.Dir, Env: bc.Env, Gate: skill.Bridge(b)})
+		if err != nil {
+			return fmt.Errorf("%w: bot command, directory or environment", ErrConfig)
+		}
 	} else {
 		program, err = adapter.NewCLI(adapter.CLIConfig{Command: bc.Command, Args: bc.Args, Dir: bc.Dir, Env: bc.Env, Tools: tools})
 	}
@@ -244,6 +255,20 @@ func (d *Daemon) newBroker(list []toolgate.Tool) (*toolgate.Broker, error) {
 		}
 	}
 	return toolgate.New(toolgate.Config{Manifest: m, Runner: runner, Now: d.deps.Now, Audit: d.auditTool})
+}
+
+// newACPBroker builds the broker through which an ACP agent's permission requests and file operations reach the owner. Its
+// tools only ask: the runner does nothing, the adapter does what the owner allowed (and only inside the agent's directory).
+func (d *Daemon) newACPBroker() (*toolgate.Broker, error) {
+	m, _ := toolgate.NewManifest([]toolgate.Tool{{Name: adapter.ToolACPPermission}, {Name: adapter.ToolACPRead}, {Name: adapter.ToolACPWrite}}) // valid names
+	return toolgate.New(toolgate.Config{Manifest: m, Runner: askOnly{}, Now: d.deps.Now, Audit: d.auditTool})
+}
+
+// askOnly is the runner of the ACP broker: an allowed request needs nothing run.
+type askOnly struct{}
+
+func (askOnly) Run(context.Context, toolgate.Tool, []string) (toolgate.Output, error) {
+	return toolgate.Output{}, nil
 }
 
 // auditApproval logs one step of a task's approval: the task id and a state, nothing else.

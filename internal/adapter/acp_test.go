@@ -20,6 +20,7 @@ import (
 
 	"github.com/kalahroudi/parley/internal/adapter"
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/bot/bottest"
 	"github.com/kalahroudi/parley/internal/envelope"
 	"github.com/kalahroudi/parley/internal/pipeline"
 )
@@ -119,6 +120,43 @@ func acpAgent(mode string) {
 		chunk("agent_message_chunk", "text", fmt.Sprintf("|%s|%s|%s|%s", perm["id"], perm["result"], fs["id"], fs["error"]))
 	}
 	out(`{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}`)
+}
+
+// scriptAgent plays a script, the steps of PARLEY_SCRIPT separated by 0x1e: "read" reads a line from the client and keeps it,
+// "send <json>" writes a line, "echo <n>" sends the n-th line read (counting from 1) as a message chunk, "sleep" waits for
+// the end of the task, and "mark <path>" writes the lines read so far to a file.
+func scriptAgent() {
+	in := bufio.NewReaderSize(os.Stdin, 1<<22)
+	var got []string
+	for _, step := range strings.Split(os.Getenv("PARLEY_SCRIPT"), "\x1e") {
+		verb, arg, _ := strings.Cut(step, " ")
+		switch verb {
+		case "read":
+			line, _ := in.ReadString('\n')
+			got = append(got, strings.TrimSuffix(line, "\n"))
+		case "send":
+			fmt.Println(arg)
+		case "echo":
+			n, _ := strconv.Atoi(arg)
+			q, _ := json.Marshal(got[n-1])
+			fmt.Printf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":%s}}}}`+"\n", q)
+		case "mark":
+			os.WriteFile(arg, []byte(strings.Join(got, "\n")), 0o600)
+		case "sleep":
+			time.Sleep(time.Minute)
+		}
+	}
+}
+
+// Steps of the scripts: the start of the conversation up to the prompt, and the usual end.
+const (
+	scriptStart = `read` + "\x1e" + `send {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}` + "\x1e" + `read` + "\x1e" +
+		`send {"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}` + "\x1e" + `read`
+	scriptEnd = `send {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}`
+)
+
+func script(steps ...string) string {
+	return scriptStart + "\x1e" + strings.Join(steps, "\x1e") + "\x1e" + scriptEnd
 }
 
 func acp(t testing.TB, mode string, extra ...string) *adapter.ACP {
@@ -244,7 +282,6 @@ func TestACPHostileAgentsEndTheTaskWithoutTheirWords(t *testing.T) {
 		"a line that never ends":               {mode: "noline"},
 		"an error reply":                       {mode: "acp-error"},
 		"another protocol version":             {mode: "acp-version"},
-		"a refusal":                            {mode: "acp-refuse"},
 		"updates for another session":          {mode: "acp-wrongsession"},
 		"a reply with the wrong id":            {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":7,"result":{"protocolVersion":1}}`},
 		"a duplicate key":                      {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1},"id":7}`},
@@ -383,4 +420,11 @@ func TestACPAcceptsAnEarlyUpdateAndTheLongestSessionID(t *testing.T) {
 	if err != nil || string(res) != "ok" {
 		t.Fatalf("%q %v", res, err)
 	}
+}
+
+// The ACP adapter meets the adapter contract, against the Fake served as an ACP agent (adaptertest.ServeACP): a status is a
+// plan step in progress, a question an end of turn marked inputRequired answered by the next prompt, and a declared
+// failure an error reply marked as one.
+func TestACPMeetsContract(t *testing.T) {
+	bottest.Contract(t, func(*testing.T) bot.Bot { return acp(t, "acp-ref") })
 }
