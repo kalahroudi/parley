@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { handleAdmin } from "./admin";
+import { handleBilling } from "./billing";
 import { agentCard, handleA2A } from "./a2a";
 import { authenticate, handleConnectAuth } from "./connect";
 import { handle as handleAuth, type AuthEnv } from "./auth.ts";
@@ -28,6 +29,16 @@ export interface Env extends AuthEnv {
   // Per-minute limits for a tenant's admin export and audit CSV (RATE_ADMIN_PER_MIN) and its deletion tries (RATE_DELETE_PER_MIN).
   RATE_ADMIN_PER_MIN?: string;
   RATE_DELETE_PER_MIN?: string;
+  // Per-minute limit for a tenant's Checkout and Portal calls.
+  RATE_BILLING_PER_MIN?: string;
+  // Stripe (src/billing.ts), all set as secrets or variables on the deployment: the API key (test-mode `sk_test_`/`rk_test_`;
+  // a live key is refused unless STRIPE_ALLOW_LIVE is "1"), the webhook endpoint's signing secret, the id of the per-device
+  // seat price, and the fixed page Stripe returns the admin to.
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_ID?: string;
+  STRIPE_ALLOW_LIVE?: string;
+  BILLING_RETURN_URL?: string;
   // Per-minute limits per device for new tasks, other task messages and directory searches (the tenant's are ten times these).
   RATE_TASK_PER_MIN?: string;
   RATE_MESSAGE_PER_MIN?: string;
@@ -59,6 +70,7 @@ export default {
     if (pathname === "/v1/connect/challenge" || pathname === "/v1/connect/token") return handleConnectAuth(request, env);
     if (pathname.startsWith("/v1/login/")) return handleLogin(request, env);
     if (pathname === "/v1/session" || pathname === "/v1/session/logout") return handleSession(request, env);
+    if (pathname === "/v1/stripe/webhook" || pathname === "/v1/admin/billing" || pathname === "/v1/admin/billing/checkout" || pathname === "/v1/admin/billing/portal") return handleBilling(request, env);
     if (pathname === "/v1/admin/export" || pathname === "/v1/admin/audit/csv" || pathname === "/v1/admin/tenant/delete") return handleAdmin(request, env);
     if (pathname.startsWith("/v1/admin/groups") || pathname === "/v1/admin/audit" || pathname.startsWith("/v1/admin/retention") || pathname.startsWith("/v1/cards/") || pathname.startsWith("/v1/directory/")) return handleDirectory(request, env, (req) => authenticate(req, env, "api"));
     if (pathname.startsWith("/v1/enroll/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/revocations" || pathname === "/v1/root") return handleEnroll(request, env);

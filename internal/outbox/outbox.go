@@ -386,6 +386,7 @@ func (o *Outbox) run(e *entry) {
 			}
 			sctx, cancel := context.WithTimeout(e.ctx, left)
 			err := o.cfg.Send(sctx, t)
+			outOfTime := errors.Is(sctx.Err(), context.DeadlineExceeded)
 			cancel()
 			if err == nil {
 				o.settle(e, Status{State: Sent})
@@ -393,6 +394,13 @@ func (o *Outbox) run(e *entry) {
 			}
 			if o.ctx.Err() != nil {
 				o.settle(e, Status{State: Failed, Err: ErrClosed})
+				return
+			}
+			// The task's own time ran out while the send was waiting for the target (its prekey answer): the target stayed
+			// unreachable until the task expired, the same outcome as when the wait between presence checks runs out. Whether
+			// the send's own timeout or the task's deadline came first must not decide how the task is reported.
+			if outOfTime && errors.Is(err, context.DeadlineExceeded) {
+				o.settle(e, Status{State: Failed, Err: ErrRecipientOffline})
 				return
 			}
 			if !errors.Is(err, ErrOffline) {

@@ -6,7 +6,7 @@
 // verifies them, it reads the plaintext header and the sizes. Every field can be
 // overridden, so tests can break exactly one thing.
 
-import { SELF, env } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { handleA2A } from "../src/a2a";
 import { SIGNED_TYPE, type SignedKind } from "../src/parts";
 
@@ -128,3 +128,8 @@ export async function gw(input: string | URL, init?: RequestInit): Promise<Respo
   if (m && url.pathname === "/v1/connect") return env.DEVICE.get(env.DEVICE.idFromName(`${m[1]}:${m[2]}`)).fetch("https://do/", { headers: { Upgrade: "websocket" } });
   return SELF.fetch(input, init);
 }
+
+// A paid plan for a test tenant that enrolls more than the free seats: the seat limit applies at every approval, so
+// the suites that approve many devices give their tenant a subscription first (billing.test.ts covers the limit itself).
+export const seedPaid = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, (_i, ctx) => ctx.storage.put("billing", { customer: "cus_test", subscription: "sub_test", status: "active", seats: 1000, as_of: 0 }));

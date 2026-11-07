@@ -12,6 +12,7 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { MAX_MEMBERS } from "../src/acl";
 import { isAdmin, isUser } from "../src/session";
+import { seedPaid } from "./wire";
 import { handleDirectory, type DeviceAuth } from "../src/directory";
 import directorySource from "../src/directory.ts?raw";
 import tenantSource from "../src/tenant.ts?raw";
@@ -34,8 +35,10 @@ function tenant() {
   const t = `acl${++n}`;
   const stub = env.TENANT.get(env.TENANT.idFromName(t));
   const session = async (role: "admin" | "user", email: string) => `Bearer ps_${t}.${(await stub.createSession(email, role)).secret}`;
+  const paid = seedPaid(stub);
   const adminSession = session("admin", "admin@example.test"); // one admin session per tenant, as a person has
   const enroll = async (email: string, bind = true) => {
+    await paid;
     const sk = key();
     // A user session lasts only while the tenant still lists the user (src/session.ts), and these addresses are test data (look-alikes
     // among them), so each is listed as it is used.
@@ -189,7 +192,7 @@ describe("gateway ACL matrix: viewer x card x group state", () => {
     await post("/v1/admin/groups/put", { name: "eng", members: ["bob@example.test"] }, admin);
     for (const [, card] of CARDS) await post("/v1/cards/publish", { card: { name: `Bot ${Math.random()}`, description: "d", tags: [], examples: [], ...card } }, owner.auth);
     const stored = await runInDurableObject(x.stub, async (_i, s) => [...(await s.storage.list()).keys()].map((k) => k.split(":")[0]));
-    expect([...new Set(stored)].sort()).toEqual(["aud", "auds", "card", "enr", "grp", "ses"]);
+    expect([...new Set(stored)].sort()).toEqual(["aud", "auds", "billing", "card", "enr", "grp", "ses"]);
     const values = await runInDurableObject(x.stub, async (_i, s) => JSON.stringify([...(await s.storage.list({ prefix: "card:" })).values()]));
     expect(values).not.toMatch(/allow|grant|permit|acl/i);
   });

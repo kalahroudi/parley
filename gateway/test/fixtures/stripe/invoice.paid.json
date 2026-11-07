@@ -1,0 +1,80 @@
+{
+  "_fixture": {
+    "source": [
+      "https://docs.stripe.com/api/events/types",
+      "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json"
+    ],
+    "api_version": "2026-09-30.endive",
+    "recorded": "2026-11-07",
+    "kind": "composed from the published reference",
+    "note": "carries the invoice only; the subscription event carries the state"
+  },
+  "event": {
+    "id": "evt_1InvPaid",
+    "object": "event",
+    "api_version": "2026-09-30.endive",
+    "created": 1792592200,
+    "data": {
+      "object": {
+        "id": "in_1Acme",
+        "object": "invoice",
+        "amount_due": 2500,
+        "amount_overpaid": 0,
+        "amount_paid": 2500,
+        "amount_paid_off_stripe": 0,
+        "amount_remaining": 0,
+        "amount_shipping": 0,
+        "attempt_count": 1,
+        "attempted": true,
+        "auto_advance": false,
+        "automatic_tax": {
+          "enabled": false,
+          "liability": null,
+          "status": null
+        },
+        "collection_method": "charge_automatically",
+        "created": 1792592100,
+        "currency": "usd",
+        "customer": "cus_1Acme",
+        "default_tax_rates": [],
+        "discounts": [],
+        "issuer": {
+          "type": "self"
+        },
+        "lines": {
+          "object": "list",
+          "data": [],
+          "has_more": false,
+          "url": "/v1/invoices/in_1Acme/lines"
+        },
+        "livemode": false,
+        "payment_settings": {
+          "default_mandate": null,
+          "payment_method_options": null,
+          "payment_method_types": null
+        },
+        "period_end": 1792592100,
+        "period_start": 1790000100,
+        "post_payment_credit_notes_amount": 0,
+        "pre_payment_credit_notes_amount": 0,
+        "starting_balance": 0,
+        "status": "paid",
+        "status_transitions": {
+          "finalized_at": 1792592100,
+          "marked_uncollectible_at": null,
+          "paid_at": 1792592200,
+          "voided_at": null
+        },
+        "subtotal": 2500,
+        "total": 2500
+      }
+    },
+    "livemode": false,
+    "pending_webhooks": 1,
+    "request": {
+      "id": null,
+      "idempotency_key": null
+    },
+    "type": "invoice.paid"
+  }
+}

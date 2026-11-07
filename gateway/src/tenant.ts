@@ -19,6 +19,7 @@ import {
   type Card,
   type Page,
 } from "./acl";
+import { limitOf, reduce, remember, type Billing, type SeenEvents, type SubUpdate } from "./billing";
 import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "./connect";
 import type { Env } from "./index";
 import type { Device } from "./device";
@@ -129,7 +130,7 @@ export interface DirectoryEntry extends Card {
 // Metadata only: what changed and who did it, never member identities or card text.
 export interface AuditEvent {
   at: number;
-  action: "group.put" | "group.delete" | "card.publish" | "card.remove" | "revocations.put" | "retention.put";
+  action: "billing.put" | "group.put" | "group.delete" | "card.publish" | "card.remove" | "revocations.put" | "retention.put";
   actor: "admin" | string; // "admin" or a device id
   subject: string; // group name, card id, or list version
   detail?: Record<string, number | string>;
@@ -402,15 +403,70 @@ export class Tenant extends DurableObject<Env> {
   }
 
   // Idempotent for the same decision; a decided request cannot change sides.
-  async decide(id: string, decision: "approved" | "rejected"): Promise<Enrollment | null | "conflict"> {
+  // Approving a new device is where the seat limit applies (see billing.ts): at the limit it is refused with
+  // "seat_limit" and the request stays pending, so approving after a seat frees up or the plan grows still works.
+  // Rejecting, repeating a decision, and every device already approved are never affected.
+  decide(id: string, decision: "approved" | "rejected"): Promise<Enrollment | null | "conflict" | "seat_limit"> {
+    // Serialized, so two approvals cannot both count the last free seat.
+    return this.ctx.blockConcurrencyWhile(() => this.decideNow(id, decision));
+  }
+
+  private async decideNow(id: string, decision: "approved" | "rejected"): Promise<Enrollment | null | "conflict" | "seat_limit"> {
     const rec = await this.ctx.storage.get<StoredEnrollment>(`enr:${id}`);
     if (!rec || (rec.status === "pending" && rec.created + REQUEST_TTL_MS <= Date.now())) return null;
     if (rec.status !== "pending") return rec.status === decision ? strip(rec) : "conflict";
+    if (decision === "approved" && (await this.seatsUsed()) >= limitOf(await this.ctx.storage.get<Billing>("billing"), Date.now())) return "seat_limit";
     rec.status = decision;
     rec.decided = Date.now();
     await this.ctx.storage.put(`enr:${id}`, rec);
     await this.schedule(rec.decided + DECIDED_RETENTION_MS);
     return strip(rec);
+  }
+
+  // Devices holding a seat: approved and not revoked (a revoked device's seat is free again).
+  private async seatsUsed(): Promise<number> {
+    const revoked = await this.revokedIds();
+    let n = 0;
+    for (const [k, r] of await this.ctx.storage.list<StoredEnrollment>({ prefix: "enr:" })) if (r.status === "approved" && !revoked.has(k.slice(4))) n++;
+    return n;
+  }
+
+  // The tenant's plan as the admin sees it: no ids, only the numbers and whether the subscription is in good standing.
+  async billingView(): Promise<{ status: string; limit: number | null; used: number; subscribed: boolean; grace_until?: number }> {
+    const b = await this.ctx.storage.get<Billing>("billing");
+    const limit = limitOf(b, Date.now());
+    return {
+      status: b?.status ?? "none",
+      limit: Number.isFinite(limit) ? limit : null, // null: not metered (no subscription was ever reported)
+      used: await this.seatsUsed(),
+      subscribed: b?.status === "active" || b?.status === "trialing",
+      ...(b?.grace_until === undefined ? {} : { grace_until: b.grace_until }),
+    };
+  }
+
+  // The Stripe customer for the Portal, once a subscription event has named one.
+  async customerId(): Promise<string | null> {
+    return (await this.ctx.storage.get<Billing>("billing"))?.customer ?? null;
+  }
+
+  // Applies a verified Stripe subscription event (see reduce for what is ignored). Serialized with approvals. An event id
+  // already processed is a no-op ("duplicate") whatever its timestamp; the ids are kept in the tenant's storage (see
+  // remember for the bound), so a redelivery, a replay and two deliveries at once are all the same single event.
+  applyBilling(u: SubUpdate): Promise<"applied" | "ignored" | "duplicate"> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (await this.isDeleting()) return "ignored";
+      const seen = remember(await this.ctx.storage.get<SeenEvents>("billing_events"), u.event, Date.now());
+      if (!seen) return "duplicate";
+      const cur = await this.ctx.storage.get<Billing>("billing");
+      const next = reduce(cur, u);
+      // An event that changes nothing (stale, another customer's, a repeat of what is recorded) is remembered and not audited.
+      if (!next || JSON.stringify(next) === JSON.stringify(cur)) {
+        await this.ctx.storage.put("billing_events", seen);
+        return "ignored";
+      }
+      await this.commit({ billing: next, billing_events: seen }, [], { action: "billing.put", actor: "stripe", subject: next.status, detail: { seats: next.seats } });
+      return "applied";
+    });
   }
 
   // Stores the binding the admin's daemon signed for an approved device. A
@@ -753,7 +809,7 @@ export class Tenant extends DurableObject<Env> {
     if (section === "settings") {
       return {
         section,
-        items: [{ retention: await this.retention(), root_public_key: (await this.rootKey()) ?? null, revocations: await this.revocations(), deleted: (await this.ctx.storage.get("deleted")) ?? null }],
+        items: [{ retention: await this.retention(), root_public_key: (await this.rootKey()) ?? null, revocations: await this.revocations(), billing: (await this.ctx.storage.get("billing")) ?? null, deleted: (await this.ctx.storage.get("deleted")) ?? null }],
       };
     }
     const prefix = SECTION_PREFIX[section];
@@ -1005,7 +1061,10 @@ export class Tenant extends DurableObject<Env> {
       if (at <= now) await this.ctx.storage.delete(k);
       else if (next === undefined || at < next) next = at;
     };
+    const revoked = await this.revokedIds();
     for (const [k, r] of await this.ctx.storage.list<StoredEnrollment>({ prefix: "enr:" })) {
+      // An approved device that is not revoked is the roster: its record is its seat and its binding, so it is kept.
+      if (r.status === "approved" && !revoked.has(k.slice(4))) continue;
       await due(k, r.status === "pending" ? r.created + REQUEST_TTL_MS : (r.decided ?? r.created) + DECIDED_RETENTION_MS);
     }
     for (const [k, t] of await this.ctx.storage.list<StoredToken>({ prefix: "tok:" })) await due(k, t.exp);

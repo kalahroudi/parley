@@ -13,14 +13,9 @@ pending(
   "the admin page does not exist (the gateway has the admin API for groups, retention and enrollment, but no setup flow or install command)",
 );
 pending(
-  "journeys A and K: a fourth device is refused at enrollment on the free tier, a subscription raises the limit, and a live tunnel is never cut",
-  "T502",
-  "there is no seat limit, subscription or Stripe code yet",
-);
-pending(
   "journey K: Stripe Checkout and Portal in test mode drive the seat limit",
   "T510",
-  "billing webhooks are not built or tested against Stripe test events yet",
+  "the webhook, Checkout and Portal are built and tested against fixtures composed from Stripe's published reference (gateway/test/fixtures/stripe) and a stand-in for the API, and have not been run against real Stripe test events",
 );
 pending(
   "journey J: the daemon accepts an update signed by the pinned release key, rejects any other and a rollback, holds a pinned version, and the handshake carries the protocol version",

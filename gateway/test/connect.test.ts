@@ -7,7 +7,7 @@ import { SEALED_MEDIA_TYPE } from "../src/a2a";
 import { b64bytes, BINDING_LABEL, CHALLENGE_TTL_MS, CONNECT_LABEL, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "../src/connect";
 import type { Env } from "../src/index";
 import { CONNECT_TOKEN_TTL_MS, MAX_CHALLENGES_PER_DEVICE, MAX_CONNECT_TOKENS_PER_DEVICE } from "../src/tenant";
-import { b64, encodeWire, header, taskBytes, taskHex } from "./wire";
+import { b64, encodeWire, header, seedPaid, taskBytes, taskHex } from "./wire";
 
 // Durable Object storage writes cost about 24 ms each on Windows runners; tests that make dozens get a longer budget.
 const SLOW = 120_000;
@@ -46,6 +46,7 @@ function tenant() {
   const admin = session(t, "admin", "admin@example.test");
   const stub = env.TENANT.get(env.TENANT.idFromName(t));
   const call = <T>(fn: (i: any, ctx: DurableObjectState) => Promise<T>) => runInDurableObject(stub, fn);
+  const paid = seedPaid(stub);
   const rootReady = (async () => {
     const root = await edKeys();
     const r = await post("/v1/admin/root", { root_public_key: bytesB64(await rawPub(root.publicKey)) }, { Authorization: await admin });
@@ -55,6 +56,7 @@ function tenant() {
   const enroll = async (opts: { bind?: boolean; decide?: "approved" | "rejected" | false; not_after?: number; version?: number; signer?: CryptoKeyPair; tenantField?: string; skip?: string; owner?: string } = {}): Promise<Dev> => {
     const owner = opts.owner ?? "alice@example.test";
     const { bind = true, decide = "approved", not_after = Math.floor((Date.now() + YEAR) / 1000), version = 1 } = opts;
+    await paid;
     const root = opts.signer ?? (await rootReady);
     const key = await edKeys();
     const pub = await rawPub(key.publicKey);
@@ -664,7 +666,7 @@ describe("what a token opens", () => {
       const stored = await x.call(async (_i, ctx) => [...(await ctx.storage.list()).entries()]);
       const dump = JSON.stringify(stored);
       for (const leaked of [secret, ch.challenge, signature]) expect(dump).not.toContain(leaked);
-      for (const [k] of stored) expect(k, k).toMatch(/^(aud:|auds$|dtk:|enr:|retention$|root$|ses:|tsk:|tsks$|ntsk$)/);
+      for (const [k] of stored) expect(k, k).toMatch(/^(aud:|auds$|billing$|dtk:|enr:|retention$|root$|ses:|tsk:|tsks$|ntsk$)/);
       // Strict keeps no ciphertext for the task the token sent; the connect path adds nothing of its own to it.
       const held = await runInDurableObject(env.TASK.get(env.TASK.idFromName(`${x.t}:${taskHex(`m-${mode}`)}`)), async (_i, ctx) => [...(await ctx.storage.list({ prefix: "q:" })).keys()]);
       if (mode === "strict") expect(held).toEqual([]);
