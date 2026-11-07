@@ -124,7 +124,7 @@ func TestHTTPSourceFetch(t *testing.T) {
 
 // The limits are part of the security posture (what an untrusted source can make us read), so they are pinned.
 func TestLimitsArePinned(t *testing.T) {
-	if maxSums != 64<<10 || maxSig != 4<<10 || maxBinary != 256<<20 || fetchTimeout != 10*time.Minute || maxSkew != 5*time.Minute || maxValidity != 400*24*time.Hour || maxUnix != 1<<40 {
+	if maxSums != 64<<10 || maxSig != 4<<10 || maxBinary != 256<<20 || fetchTimeout != 10*time.Minute || maxSkew != 5*time.Minute || maxValidity != 400*24*time.Hour || maxUnix != 1<<40 || maxStatusBytes != 4<<10 {
 		t.Fatal("a download limit changed: review it")
 	}
 }

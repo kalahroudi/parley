@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kalahroudi/parley/internal/fsowner"
+	"github.com/kalahroudi/parley/internal/release"
 )
 
 // ownerFake answers for an install directory with two programs and ordinary parents; edit overrides single paths.
@@ -155,4 +156,12 @@ func TestRealInstallDirectoryOfOursPasses(t *testing.T) {
 	if _, err := u.checkOwner(); err == nil || errors.Is(err, ErrNotOwner) {
 		t.Fatalf("got %v", err)
 	}
+}
+
+// notOurs says nothing is owned by the current user.
+func notOurs(string) (fsowner.Info, error) { return fsowner.Info{IsDir: true, IsRegular: true}, nil }
+
+func newKey(t *testing.T) (release.SecretKey, release.PublicKey, error) {
+	t.Helper()
+	return release.GenerateKey()
 }

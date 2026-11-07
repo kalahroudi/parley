@@ -438,69 +438,6 @@ func TestApplyReplacesStaleOldFile(t *testing.T) {
 	}
 }
 
-func TestLoopReportsAndStops(t *testing.T) {
-	r := newRelease(t)
-	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
-	type res struct {
-		v   Version
-		err error
-	}
-	got := make(chan res, 8)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	u := r.updater("v1.0.0", "")
-	go func() {
-		u.Loop(ctx, time.Millisecond, 5*time.Millisecond, func(v Version, err error) { got <- res{v, err} })
-		close(done)
-	}()
-	first := <-got
-	if first.err != nil || first.v.String() != "v1.1.0" {
-		t.Fatalf("first: %+v", first)
-	}
-	// Later rounds: the running version is now old in this updater's eyes, so it installs again; make the
-	// source fail to see an error reported, then up-to-date ones stay silent.
-	r.src.mu.Lock()
-	r.src.err = errors.New("down")
-	r.src.mu.Unlock()
-	second := <-got
-	if second.err == nil {
-		t.Fatalf("second: %+v", second)
-	}
-	cancel()
-	<-done
-	// Canceled before the first round: returns without a check.
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	cancel2()
-	n := len(r.src.asked)
-	u.Loop(ctx2, time.Hour, time.Hour, func(Version, error) { t.Error("reported") })
-	if len(r.src.asked) != n {
-		t.Fatal("checked after cancel")
-	}
-}
-
-func TestLoopStaysSilentWhenUpToDate(t *testing.T) {
-	r := newRelease(t)
-	r.publish(t, "v1.0.0", true, r.key, cm("v1.0.0"), newBins("v1.0.0"))
-	ctx, cancel := context.WithCancel(context.Background())
-	u := r.updater("v1.0.0", "")
-	done := make(chan struct{})
-	go func() {
-		u.Loop(ctx, time.Millisecond, time.Millisecond, func(Version, error) { t.Error("reported") })
-		close(done)
-	}()
-	for i := 0; i < 400; i++ {
-		r.src.mu.Lock()
-		n := len(r.src.asked)
-		r.src.mu.Unlock()
-		if n >= 6 { // at least three rounds ran
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	cancel()
-	<-done
-}
-
 func TestExeSuffix(t *testing.T) {
 	if exeSuffix("windows") != ".exe" || exeSuffix("linux") != "" || exeSuffix("darwin") != "" {
 		t.Fatal("suffix")

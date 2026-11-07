@@ -54,7 +54,8 @@ type Updater struct {
 	OS      string   // target of the release assets (runtime.GOOS)
 	Arch    string   // runtime.GOARCH
 
-	Now func() time.Time // default time.Now
+	Now      func() time.Time // default time.Now
+	LockPath string           // if set, Cycle holds this file lock, so two processes never update at once
 
 	createTemp func(dir, pattern string) (*os.File, error) // tests; default os.CreateTemp
 	inspect    func(string) (fsowner.Info, error)          // tests; default fsowner.Inspect
@@ -155,15 +156,25 @@ func (u *Updater) Apply(ctx context.Context, r *Release) error {
 			return err
 		}
 	}
+	dsts := make([]string, len(jobs))
+	for i, j := range jobs {
+		dsts[i] = j.dst
+	}
+	if err := u.writeJournal(dsts); err != nil {
+		cleanup()
+		return err
+	}
 	for i, j := range jobs {
 		if err := swap(j.dst, j.staged); err != nil {
 			for _, d := range jobs[:i] {
 				os.Rename(d.dst+".old", d.dst) // roll back what was swapped
 			}
 			cleanup()
+			os.Remove(u.journalPath())
 			return err
 		}
 	}
+	os.Remove(u.journalPath()) // the swap is complete: nothing to repair any more
 	for _, j := range jobs {
 		os.Remove(j.dst + ".old")
 	}
@@ -248,25 +259,4 @@ func parseSums(b []byte) (map[string]string, error) {
 		return nil, errors.New("no checksums")
 	}
 	return m, nil
-}
-
-// Loop checks for an update after first, then every interval, until ctx ends. Each result goes to report:
-// the installed version, or an error (ErrUpToDate is not reported). A failed check is simply tried again later.
-func (u *Updater) Loop(ctx context.Context, first, every time.Duration, report func(Version, error)) {
-	t := time.NewTimer(first)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		v, err := u.Update(ctx)
-		if err == nil {
-			report(v, nil)
-		} else if !errors.Is(err, ErrUpToDate) {
-			report(Version{}, err)
-		}
-		t.Reset(every)
-	}
 }
