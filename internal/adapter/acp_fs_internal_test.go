@@ -209,7 +209,7 @@ func TestPlainTextCutsOnCharactersAndHidesWhatIsNotPrintable(t *testing.T) {
 		n    int
 		want string
 	}{
-		{"abc", 3, "abc"}, {"abc", 2, "ab"}, {"", 5, ""}, {"éé", 3, "é"}, {"éé", 4, "éé"}, {"a b", 3, "a b"},
+		{"aéb", 2, "a"}, {"abc", 3, "abc"}, {"abc", 2, "ab"}, {"", 5, ""}, {"éé", 3, "é"}, {"éé", 4, "éé"}, {"a b", 3, "a b"},
 		{"a\x00b", 9, "a?b"}, {"a‮b", 9, "a?b"}, {"a\xffb", 9, "a\uFFFDb"}, {"\t", 9, "?"},
 	} {
 		if got := plainText(tc.in, tc.n); got != tc.want {

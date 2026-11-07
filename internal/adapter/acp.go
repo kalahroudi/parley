@@ -60,14 +60,21 @@ const (
 	TextACPRefused = "the agent refused the task"
 )
 
-// What the agent is told when a request of its is not carried out. Fixed: never an OS error or a path.
+// What the agent is told when a request of its is not carried out. Fixed: never an OS error or a path. (Built by a function,
+// because a package-level initializer has no statement for the mutation gate to cover.)
+func fixedErrors() [6]*rpcError {
+	return [6]*rpcError{{-32000, "denied"}, {-32602, "invalid params"}, {-32000, "not a text file"}, {-32000, "file too large"},
+		{-32000, "file operation failed"}, {-32601, "method not found"}}
+}
+
 var (
-	errDenied     = &rpcError{-32000, "denied"}
-	errInvalid    = &rpcError{-32602, "invalid params"}
-	errNotText    = &rpcError{-32000, "not a text file"}
-	errTooBig     = &rpcError{-32000, "file too large"}
-	errFile       = &rpcError{-32000, "file operation failed"}
-	errNoMethod   = &rpcError{-32601, "method not found"}
+	fixed         = fixedErrors()
+	errDenied     = fixed[0]
+	errInvalid    = fixed[1]
+	errNotText    = fixed[2]
+	errTooBig     = fixed[3]
+	errFile       = fixed[4]
+	errNoMethod   = fixed[5]
 	errACPRemote  = errors.New("adapter: the ACP agent reported an error")
 	errACPFull    = errors.New("adapter: the ACP agent's reply is larger than any result") // internal: the reply is cut
 	errACPVersion = errors.New("adapter: the ACP agent does not speak protocol version 1")
@@ -575,9 +582,10 @@ func plainText(s string, n int) string {
 		if r != ' ' && !unicode.IsPrint(r) {
 			r = '?'
 		}
-		if size += utf8.RuneLen(r); size > n {
+		if size+utf8.RuneLen(r) > n {
 			break
 		}
+		size += utf8.RuneLen(r)
 		out = append(out, r)
 	}
 	return string(out)

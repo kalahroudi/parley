@@ -93,6 +93,15 @@ func TestParseRPCRefusesWhatIsNotJSONRPC(t *testing.T) {
 
 // The escaping is checked against encoding/json for every byte that may appear in valid UTF-8 text, and the length it
 // promises is the length it appends (the buffer is sized with it so that the one copy we hold can be scrubbed).
+// An escape in the middle of a text does not end the escaping, and the length promised covers all of it.
+func TestAppendJSONTextEscapesEveryByteOfALongerText(t *testing.T) {
+	in := []byte("a\"b\\c\x01d\ne")
+	got := appendJSONText(nil, in)
+	if string(got) != `a\"b\\c\u0001d\u000ae` || jsonTextLen(in) != len(got) {
+		t.Fatalf("%s", got)
+	}
+}
+
 func TestAppendJSONTextMatchesEncodingJSON(t *testing.T) {
 	var all []byte
 	for r := rune(0); r < 0x3000; r++ {

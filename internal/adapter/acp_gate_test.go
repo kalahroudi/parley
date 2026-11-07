@@ -236,6 +236,8 @@ func TestACPFileOperationsAreAskedAboutAndConfined(t *testing.T) {
 			want: `"result":{"content":"one\ntwo\nthree\n"}`},
 		{name: "read some lines", method: "fs/read_text_file", params: `"path":"%D/a.txt","line":2,"limit":1`, setup: func(t *testing.T, d string) { writeFile(t, filepath.Join(d, "a.txt"), "one\ntwo\nthree\n") },
 			want: `"result":{"content":"two\n"}`},
+		{name: "read from line 1", method: "fs/read_text_file", params: `"path":"%D/a.txt","line":1,"limit":1`, setup: func(t *testing.T, d string) { writeFile(t, filepath.Join(d, "a.txt"), "one\ntwo\n") },
+			want: `"result":{"content":"one\n"}`},
 		{name: "read from a line", method: "fs/read_text_file", params: `"path":"%D/a.txt","line":3`, setup: func(t *testing.T, d string) { writeFile(t, filepath.Join(d, "a.txt"), "one\ntwo\nthree\n") },
 			want: `"result":{"content":"three\n"}`},
 		{name: "read limit only", method: "fs/read_text_file", params: `"path":"%D/a.txt","limit":2`, setup: func(t *testing.T, d string) { writeFile(t, filepath.Join(d, "a.txt"), "one\ntwo\nthree\n") },
