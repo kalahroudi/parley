@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // A directory and file this test just made belong to the user running it.
@@ -64,5 +66,32 @@ func TestInspectOthersWrite(t *testing.T) {
 	grant(d, "(OI)(CI)(DC)")
 	if got, _ := Inspect(d); !got.GroupOrOtherWrite || got.WorldWrite == got.Trusted {
 		t.Fatalf("delete-child grant on directory: %+v", got)
+	}
+}
+
+// The access list reading, on lists written out: only an allow entry for Everyone, Users or Authenticated Users
+// that applies to the object itself and writes counts; a missing list is open to everyone.
+func TestOthersWriteReadsTheAccessList(t *testing.T) {
+	for _, c := range []struct {
+		sddl        string
+		any, strong bool
+	}{
+		{"O:BA", true, true},                             // no access list at all
+		{"O:BAD:(A;;FA;;;BA)", false, false},             // only Administrators
+		{"O:BAD:(A;;FR;;;WD)", false, false},             // Everyone may read
+		{"O:BAD:(A;;0x2;;;BU)", true, false},             // Users may write data
+		{"O:BAD:(A;;FA;;;AU)", true, true},               // Authenticated Users: full control
+		{"O:BAD:(A;;FA;;;WD)", true, true},               // Everyone: full control
+		{"O:BAD:(A;OICIIO;FA;;;WD)", false, false},       // passes to children only
+		{"O:BAD:(D;;FA;;;WD)(A;;FR;;;BA)", false, false}, // a deny entry is not a grant
+		{"O:BAD:(A;;0x40;;;WD)", true, true},             // delete child
+	} {
+		sd, err := windows.SecurityDescriptorFromString(c.sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if any, strong := othersWrite(sd); any != c.any || strong != c.strong {
+			t.Errorf("%s: got %v %v, want %v %v", c.sddl, any, strong, c.any, c.strong)
+		}
 	}
 }
