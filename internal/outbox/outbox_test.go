@@ -239,6 +239,53 @@ func TestASendFailureFailsTheTask(t *testing.T) {
 	}
 }
 
+// A send that is still waiting for the target when the task's time runs out reports the task as the target having been
+// unreachable until it expired, not as a failure of the send: which of the send's own timeout and the task's deadline
+// fires first is a race, and it must not decide the reason.
+func TestASendThatOutlastsTheTaskIsTheTargetBeingOfflineUntilItExpired(t *testing.T) {
+	c := newClock()
+	o := newOutbox(t, Config{Presence: (&script{results: []presenceResult{{online: true}}}).presence, Now: c.Now, Sleep: c.Sleep,
+		Send: func(ctx context.Context, _ Task) error {
+			<-ctx.Done()
+			return fmt.Errorf("prekey request: %w", ctx.Err())
+		}})
+	if err := o.Submit(task(c, "a", 30*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if st := waitDone(t, o, "a"); st.State != Failed || !errors.Is(st.Err, ErrRecipientOffline) {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestADeadlineErrorThatIsNotTheTasksOwnStaysASendFailure(t *testing.T) {
+	c := newClock()
+	// The send's own sub-timeout, while the task has an hour left.
+	o := newOutbox(t, Config{Presence: (&script{results: []presenceResult{{online: true}}}).presence, Now: c.Now, Sleep: c.Sleep,
+		Send: func(context.Context, Task) error { return fmt.Errorf("dial: %w", context.DeadlineExceeded) }})
+	if err := o.Submit(task(c, "a", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if st := waitDone(t, o, "a"); st.State != Failed || errors.Is(st.Err, ErrRecipientOffline) || !errors.Is(st.Err, context.DeadlineExceeded) {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestAnotherErrorAfterTheTaskRanOutStaysASendFailure(t *testing.T) {
+	c := newClock()
+	refused := errors.New("refused")
+	o := newOutbox(t, Config{Presence: (&script{results: []presenceResult{{online: true}}}).presence, Now: c.Now, Sleep: c.Sleep,
+		Send: func(ctx context.Context, _ Task) error {
+			<-ctx.Done()
+			return refused
+		}})
+	if err := o.Submit(task(c, "a", 30*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if st := waitDone(t, o, "a"); st.State != Failed || errors.Is(st.Err, ErrRecipientOffline) || !errors.Is(st.Err, refused) {
+		t.Fatalf("%+v", st)
+	}
+}
+
 func TestATargetThatDropsDuringTheSendKeepsWaiting(t *testing.T) {
 	c := newClock()
 	var calls int
