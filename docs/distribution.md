@@ -14,7 +14,8 @@ and is compiled into the binaries (`release/key.go`); nothing fetched at run tim
 2. The signed comment is exactly `parley release vMAJOR.MINOR.PATCH issued=<unix> expires=<unix>`. It ties the
    checksums to one version, so an old signed release cannot be served as a new one, and to a validity window: a
    manifest that has expired, was issued in the future (more than 5 minutes ahead), or claims more than 400 days is
-   refused, so a mirror that freezes the feed is noticed when the manifest it replays expires. `scripts/release.sh`
+   refused (the 5 minutes of clock skew is allowed only on the issue time; expiry is strict, so a slow clock never
+   stretches a manifest past what was signed), so a mirror that freezes the feed is noticed when the manifest it replays expires. `scripts/release.sh`
    writes the window (`PARLEY_VALID_DAYS`, default 180); the project must re-sign before it ends. Binaries are
    fetched from that version's own address.
 3. The version is newer than the running one. It never goes back, unless an operator pins that exact older version.
