@@ -24,7 +24,7 @@ func Locate(exe string) (string, error) {
 
 func managed(path string) bool {
 	p := strings.ToLower(filepath.ToSlash(path))
-	for _, part := range []string{"/cellar/", "/homebrew/", "/linuxbrew/", "/nix/store/", "/snap/"} {
+	for _, part := range []string{"/cellar/", "/homebrew/", "/linuxbrew/", "/nix/store/", "/snap/", "/program files/", "/program files (x86)/", "/windowsapps/"} {
 		if strings.Contains(p, part) {
 			return true
 		}

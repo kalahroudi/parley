@@ -26,5 +26,6 @@ func Inspect(path string) (Info, error) {
 		GroupOrOtherWrite: m.Perm()&0o022 != 0,
 		WorldWrite:        m.Perm()&0o002 != 0,
 		Sticky:            m&os.ModeSticky != 0,
+		Setid:             m&(os.ModeSetuid|os.ModeSetgid) != 0,
 	}, nil
 }

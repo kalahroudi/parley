@@ -25,7 +25,8 @@ var ErrNotOwner = errors.New("update: the install directory is not owned by the 
 //   - every parent of dir (links resolved) is owned by the current user or the system, and none is writable by
 //     everyone unless it has the sticky bit (like /tmp), so nobody else can rename a parent away and put their
 //     own tree in its place;
-//   - each program is a regular file (not a link), owned by the current user, not writable by group or others.
+//   - each program is a regular file (not a link), owned by the current user, not writable by group or others,
+//     and not setuid or setgid (a replacement would silently lose the bit).
 //
 // Because "the current user" is the effective user of this process, a root process refuses a directory owned by
 // someone else and a user process refuses one owned by root: an update never runs as another user than the one
@@ -47,8 +48,10 @@ func checkInstall(dir string, files []string, inspect func(string) (fsowner.Info
 		if err != nil {
 			return err
 		}
-		if !(pi.Owned || pi.Trusted) || (pi.WorldWrite && !pi.Sticky) {
-			return fmt.Errorf("%w: parent %s", ErrNotOwner, p)
+		// Group write counts too, unless the system owns the parent (like /Library on macOS): a group member could
+		// rename our directory away. A sticky parent only lets the owner of an entry rename it.
+		if !(pi.Owned || pi.Trusted) || !pi.Sticky && (pi.WorldWrite || pi.GroupOrOtherWrite && !pi.Trusted) {
+			return fmt.Errorf("%w: parent %s (%+v)", ErrNotOwner, p, pi)
 		}
 		if filepath.Dir(p) == p {
 			break
@@ -59,30 +62,39 @@ func checkInstall(dir string, files []string, inspect func(string) (fsowner.Info
 		if err != nil {
 			return err
 		}
-		if !fi.IsRegular || !fi.Owned || fi.GroupOrOtherWrite {
+		if !fi.IsRegular || !fi.Owned || fi.GroupOrOtherWrite || fi.Setid {
 			return fmt.Errorf("%w: %s", ErrNotOwner, filepath.Base(f))
 		}
 	}
 	return nil
 }
 
-// checkOwner runs checkInstall for the programs that exist in Dir and returns their names. The first name must
-// exist; a missing optional one is skipped.
-func (u *Updater) checkOwner() ([]string, error) {
+// checkOwner runs checkInstall for the programs that exist in Dir and returns their names and the directory
+// with links resolved: the caller writes there, not through the path it was given, so a link swapped later
+// cannot redirect the writes. The first name must exist; a missing optional one is skipped. A directory a
+// package manager owns is refused first, with the way to update it.
+func (u *Updater) checkOwner() (names []string, dir string, err error) {
 	inspect := u.inspect
 	if inspect == nil {
 		inspect = fsowner.Inspect
 	}
-	var names, files []string
+	dir, err = filepath.EvalSymlinks(u.Dir)
+	if err != nil {
+		return nil, "", err
+	}
+	if managed(filepath.Join(dir, "x")) {
+		return nil, "", ErrManaged
+	}
+	var files []string
 	for i, name := range u.Names {
-		dst := filepath.Join(u.Dir, name+exeSuffix(u.OS))
+		dst := filepath.Join(dir, name+exeSuffix(u.OS))
 		if _, err := os.Lstat(dst); err != nil {
 			if i == 0 {
-				return nil, err
+				return nil, "", err
 			}
 			continue
 		}
 		names, files = append(names, name), append(files, dst)
 	}
-	return names, checkInstall(u.Dir, files, inspect)
+	return names, dir, checkInstall(dir, files, inspect)
 }

@@ -6,6 +6,7 @@ package update
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,6 +68,18 @@ func TestCheckInstallDecisions(t *testing.T) {
 		{"parent writable by everyone with the sticky bit", func(f ownerFake, _ []string) {
 			f.edit[parent(f)] = fsowner.Info{IsDir: true, Trusted: true, WorldWrite: true, Sticky: true}
 		}, nil},
+		{"parent writable by a group", func(f ownerFake, _ []string) {
+			f.edit[parent(f)] = fsowner.Info{IsDir: true, Owned: true, GroupOrOtherWrite: true}
+		}, ErrNotOwner},
+		{"parent writable by a group and owned by the system", func(f ownerFake, _ []string) {
+			f.edit[parent(f)] = fsowner.Info{IsDir: true, Trusted: true, GroupOrOtherWrite: true}
+		}, nil},
+		{"parent writable by a group with the sticky bit", func(f ownerFake, _ []string) {
+			f.edit[parent(f)] = fsowner.Info{IsDir: true, Owned: true, GroupOrOtherWrite: true, Sticky: true}
+		}, nil},
+		{"program is setuid or setgid", func(f ownerFake, files []string) {
+			f.edit[files[0]] = fsowner.Info{IsRegular: true, Owned: true, Setid: true}
+		}, ErrNotOwner},
 		{"a distant parent owned by someone else", func(f ownerFake, _ []string) {
 			f.edit[filepath.Dir(parent(f))] = fsowner.Info{IsDir: true}
 		}, ErrNotOwner},
@@ -147,12 +160,96 @@ func TestRealInstallDirectoryOfOursPasses(t *testing.T) {
 		os.Chmod(r.dir, 0o700)
 	}
 	u := r.updater("v1.0.0", "")
-	if names, err := u.checkOwner(); err != nil || len(names) != 2 {
+	if names, _, err := u.checkOwner(); err != nil || len(names) != 2 {
 		t.Fatalf("%v %v", names, err)
 	}
 	// A missing first program is an error of its own, not an ownership one.
 	os.Remove(filepath.Join(r.dir, "parleyd"+exeSuffix(runtime.GOOS)))
-	if _, err := u.checkOwner(); err == nil || errors.Is(err, ErrNotOwner) {
+	if _, _, err := u.checkOwner(); err == nil || errors.Is(err, ErrNotOwner) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A directory a package manager owns is refused with the pointer to the right channel, before anything else.
+func TestApplyRefusesPackageManagerDirectory(t *testing.T) {
+	r := newRelease(t)
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
+	u := r.updater("v1.0.0", "")
+	rel, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cellar := filepath.Join(t.TempDir(), "Cellar", "parley")
+	if err := os.MkdirAll(cellar, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"parleyd", "parley-cli"} {
+		os.WriteFile(filepath.Join(cellar, n+exeSuffix(runtime.GOOS)), []byte("old"), 0o700)
+	}
+	u.Dir = cellar
+	asked := len(r.src.asked)
+	if err := u.Apply(context.Background(), rel); !errors.Is(err, ErrManaged) {
+		t.Fatalf("got %v", err)
+	}
+	if len(r.src.asked) != asked {
+		t.Fatal("downloaded for a managed directory")
+	}
+}
+
+// watchSource runs hook before every download, which is where an attacker with time gets to act.
+type watchSource struct {
+	Source
+	hook func()
+}
+
+func (w watchSource) Fetch(ctx context.Context, version, name string, limit int64, out io.Writer) error {
+	w.hook()
+	return w.Source.Fetch(ctx, version, name, limit, out)
+}
+
+// The owner check is repeated right before the swap: if the install stops passing while the downloads run,
+// nothing is replaced and nothing is left behind (on every OS, with the inspection faked).
+func TestApplyChecksAgainBeforeSwapping(t *testing.T) {
+	r := newRelease(t)
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
+	u := r.updater("v1.0.0", "")
+	rel, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := false
+	u.inspect = func(p string) (fsowner.Info, error) {
+		if foreign && filepath.Base(p) == "parleyd"+exeSuffix(runtime.GOOS) {
+			return fsowner.Info{IsRegular: true}, nil // now somebody else's
+		}
+		if b := filepath.Base(p); b == "parleyd"+exeSuffix(runtime.GOOS) || b == "parley-cli"+exeSuffix(runtime.GOOS) {
+			return fsowner.Info{IsRegular: true, Owned: true}, nil
+		}
+		return fsowner.Info{IsDir: true, Owned: true}, nil
+	}
+	u.Source = watchSource{u.Source, func() { foreign = true }}
+	if err := u.Apply(context.Background(), rel); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("got %v", err)
+	}
+	if r.read(t, "parleyd") != "old parleyd" || r.read(t, "parley-cli") != "old parley-cli" {
+		t.Fatal("a program was replaced")
+	}
+	if ents, _ := os.ReadDir(r.dir); len(ents) != 2 {
+		t.Fatalf("files left behind: %v", ents)
+	}
+}
+
+// A directory that does not exist is an error of its own, before anything is inspected or downloaded.
+func TestApplyMissingDirectory(t *testing.T) {
+	r := newRelease(t)
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
+	u := r.updater("v1.0.0", "")
+	rel, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Dir = filepath.Join(t.TempDir(), "missing")
+	if err := u.Apply(context.Background(), rel); err == nil || errors.Is(err, ErrNotOwner) {
 		t.Fatalf("got %v", err)
 	}
 }
