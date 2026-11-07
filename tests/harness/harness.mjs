@@ -10,6 +10,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { killTree } from "./killtree.mjs";
 import { startMockOidc } from "./oidc.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -50,7 +51,7 @@ const hasExited = (child) => child.exitCode !== null || child.signalCode !== nul
 function signal(child, sig) {
   try {
     if (isWindows) {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      killTree(child);
     } else if (child.groupLeader) {
       process.kill(-child.pid, sig);
     } else {

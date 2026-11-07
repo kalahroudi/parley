@@ -5,13 +5,14 @@
 // server, and signs users in through it. This is how tests get a session: the
 // gateway has no development bypass, so a test logs in the way a person does.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import { closeSync, mkdtempSync, openSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { killTree } from "./killtree.mjs";
 import { startMockOidc } from "./oidc.mjs";
 
 const root = join(fileURLToPath(import.meta.url), "..", "..", "..");
@@ -31,7 +32,7 @@ const freePort = () =>
 function kill(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    if (process.platform === "win32") killTree(child);
     else process.kill(-child.pid, "SIGKILL");
   } catch {}
 }
