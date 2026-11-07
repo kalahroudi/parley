@@ -29,25 +29,17 @@ func Inspect(path string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	tok := windows.GetCurrentProcessToken()
-	me, err := tok.GetTokenUser()
-	if err != nil {
-		return Info{}, err
-	}
-	def, buf, err := defaultOwner(tok)
+	me, def, buf, err := ourSIDs()
 	if err != nil {
 		return Info{}, err
 	}
 	defer runtime.KeepAlive(buf)
-	any, strong, err := othersWrite(sd)
-	if err != nil {
-		return Info{}, err
-	}
+	any, strong := othersWrite(sd)
 	trusted := owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || owner.Equals(trustedInstaller)
 	return Info{
 		IsDir:     fi.IsDir(),
 		IsRegular: fi.Mode().IsRegular(),
-		Owned:     windows.EqualSid(owner, me.User.Sid) || windows.EqualSid(owner, def),
+		Owned:     windows.EqualSid(owner, me) || windows.EqualSid(owner, def),
 		Trusted:   trusted,
 
 		GroupOrOtherWrite: any,
@@ -56,13 +48,7 @@ func Inspect(path string) (Info, error) {
 }
 
 // trustedInstaller (NT SERVICE\TrustedInstaller) owns the system's own files and folders on current Windows.
-var trustedInstaller = func() *windows.SID {
-	sid, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
-	if err != nil {
-		panic(err)
-	}
-	return sid
-}()
+var trustedInstaller, _ = windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464") // constant, valid
 
 // Access rights that let others change a file's contents (dataWrite) or take it over, delete it or its entries
 // (takeOver). Creating a subdirectory in a parent (FILE_APPEND_DATA alone is not enough to rename an entry away)
@@ -74,19 +60,17 @@ const (
 )
 
 // othersWrite reads the access list: any is true when Everyone, Users or Authenticated Users are allowed to write
-// or take over the object, strong when they may delete it or its entries or change its permissions.
-func othersWrite(sd *windows.SECURITY_DESCRIPTOR) (any, strong bool, err error) {
+// or take over the object, strong when they may delete it or its entries or change its permissions. An access list
+// that is missing (open to everyone) or cannot be read counts as both: the update is refused.
+func othersWrite(sd *windows.SECURITY_DESCRIPTOR) (any, strong bool) {
 	dacl, _, err := sd.DACL()
-	if err != nil {
-		return false, false, err
-	}
-	if dacl == nil {
-		return true, true, nil
+	if err != nil || dacl == nil {
+		return true, true
 	}
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
-			return false, false, err
+			return true, true
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&inheritOnly != 0 {
 			continue
@@ -98,17 +82,22 @@ func othersWrite(sd *windows.SECURITY_DESCRIPTOR) (any, strong bool, err error) 
 		strong = strong || uint32(ace.Mask)&takeOver != 0
 		any = any || uint32(ace.Mask)&(takeOver|dataWrite) != 0
 	}
-	return any, strong, nil
+	return any, strong
 }
 
-// defaultOwner is the owner new files get from this process: the user, or Administrators for an elevated token.
-// The SID points into the returned buffer, which the caller keeps alive while using it.
-func defaultOwner(tok windows.Token) (*windows.SID, []byte, error) {
+// ourSIDs returns the user running this process and the owner new files get from it. The second SID points into
+// the returned buffer, which the caller keeps alive while using it.
+func ourSIDs() (me, def *windows.SID, buf []byte, err error) {
+	tok := windows.GetCurrentProcessToken()
+	u, err := tok.GetTokenUser()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	var n uint32
 	windows.GetTokenInformation(tok, windows.TokenOwner, nil, 0, &n) // reports the size needed
-	buf := make([]byte, n)
+	buf = make([]byte, n)
 	if err := windows.GetTokenInformation(tok, windows.TokenOwner, &buf[0], n, &n); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return (*struct{ Owner *windows.SID })(unsafe.Pointer(&buf[0])).Owner, buf, nil
+	return u.User.Sid, (*struct{ Owner *windows.SID })(unsafe.Pointer(&buf[0])).Owner, buf, nil
 }
