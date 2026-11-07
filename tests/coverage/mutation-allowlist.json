@@ -527,6 +527,38 @@
       "type": "CONDITIONALS_BOUNDARY",
       "status": "LIVED",
       "reason": "Equivalent mutant: it only makes the loop also call close-on-exec on descriptor 4096, which is past the bound by design and is not open, so nothing observable changes; TestPrepareMarksInheritedDescriptorsCloseOnExec pins descriptor 4095."
+    },
+    {
+      "package": "internal/update",
+      "file": "source.go",
+      "line": 19,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "update.go",
+      "line": 26,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "update.go",
+      "line": 27,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "update.go",
+      "line": 28,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
     }
   ]
 }

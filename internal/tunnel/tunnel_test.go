@@ -275,6 +275,9 @@ func TestResumeSendsSessionAndLastRx(t *testing.T) {
 	waitFor(t, "second hello", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.hellos) == 2 })
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.hellos[0]["v"] != float64(protocolVersion) { // JJ-01: the protocol version is in the handshake
+		t.Fatalf("hello carries no protocol version: %v", g.hellos[0])
+	}
 	if g.hellos[0]["session"] != nil || g.hellos[0]["last_rx"] != float64(0) {
 		t.Fatalf("first hello %v", g.hellos[0])
 	}
