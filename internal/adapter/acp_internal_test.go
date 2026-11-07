@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/pipeline"
 )
 
 // FuzzParseRPC: whatever an agent writes, parsing it never panics and never yields a message outside JSON-RPC 2.0: a
@@ -192,5 +193,35 @@ func TestEmptyChunksAreCounted(t *testing.T) {
 	}
 	if err := c.update(empty); err != errProtocol {
 		t.Fatalf("one past the limit: %v", err)
+	}
+}
+
+// The limits are exact: a request id of the longest length and one that starts with the lowest and the highest digit
+// can be echoed, a reject option with the longest id can be chosen, and a reply of exactly a result's size is not cut.
+func TestACPLimitsAreExact(t *testing.T) {
+	for _, id := range []string{`0`, `9`, `-1`, `"` + strings.Repeat("a", maxACPID-2) + `"`} {
+		if !echoableID(json.RawMessage(id)) {
+			t.Errorf("id %s", id)
+		}
+	}
+	for _, id := range []string{`/`, `:`, `true`, `null`, `{}`, `[1]`} {
+		if echoableID(json.RawMessage(id)) {
+			t.Errorf("id %s", id)
+		}
+	}
+	id := strings.Repeat("x", maxACPSession)
+	got, _ := json.Marshal(denial(json.RawMessage(`{"options":[{"optionId":"` + id + `","kind":"reject_once"}]}`)))
+	if want := `{"outcome":{"optionId":"` + id + `","outcome":"selected"}}`; string(got) != want {
+		t.Errorf("longest option id refused")
+	}
+	c := &acpConv{sid: "s"}
+	text := func(n int) json.RawMessage {
+		return json.RawMessage(`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + strings.Repeat("a", n) + `"}}}`)
+	}
+	if err := c.update(text(pipeline.MaxContent)); err != nil || len(c.text) != pipeline.MaxContent {
+		t.Fatalf("a result's size: %v", err)
+	}
+	if err := c.update(text(1)); err != errACPFull || len(c.text) != pipeline.MaxContent+1 {
+		t.Fatalf("one byte more: %v %d", err, len(c.text))
 	}
 }

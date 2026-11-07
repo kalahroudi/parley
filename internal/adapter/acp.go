@@ -4,7 +4,6 @@
 package adapter
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -151,19 +150,18 @@ type rpcMessage struct {
 func (m *rpcMessage) isResponse() bool { return m.Method == "" }
 func (m *rpcMessage) isRequest() bool  { return m.Method != "" && m.ID != nil }
 
-// parseRPC reads one JSON-RPC 2.0 message strictly: the envelope has no unknown field and no trailing data, a response has
+// parseRPC reads one JSON-RPC 2.0 message strictly: the envelope has no unknown, duplicate or miscased key and no trailing data, a response has
 // an id and exactly one of result and error, a request or notification has a method and neither, and a request's id is
 // a short number or string (it is echoed back). What is inside params and result is read leniently by the caller, because
 // ACP lets either side add fields.
 func parseRPC(line []byte) (rpcMessage, error) {
 	var m rpcMessage
-	dec := json.NewDecoder(bytes.NewReader(line))
 	// ExactKeys refuses a duplicate key and a key that differs from a field only in case (encoding/json would fold it into
 	// the field and keep the last value).
 	if !localsock.ExactKeys(line, "jsonrpc", "id", "method", "params", "result", "error") {
 		return rpcMessage{}, errProtocol
 	}
-	if dec.Decode(&m) != nil || dec.More() || m.JSONRPC != "2.0" {
+	if json.Unmarshal(line, &m) != nil || m.JSONRPC != "2.0" {
 		return rpcMessage{}, errProtocol
 	}
 	if m.isResponse() {

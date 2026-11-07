@@ -369,3 +369,18 @@ func TestACPCutsTheReplyJustPastTheLimit(t *testing.T) {
 		t.Fatalf("%d %v", len(res), err)
 	}
 }
+
+// What is allowed, at its edges: an update before the session exists is dropped (not a protocol error), and the longest
+// session id is accepted.
+func TestACPAcceptsAnEarlyUpdateAndTheLongestSessionID(t *testing.T) {
+	sid := strings.Repeat("s", 256)
+	raw := `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"early","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"X"}}}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"` + sid + `"}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"` + sid + `","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}}}` + "\n" +
+		`{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}`
+	res, err := handle(t, acp(t, "acp-raw", "PARLEY_RAW="+strings.ReplaceAll(raw, "\n", "\\n")), task)
+	if err != nil || string(res) != "ok" {
+		t.Fatalf("%q %v", res, err)
+	}
+}
