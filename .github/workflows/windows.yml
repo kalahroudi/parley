@@ -42,3 +42,5 @@ jobs:
         run: |
           node --test tests/m1-echo.test.mjs | tee m1.out
           grep -q "^# pass 1$" m1.out && grep -q "^# skipped 0$" m1.out && grep -q "^# fail 0$" m1.out
+      - name: Peer check under load (many short-lived peers)
+        run: go test -count=3 -v -run 'TestWindowsPeerCheckUnderLoad' ./internal/localsock

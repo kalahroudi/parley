@@ -9,10 +9,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kalahroudi/parley/internal/fsperm"
@@ -138,4 +142,64 @@ func TestWindowsPeerPIDMustBeReadableAndPositive(t *testing.T) {
 	if err := checkPeer(srv, 0); err != nil {
 		t.Errorf("a readable positive pid of the own user was refused: %v", err)
 	}
+}
+
+// The peer check must not refuse a real peer under load: many calls at once from this process, and from many
+// short-lived child processes (what parley-cli is), each with a pid the daemon has never seen. A refusal here is a
+// flake in the check, which an operator would see as "daemon not reachable".
+func TestWindowsPeerCheckUnderLoad(t *testing.T) {
+	ts := startServer(t, okMethod)
+	var wg sync.WaitGroup
+	var bad atomic.Int32
+	var first atomic.Value
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 150; i++ {
+				if r, err := Call(context.Background(), ts.path, "x", nil); err != nil || !r.OK {
+					bad.Add(1)
+					first.CompareAndSwap(nil, fmt.Sprintf("%+v %v", r, err))
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if n := bad.Load(); n != 0 {
+		t.Fatalf("%d of 1200 in-process calls were refused or failed; first: %v\nserver log:\n%s", n, first.Load(), ts.log.String())
+	}
+
+	sem := make(chan struct{}, 6)
+	for i := 0; i < 60; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestWindowsPeerLoadChild$")
+			cmd.Env = append(os.Environ(), "PARLEY_LOAD_CHILD="+ts.path)
+			if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "LOAD-OK") {
+				bad.Add(1)
+				first.CompareAndSwap(nil, fmt.Sprintf("child: %v %s", err, out))
+			}
+		}()
+	}
+	wg.Wait()
+	if n := bad.Load(); n != 0 {
+		t.Fatalf("%d of 60 child-process calls were refused or failed; first: %v\nserver log:\n%s", n, first.Load(), ts.log.String())
+	}
+}
+
+// TestWindowsPeerLoadChild is the child of TestWindowsPeerCheckUnderLoad; it does nothing in a normal run.
+func TestWindowsPeerLoadChild(t *testing.T) {
+	path := os.Getenv("PARLEY_LOAD_CHILD")
+	if path == "" {
+		t.Skip("helper process")
+	}
+	for i := 0; i < 3; i++ {
+		if r, err := Call(context.Background(), path, "x", nil); err != nil || !r.OK {
+			t.Fatalf("call %d: %+v %v", i, r, err)
+		}
+	}
+	os.Stdout.WriteString("LOAD-OK\n")
 }
