@@ -44,6 +44,13 @@ func TestLocate(t *testing.T) {
 	if _, err := Locate(filepath.Join(d, "nope")); err == nil {
 		t.Fatal("missing file accepted")
 	}
+	// A file inside a package manager's tree is managed (no link needed, so this runs on Windows too).
+	tree := filepath.Join(d, "Cellar", "parley", "0.9.0", "bin")
+	os.MkdirAll(tree, 0o755)
+	os.WriteFile(filepath.Join(tree, "parleyd"), nil, 0o755)
+	if _, err := Locate(filepath.Join(tree, "parleyd")); !errors.Is(err, ErrManaged) {
+		t.Fatalf("file in a Cellar: %v", err)
+	}
 	if runtime.GOOS == "windows" {
 		return // creating links needs a privilege there
 	}
