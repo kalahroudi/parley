@@ -90,17 +90,13 @@ func (c Config) Policy(getenv func(string) string) (UpdatePolicy, error) {
 	if u := c.Update; u != nil {
 		// A section that did not go through validation (a hand-built Config) is not trusted: anything unexpected
 		// means no updates.
-		if cp := *u; cp.validate() != nil {
+		cp := *u
+		if cp.validate() != nil {
 			p = UpdatePolicy{Mode: UpdateOff, Interval: DefaultUpdateInterval}
 			return p, fmt.Errorf("update configuration is invalid")
 		}
-		p = UpdatePolicy{Mode: u.Mode, Pin: u.Pin, Interval: u.interval, Source: u.Source}
-		if u.Mode == "" {
-			p.Mode = UpdateAuto
-		}
-		if p.Interval == 0 {
-			p.Interval = DefaultUpdateInterval
-		}
+		// The validated copy carries the defaults and the parsed interval, whether or not u was validated before.
+		p = UpdatePolicy{Mode: cp.Mode, Pin: cp.Pin, Interval: cp.interval, Source: cp.Source}
 	}
 	switch env := getenv(UpdateEnv); env {
 	case "", UpdateAuto:

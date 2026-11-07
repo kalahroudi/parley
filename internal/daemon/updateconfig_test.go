@@ -99,7 +99,11 @@ func TestPolicyDistrustsUnvalidatedSection(t *testing.T) {
 			t.Errorf("%+v: got %+v %v", u, p, err)
 		}
 	}
-	p, err := Config{Update: &UpdateConfig{}}.Policy(getenvOf(""))
+	p, err := Config{Update: &UpdateConfig{Mode: UpdateCheck, Interval: "2h"}}.Policy(getenvOf(""))
+	if err != nil || p.Mode != UpdateCheck || p.Interval != 2*time.Hour {
+		t.Errorf("unvalidated but valid section: %+v %v", p, err)
+	}
+	p, err = Config{Update: &UpdateConfig{}}.Policy(getenvOf(""))
 	if err != nil || p.Mode != UpdateAuto || p.Interval != DefaultUpdateInterval {
 		t.Errorf("empty section: %+v %v", p, err)
 	}
