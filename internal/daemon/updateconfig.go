@@ -67,7 +67,7 @@ func (u *UpdateConfig) validate() error {
 	}
 	if u.Source != "" {
 		if err := update.ValidSource(u.Source); err != nil {
-			return err
+			return fmt.Errorf("update.source: %v", err)
 		}
 	}
 	return nil
@@ -88,7 +88,19 @@ type UpdatePolicy struct {
 func (c Config) Policy(getenv func(string) string) (UpdatePolicy, error) {
 	p := UpdatePolicy{Mode: UpdateAuto, Interval: DefaultUpdateInterval}
 	if u := c.Update; u != nil {
+		// A section that did not go through validation (a hand-built Config) is not trusted: anything unexpected
+		// means no updates.
+		if cp := *u; cp.validate() != nil {
+			p = UpdatePolicy{Mode: UpdateOff, Interval: DefaultUpdateInterval}
+			return p, fmt.Errorf("update configuration is invalid")
+		}
 		p = UpdatePolicy{Mode: u.Mode, Pin: u.Pin, Interval: u.interval, Source: u.Source}
+		if u.Mode == "" {
+			p.Mode = UpdateAuto
+		}
+		if p.Interval == 0 {
+			p.Interval = DefaultUpdateInterval
+		}
 	}
 	switch env := getenv(UpdateEnv); env {
 	case "", UpdateAuto:

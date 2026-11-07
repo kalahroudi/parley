@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,5 +88,26 @@ func TestPolicyCarriesTheConfiguration(t *testing.T) {
 	def, _ := Config{}.Policy(getenvOf(""))
 	if def != (UpdatePolicy{Mode: UpdateAuto, Interval: DefaultUpdateInterval}) {
 		t.Fatalf("defaults: %+v", def)
+	}
+}
+
+// A Config that never went through ParseConfig (so was not validated) cannot leave updates running on a wrong value.
+func TestPolicyDistrustsUnvalidatedSection(t *testing.T) {
+	for _, u := range []*UpdateConfig{{Mode: "sometimes"}, {Pin: "latest"}, {Source: "http://example.com"}, {Interval: "1s"}} {
+		p, err := Config{Update: u}.Policy(getenvOf(""))
+		if err == nil || p.Mode != UpdateOff {
+			t.Errorf("%+v: got %+v %v", u, p, err)
+		}
+	}
+	p, err := Config{Update: &UpdateConfig{}}.Policy(getenvOf(""))
+	if err != nil || p.Mode != UpdateAuto || p.Interval != DefaultUpdateInterval {
+		t.Errorf("empty section: %+v %v", p, err)
+	}
+}
+
+func TestParseConfigUpdateSourceErrorNamesTheField(t *testing.T) {
+	_, err := ParseConfig([]byte(goodJSON(`,"update":{"source":"http://example.com/rel"}`)))
+	if err == nil || !strings.Contains(err.Error(), "update.source") {
+		t.Fatalf("%v", err)
 	}
 }

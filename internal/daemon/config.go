@@ -46,6 +46,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/kalahroudi/parley/internal/fsperm"
 )
 
 // ErrConfig means the configuration file is missing, unreadable or invalid.
@@ -97,7 +99,12 @@ type Config struct {
 // LoadConfig reads and validates dir/config.json. Unknown fields, trailing
 // data and oversized files are rejected so a typo cannot silently weaken a setting.
 func LoadConfig(dir string) (Config, error) {
-	f, err := os.Open(filepath.Join(dir, "config.json"))
+	path := filepath.Join(dir, "config.json")
+	// The file decides whether and from where the device updates itself: another user must not be able to edit it.
+	if err := fsperm.CheckFile(path); err != nil {
+		return Config{}, fmt.Errorf("%w: %v", ErrConfig, err)
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("%w: %v", ErrConfig, err)
 	}
