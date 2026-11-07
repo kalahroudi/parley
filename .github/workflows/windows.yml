@@ -49,3 +49,30 @@ jobs:
         run: |
           node --test tests/acl-matrix.test.mjs | tee acl.out
           grep -q "^# pass 1$" acl.out && grep -q "^# skipped 0$" acl.out && grep -q "^# fail 0$" acl.out
+
+  # Which Windows test, run before the node suite, makes real daemons die in it? (T505 investigation; the full CI's Windows
+  # job fails the ACL matrix and M1 only when the Go tests have run first.) Each variant runs one set, then the whole node suite.
+  bisect:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        before: ["none", "TestWindowsDaemonLifecycle", "TestWindowsKeyMemoryScan", "TestWindowsInstall", "TestWindowsPeerCheckUnderLoad"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run the chosen Windows test first
+        if: matrix.before != 'none'
+        run: go test -count=1 -run '${{ matrix.before }}' ./internal/acceptance ./internal/localsock
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      - name: The whole node suite
+        shell: bash
+        run: node --test "tests/**/*.test.mjs" 2>&1 | tee suite.out; ! grep -q "^not ok" suite.out
