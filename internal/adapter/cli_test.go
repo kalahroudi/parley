@@ -107,6 +107,8 @@ func helper(mode string) {
 		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: last})
 	case "toolgone": // asks for a tool and leaves without reading the reply
 		fmt.Println(`{"type":"tool","tool":"t"}`)
+	case "acp-sdk":
+		sdkAgentMain()
 	case "acp-script":
 		scriptAgent()
 	case "acp", "acp-noreject", "acp-echo", "acp-big", "acp-version", "acp-error", "acp-refuse", "acp-raw", "acp-flood", "acp-wrongsession", "acp-hang", "acp-closein":
