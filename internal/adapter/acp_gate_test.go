@@ -586,3 +586,47 @@ func TestACPThroughTheHostWithAGate(t *testing.T) {
 		t.Fatalf("%+v", m)
 	}
 }
+
+// Terminal access is deliberately not offered: initialize says so, and every terminal method is refused with the same
+// error, with or without a gate, without asking the owner and without running anything, even for an agent that ignores the
+// capability.
+func TestACPTerminalIsNeverOfferedAndEveryTerminalMethodIsRefused(t *testing.T) {
+	methods := []string{"terminal/create", "terminal/output", "terminal/wait_for_exit", "terminal/kill", "terminal/release"}
+	for _, withGate := range []bool{false, true} {
+		dir := t.TempDir()
+		side := filepath.Join(dir, "side-effect")
+		var s []string
+		for i, m := range methods {
+			s = append(s, `send {"jsonrpc":"2.0","id":`+strconv.Itoa(20+i)+`,"method":"`+m+`","params":{"sessionId":"s1","command":"touch","args":["`+filepath.ToSlash(side)+`"],"terminalId":"t1"}}`, `read`)
+		}
+		for i := range methods {
+			s = append(s, `echo `+strconv.Itoa(4+i))
+		}
+		g := &fakeGate{}
+		var gate adapter.Tools
+		if withGate {
+			gate = g
+		}
+		a, err := adapter.NewACP(adapter.ACPConfig{Command: self(t), Dir: dir, Gate: gate,
+			Env: []string{helperEnv + "=acp-script", "PARLEY_SCRIPT=" + script(append([]string{`echo 1`}, s...)...)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := playOK(t, a, task, &stub{})
+		if !strings.Contains(out, `"terminal":false`) {
+			t.Errorf("gate %v: the terminal capability is advertised: %s", withGate, out)
+		}
+		for i := range methods {
+			want := `{"jsonrpc":"2.0","id":` + strconv.Itoa(20+i) + `,"error":{"code":-32601,"message":"method not found"}}`
+			if !strings.Contains(out, want) {
+				t.Errorf("gate %v, %s: %s not in %s", withGate, methods[i], want, out)
+			}
+		}
+		if _, err := os.Stat(side); err == nil {
+			t.Errorf("gate %v: a terminal request had a side effect", withGate)
+		}
+		if n := len(g.got()); n != 0 {
+			t.Errorf("the owner was asked %d times about a terminal", n)
+		}
+	}
+}

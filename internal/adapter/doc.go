@@ -124,7 +124,9 @@
 // At most MaxACPPermissions requests per task are put to the owner (refused ones included), and the broker limits the calls
 // per task and the calls waiting. The owner may grant a call's tool for the rest of the task (scope "task"), as for any tool.
 // What the agent does by itself, with its own tools and its own access to the machine, is outside this: it is the
-// customer's configuration and is a tool-using skill (owner approval; unsupported on Windows). No terminal means that an agent
+// customer's configuration and is a tool-using skill (owner approval; unsupported on Windows). Terminal access is
+// deliberately not offered; enabling it needs per-call approval backed by toolrun containment (a named, tracked limitation,
+// not a silent gap). No terminal means that an agent
 // that needs to run programs through the client cannot.
 //
 // What this package cannot do: the bot receives the plaintext and keeps what it
