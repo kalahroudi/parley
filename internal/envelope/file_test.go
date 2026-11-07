@@ -21,9 +21,25 @@ type sealed struct {
 	size uint64
 }
 
+// capBuffer is a destination for EncryptFile that refuses more than maxCiphertext bytes. A mutant of the chunk loop that
+// never ends would otherwise write into memory without limit: the mutation run's runner dies of it before its time limit
+// counts the mutant as killed (it did, on Linux). With the cap the encryption fails at once and the mutant is killed.
+type capBuffer struct{ bytes.Buffer }
+
+const maxCiphertext = 1 << 27
+
+var errCapped = errors.New("test destination full")
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	if c.Len()+len(p) > maxCiphertext {
+		return 0, errCapped
+	}
+	return c.Buffer.Write(p)
+}
+
 func encrypt(t testing.TB, key, pt []byte) sealed {
 	t.Helper()
-	var ct bytes.Buffer
+	var ct capBuffer
 	sum, size, err := EncryptFile(key, bytes.NewReader(pt), &ct)
 	if err != nil {
 		t.Fatal(err)
