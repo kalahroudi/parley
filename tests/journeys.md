@@ -49,20 +49,16 @@ Real gateway (`wrangler dev`), real `parley-cli`, `parleyd` and the botd harness
 
 Last run on head 28ca61a (CI, all 22 checks green):
 
-| System | Result | Test time |
-|---|---|---|
-| macOS (macos-latest) | pass | 17.7 s |
-| Linux (ubuntu-latest) | pass | 16.3 s |
-| Windows (windows-latest) | pass | 24.3 s |
+- macOS (macos-latest): pass, 17.7 s.
+- Linux (ubuntu-latest): pass, 16.3 s.
+- Windows (windows-latest): pass, 24.3 s.
 
 Runtime budget: the test's own timeout is 300 s (about 12 times the slowest run); it runs inside the `test` job of each OS, which has its own job limit and is not near it because of this test. Ports are ephemeral and every process, temp dir and gateway state is removed in `finally`.
 
 Mutation spot-check (run on macOS; each change reverted afterwards):
 
-| Defence disabled | Result |
-|---|---|
-| `gateway/src/tenant.ts`: a used enrollment token is not deleted | red: "a used token was accepted again: the second enrollment is waiting for approval" |
-| `gateway/src/tenant.ts`: the pod's owner is not taken from its token | red: "the pod enrolls under the named service owner, not under a person" |
+- `gateway/src/tenant.ts`, a used enrollment token is not deleted: red, "a used token was accepted again: the second enrollment is waiting for approval".
+- `gateway/src/tenant.ts`, the pod's owner is not taken from its token: red, "the pod enrolls under the named service owner, not under a person".
 
 The canary scan is checked by a planted control in the same test. Not mutation-checked here: the daemon-side checks (covered by the Go tests and `scripts/malgw-mutations.sh`).
 
