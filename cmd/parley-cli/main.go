@@ -20,7 +20,7 @@ import (
 // version is set at release build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = "usage: parley-cli --version | admin init [-backup <file>] | signer [-listen <loopback addr>] [-info <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | approve [-deny] [<task id>] | find [text] | send | get | cancel | list | test -to <device id> [-timeout 30s]"
+const usage = "usage: parley-cli --version | admin init [-backup <file>] | signer [-listen <loopback addr>] [-info <file>] | login -tenant <id> [-gateway <url>] [-provider <name>] [-no-browser] | enroll [-tenant <id> -root <fingerprint> | -trust-on-first-use] [-token] [-replace] [-name <device>] [-key-store keychain|file] | mcp | approve [-deny] [<task id>] | find [text] | send | get | cancel | list | test -to <device id> [-timeout 30s] | update status|check|apply"
 
 //cover:ignore main only wires the process (arguments, signals, environment, os.Exit) to execute, which is tested
 func main() {
@@ -60,6 +60,15 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errw io.Writ
 			return login(ctx, args[1:], out, errw, dirs, getenv, t)
 		}
 		return enrollCmd(ctx, args[1:], in, out, errw, dirs, getenv, t)
+	}
+	if len(args) >= 1 && args[0] == "update" {
+		dirs, err := daemon.DefaultDirs(getenv, configDir)
+		if err != nil {
+			//logx:allow fatal CLI error for the operator's terminal; no task content exists in this process path
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
+		return updateCmd(ctx, args[1:], out, errw, dirs, getenv, t)
 	}
 	if len(args) >= 1 && callerCommand(args[0]) {
 		return runCaller(ctx, args, in, out, errw, getenv, configDir)

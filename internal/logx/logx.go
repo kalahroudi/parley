@@ -28,7 +28,7 @@ var Keys = map[string]bool{
 	"prekey": true, "request": true, "seq": true, "tool": true, "call": true,
 	"state": true, "type": true, "retention": true,
 	"size": true, "bucket": true, "count": true, "component": true,
-	"at": true, "issued_at": true, "expires_at": true, "deadline": true,
+	"version": true, "reason": true, "at": true, "issued_at": true, "expires_at": true, "deadline": true,
 }
 
 // States is the allowlist of state and message-type codes.
