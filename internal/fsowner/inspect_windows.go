@@ -43,14 +43,15 @@ func Inspect(path string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
+	trusted := owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)
 	return Info{
 		IsDir:     fi.IsDir(),
 		IsRegular: fi.Mode().IsRegular(),
 		Owned:     windows.EqualSid(owner, me.User.Sid) || windows.EqualSid(owner, def),
-		Trusted:   owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid),
+		Trusted:   trusted,
 
 		GroupOrOtherWrite: any,
-		WorldWrite:        strong,
+		WorldWrite:        strong && !trusted, // what the system owns keeps the access list the system gave it (C:\ itself lets Users add entries)
 	}, nil
 }
 

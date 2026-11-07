@@ -238,3 +238,18 @@ func TestApplyChecksAgainBeforeSwapping(t *testing.T) {
 		t.Fatalf("files left behind: %v", ents)
 	}
 }
+
+// A directory that does not exist is an error of its own, before anything is inspected or downloaded.
+func TestApplyMissingDirectory(t *testing.T) {
+	r := newRelease(t)
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
+	u := r.updater("v1.0.0", "")
+	rel, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Dir = filepath.Join(t.TempDir(), "missing")
+	if err := u.Apply(context.Background(), rel); err == nil || errors.Is(err, ErrNotOwner) {
+		t.Fatalf("got %v", err)
+	}
+}

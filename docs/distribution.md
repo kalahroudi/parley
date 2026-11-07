@@ -32,7 +32,7 @@ a root process refuses a user's directory and a user process refuses root's: an 
 the install belongs to. A directory under Homebrew, Nix, snap, `/usr/bin`, `Program Files` or `WindowsApps` is refused
 with `ErrManaged`, which says to update with the package manager or installer. On Windows ownership is checked as
 above, and the access list of the directory, its programs and each parent is read: an allow entry for Everyone, Users or
-Authenticated Users that writes (parents: deletes entries or changes permissions) refuses the update. What remains is a
+Authenticated Users that writes (parents: deletes entries or changes permissions) refuses the update; what the system owns (such as `C:\`) keeps the access list the system gave it. What remains is a
 process of the same user (or root) racing the swap, which already owns the programs.
 
 The transport (GitHub, a mirror) is untrusted: downloads are size-limited and redirects must stay on https. Source

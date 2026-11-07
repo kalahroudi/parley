@@ -539,14 +539,6 @@
     {
       "package": "internal/update",
       "file": "update.go",
-      "line": 26,
-      "type": "INVERT_BITWISE",
-      "status": "NOT COVERED",
-      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
-    },
-    {
-      "package": "internal/update",
-      "file": "update.go",
       "line": 27,
       "type": "INVERT_BITWISE",
       "status": "NOT COVERED",
@@ -556,6 +548,14 @@
       "package": "internal/update",
       "file": "update.go",
       "line": 28,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "update.go",
+      "line": 29,
       "type": "INVERT_BITWISE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."

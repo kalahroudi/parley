@@ -57,11 +57,12 @@ func TestInspectOthersWrite(t *testing.T) {
 		t.Fatalf("write grant: %+v", got)
 	}
 	grant(f, "F")
-	if got, _ := Inspect(f); !got.GroupOrOtherWrite || !got.WorldWrite {
+	// Objects owned by the system (an elevated runner owns what it creates as Administrators) keep WorldWrite false.
+	if got, _ := Inspect(f); !got.GroupOrOtherWrite || got.WorldWrite == got.Trusted {
 		t.Fatalf("full-control grant: %+v", got)
 	}
 	grant(d, "(OI)(CI)(DC)")
-	if got, _ := Inspect(d); !got.WorldWrite {
+	if got, _ := Inspect(d); !got.GroupOrOtherWrite || got.WorldWrite == got.Trusted {
 		t.Fatalf("delete-child grant on directory: %+v", got)
 	}
 }
