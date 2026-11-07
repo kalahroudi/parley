@@ -75,7 +75,12 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
 
     // 1. Two devices of one owner.
     const pass = await cli(a.home, ["test", "-to", b.id, "-timeout", "90s"]).done;
-    assert.equal(pass.code, 0, `${pass.out}\n--- a\n${da.output()}\n--- b\n${db.output()}`);
+    if (pass.code !== 0) {
+      // The exit event comes before the pipes are drained: wait for the close of a daemon that has gone before quoting it.
+      await Promise.all(daemons.filter((d) => d.child.exitCode !== null || d.child.signalCode !== null).map((d) => d.done));
+    }
+    const state = (d) => `exit ${d.child.exitCode}, signal ${d.child.signalCode}, pid ${d.child.pid}`;
+    assert.equal(pass.code, 0, `${pass.out}\n--- a (${state(da)})\n${da.output()}\n--- b (${state(db)})\n${db.output()}`);
     assert.match(pass.out, /PASS: the other device answered, end to end encrypted/);
     // And back the other way, from the second device.
     const back = await cli(b.home, ["test", "-to", a.id, "-timeout", "90s"]).done;
