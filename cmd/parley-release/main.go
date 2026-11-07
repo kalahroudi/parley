@@ -20,6 +20,8 @@ const usage = `usage:
   parley-release sign <secret-file> <file> <trusted-comment>   (writes <file>.minisig)
   parley-release verify <public-file> <file>                   (reads <file>.minisig)
   parley-release verify-checksums <sums-file>                  (files next to it)
+  parley-release formula <tag> <dir> <out>                     (Homebrew formula from the binaries in <dir>)
+  parley-release deb <tag> <amd64|arm64> <dir> <out>           (Debian package from the Linux binaries in <dir>)
 
 The secret key file is encrypted; keygen and sign read its password from the
 environment variable ` + passwordEnv + ` (never from the command line).
@@ -144,6 +146,18 @@ func run(a []string) error {
 		}
 		fmt.Println("signature ok:", c)
 		return nil
+	case cmd == "formula" && len(a) == 3:
+		out, err := release.Formula(a[0], a[1])
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(a[2], out, 0o644)
+	case cmd == "deb" && len(a) == 4:
+		out, err := release.BuildDeb(a[0], a[1], a[2])
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(a[3], out, 0o644)
 	case cmd == "verify-checksums" && len(a) == 1:
 		data, err := os.ReadFile(a[0])
 		if err != nil {

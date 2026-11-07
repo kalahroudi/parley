@@ -125,3 +125,42 @@ func TestCreateFileNeverOverwritesAndCleansUp(t *testing.T) {
 		t.Fatalf("content %q", data)
 	}
 }
+
+func TestPackagingCommands(t *testing.T) {
+	d := t.TempDir()
+	for _, goos := range []string{"darwin", "linux"} {
+		for _, arch := range []string{"amd64", "arm64"} {
+			for _, cmd := range []string{"parleyd", "parley-cli"} {
+				os.WriteFile(filepath.Join(d, cmd+"_v1.0.0_"+goos+"_"+arch), []byte(cmd), 0o755)
+			}
+		}
+	}
+	out := t.TempDir()
+	formula := filepath.Join(out, "parley.rb")
+	if err := run([]string{"formula", "v1.0.0", d, formula}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(formula); !strings.Contains(string(b), `version "1.0.0"`) {
+		t.Fatal("formula")
+	}
+	if err := run([]string{"formula", "1.0.0", d, formula}); err == nil {
+		t.Fatal("bad tag accepted")
+	}
+	deb := filepath.Join(out, "parley_1.0.0_amd64.deb")
+	if err := run([]string{"deb", "v1.0.0", "amd64", d, deb}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(deb); !strings.HasPrefix(string(b), "!<arch>\n") {
+		t.Fatal("deb")
+	}
+	if err := run([]string{"deb", "v1.0.0", "s390x", d, filepath.Join(out, "x.deb")}); err == nil {
+		t.Fatal("bad arch accepted")
+	}
+	bad := filepath.Join(out, "no", "such", "dir")
+	if err := run([]string{"deb", "v1.0.0", "amd64", d, bad}); err == nil {
+		t.Fatal("unwritable output accepted")
+	}
+	if err := run([]string{"formula", "v1.0.0", d, bad}); err == nil {
+		t.Fatal("unwritable output accepted")
+	}
+}

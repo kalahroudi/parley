@@ -9,6 +9,7 @@
 # the project's own Ed25519 key, producing SHA256SUMS.minisig.
 # The key file is encrypted; its password comes from PARLEY_RELEASE_KEY_PASSWORD.
 # <outdir> must be empty or absent so stale files can never be published.
+# For a plain vMAJOR.MINOR.PATCH tag it also writes parley.rb (Homebrew formula) and parley_<version>_<arch>.deb.
 # PARLEY_VALID_DAYS (default 180, at most 400) is how long the signed manifest stays valid: after that daemons
 # refuse it, so the project re-signs (re-runs the release signing) before then. PARLEY_ISSUED (unix seconds)
 # fixes the issue time for tests.
@@ -82,8 +83,19 @@ done
 cd "$out"
 # shellcheck disable=SC2086
 "$tool" sbom "$version" sbom.cdx.json $files
+# Distribution channels: the Homebrew formula and the Debian packages are built from these very binaries, so the
+# signed SHA256SUMS covers them too. Only for a plain vMAJOR.MINOR.PATCH tag built for every default target.
+packages=""
+if [ -z "${PARLEY_TARGETS:-}" ] && printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+	"$tool" formula "$version" . parley.rb
+	packages="parley.rb"
+	for arch in amd64 arm64; do
+		"$tool" deb "$version" "$arch" . "parley_${version#v}_${arch}.deb"
+		packages="$packages parley_${version#v}_${arch}.deb"
+	done
+fi
 # shellcheck disable=SC2086
-"$tool" checksums . SHA256SUMS $files sbom.cdx.json
+"$tool" checksums . SHA256SUMS $files sbom.cdx.json $packages
 if [ -n "$key" ]; then
 	# The signed comment is the manifest header the updater enforces (internal/update/manifest.go): the version and
 	# a validity window, so a frozen update feed shows up as an expired manifest.
