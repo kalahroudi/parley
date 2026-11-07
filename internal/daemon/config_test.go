@@ -11,6 +11,7 @@ import (
 	"github.com/kalahroudi/parley/internal/keystore"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,12 @@ func TestLoadConfig(t *testing.T) {
 	os.WriteFile(p, []byte(goodJSON(`,"log_level":"`+strings.Repeat("x", maxConfigBytes)+`"`)), 0o600)
 	if _, err := LoadConfig(dir); !errors.Is(err, ErrConfig) {
 		t.Errorf("oversize: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		os.Chmod(p, 0o644)
+		if _, err := LoadConfig(dir); !errors.Is(err, ErrConfig) {
+			t.Errorf("readable by others: %v", err)
+		}
 	}
 	os.Remove(p)
 	os.Mkdir(p, 0o700) // a directory where the file should be: the read fails

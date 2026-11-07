@@ -46,6 +46,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/kalahroudi/parley/internal/fsperm"
 )
 
 // ErrConfig means the configuration file is missing, unreadable or invalid.
@@ -88,6 +90,8 @@ type Config struct {
 	DisableTestBot bool `json:"disable_test_bot,omitempty"`
 	// Bot is the bot this device runs for its owners' callers (botconfig.go). Without it only the test bot runs.
 	Bot *BotConfig `json:"bot,omitempty"`
+	// Update controls self-update (updateconfig.go). Without it the defaults apply: auto, the project's releases.
+	Update *UpdateConfig `json:"update,omitempty"`
 
 	refresh time.Duration
 }
@@ -95,7 +99,12 @@ type Config struct {
 // LoadConfig reads and validates dir/config.json. Unknown fields, trailing
 // data and oversized files are rejected so a typo cannot silently weaken a setting.
 func LoadConfig(dir string) (Config, error) {
-	f, err := os.Open(filepath.Join(dir, "config.json"))
+	path := filepath.Join(dir, "config.json")
+	// The file decides whether and from where the device updates itself: another user must not be able to edit it.
+	if err := fsperm.CheckFile(path); err != nil {
+		return Config{}, fmt.Errorf("%w: %v", ErrConfig, err)
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("%w: %v", ErrConfig, err)
 	}
@@ -169,6 +178,11 @@ func (c *Config) validate() error {
 	}
 	if c.Bot != nil {
 		if err := c.Bot.validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrConfig, err)
+		}
+	}
+	if c.Update != nil {
+		if err := c.Update.validate(); err != nil {
 			return fmt.Errorf("%w: %v", ErrConfig, err)
 		}
 	}
