@@ -25,15 +25,14 @@
 // Windows: the socket is AF_UNIX inside a directory with a protected DACL that
 // grants only the current user, SYSTEM and Administrators, and it is verified at
 // every start. Another standard user cannot reach the socket because they cannot
-// open its directory. Administrators and SYSTEM can. There is no peer-user
-// check, so nothing re-verifies who the caller is once the directory is reachable
-// (only the pid of a caller of a Sensitive method is read, with
-// SIO_AF_UNIX_GETPEERPID): any
-// process running as the same user can connect, and anything that is later
-// granted access to the directory (an ACL changed after start, or a process
-// holding SeBackupPrivilege) is served without question. A named pipe with a
-// current-user ACL, or an equivalent peer check, is planned (T505, pinned by
-// TestPending_WindowsDaemonPeerRestriction).
+// open its directory, and a second check reads the pid of every connecting
+// process (SIO_AF_UNIX_GETPEERPID), opens its token and refuses the connection
+// unless its user SID is the daemon's own; anything that cannot be read is
+// refused. Administrators and SYSTEM can open the directory but are refused
+// unless they run as the daemon's user. Any process running as the same user can
+// connect and use every method except the Sensitive ones. The pid is looked up
+// after accept, so a peer that exits and whose pid is reused before the lookup is
+// judged as the new process; the directory DACL still keeps other users out.
 package localsock
 
 import (

@@ -102,7 +102,7 @@ test("canary scan: every sink the test scans can see a planted canary", () => {
     assert.deepEqual([...new Set(scan.hits.map((h) => h.field))].sort(), [...FIELDS].sort());
     assert.throws(() => scan.assertClean(), /canary leak/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); // workerd may still hold a file for a moment after the gateway is killed (EBUSY on Windows)
   }
 });
 

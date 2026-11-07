@@ -122,6 +122,8 @@ For tool-using bots that Parley does not start, there are operating-system sandb
 | Linux: `docs/sandbox/linux-bwrap.sh <state directory> <bot command>` (needs bubblewrap and unprivileged user namespaces) | Run against a live daemon in CI on Linux, which fails if the sandbox cannot start; the CI log says whether it ran. Outside CI the test says explicitly when it skipped. |
 | Windows: `docs/sandbox/windows.ps1 -Bot <path>` (runs the bot as another user) | **Not verified on a second user account.** Only its syntax and its dry run are tested. No claim of enforcement. |
 
+Installing on Windows (per user, autostart, no administrator): [docs/windows/install.md](docs/windows/install.md).
+
 The unverified profiles are tracked as a follow-up. Tool-using skills are unsupported on Windows until a sandbox exists; the daemon's skill check refuses them there.
 
 ## What Parley does not promise

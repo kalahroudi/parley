@@ -369,7 +369,7 @@ describe("lifecycle over the transport", () => {
     expect(errCode(await w.task("tk"))).toBe(-32012);
     await connect(w.T, "bob");
     expect((await w.task("tk2")).result.task.status.state).toBe("TASK_STATE_SUBMITTED");
-  });
+  }, 240_000); // walks every state with a fresh task: ~25 ms per storage write on the Windows runner
 
   it("a caller that is gone fails the task when the target reports (Strict)", async () => {
     const w = world();

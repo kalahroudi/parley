@@ -141,8 +141,17 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
     const member = await enroll("svc-member");
     const stranger = await enroll("svc-stranger");
     const all = { target, own, member, stranger };
+    // When a daemon goes, take a snapshot of every process at that moment (what else is running, with its parent), so a daemon
+    // ended from outside can be traced; it is printed only if the test fails.
+    const deaths = [];
     for (const d of Object.values(all)) {
       const p = capture(spawn(exe("parleyd"), [], { env: { ...process.env, PARLEY_HOME: d.home }, stdio: ["ignore", "pipe", "pipe"] }));
+      p.child.once("exit", (code, sig) => {
+        if (process.platform !== "win32") return;
+        const ps = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+          "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Sort-Object ProcessId | Format-Table -AutoSize | Out-String -Width 300"], { encoding: "utf8" });
+        deaths.push(`daemon pid ${p.child.pid} exit ${code}/${sig} at ${new Date().toISOString()}; processes then:\n${ps.stdout}`);
+      });
       daemons.push(p);
     }
     await waitFor("the daemons to answer on their sockets", async () => {
@@ -181,9 +190,16 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
           return [who, r];
         }),
       );
+      // A daemon that died says so, with its own output, instead of the row failing as "not reachable". The exit event comes
+      // before the pipes are drained, so wait for the close (done) before reading what it printed last.
+      for (const [i, d] of daemons.entries()) {
+        if (d.child.exitCode === null && d.child.signalCode === null) continue;
+        const { out } = await d.done;
+        assert.fail(`daemon ${i} (pid ${d.child.pid}) exited (${d.child.exitCode}, signal ${d.child.signalCode}) at ${new Date().toISOString()} during "${row.name}":\n${out}\n${deaths.join("\n")}`);
+      }
       for (const [who, got] of results) {
         seen.push(`${row.name} / ${who}: ${got}`);
-        assert.equal(got, row[who], `${row.name}: ${who} met ${got}, want ${row[who]}`);
+        assert.equal(got, row[who], `${row.name}: ${who} met ${got}, want ${row[who]}\n${daemons.map((d, i) => `--- daemon ${i}\n${d.output()}`).join("\n")}\n--- the gateway's log (tail)\n${readFileSync(gw.log, "utf8").split("\n").slice(-80).join("\n")}`);
       }
     }
 
@@ -199,7 +215,7 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
       d.child.kill("SIGKILL");
     }
     await gw.close();
-    for (const dir of [bin, ...homes, gw.state, gw.log]) rmSync(dir, { recursive: true, force: true });
+    for (const dir of [bin, ...homes, gw.state, gw.log]) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); // workerd may still hold a file for a moment after the gateway is killed (EBUSY on Windows)
     if (!isWindows) assert.deepEqual(codes.filter((c) => c !== 0 && c !== null), [], "a daemon did not shut down cleanly");
   }
 });

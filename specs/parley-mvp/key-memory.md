@@ -41,6 +41,20 @@ backs. The plan calls erasure best effort, and it is.
   "the daemon hardens crash dumps on Windows" from this page. `VirtualLock` is
   also subject to the process working-set size; Windows may write locked pages
   at hibernation.
+- **Windows scan (T505, `TestWindowsKeyMemoryScan`).** A child holds live and erased
+  prekeys. It scans its own committed memory, the kernel's working-set information
+  (`QueryWorkingSetEx`) must say the key region is locked, and then another
+  process writes a full-memory minidump of the child (`MiniDumpWriteDump`) and the
+  file is scanned for each key by fingerprint. Measured on `windows-latest`: no
+  erased key in the locked region, at most `maxWinHeapResidue` (2) copies of an erased key in
+  the whole address space and in the minidump (the same count from both views),
+  none of a live key in the region after Close (its copies in the Go heap vary from
+  1 to 5 between runs, are logged and not promised), a planted key and every live key
+  found by both scans (so the scans can see). A dump tool, or anything with `PROCESS_VM_READ`, therefore finds the
+  Go-heap residue and the live keys while the daemon runs; it does not find an erased
+  key in the locked region. What it does not show: a crash dump written by WER (the
+  daemon does not prevent it, see above) and the registers and stacks of
+  other threads (the signal-frame guard is Linux only, below).
 - **Erasure.** The raw scalar slots are zeroed on use. Go's `crypto/ecdh` key
   objects copy the scalar (at Issue, deriving the public key, and at each HPKE
   open) and cannot be zeroed, so up to `maxHeapResidue` copies of a used key can
@@ -114,9 +128,13 @@ not a boundary against the user's own processes:
 | | Another standard local user | Same user's other processes | Administrator / root |
 |---|---|---|---|
 | Linux, macOS | cannot connect (0700 directory, 0600 socket, kernel-checked uid) | can connect and call every method | can connect |
-| Windows | cannot open the directory (protected DACL) | can connect and call every method | can connect |
+| Windows | cannot open the directory (protected DACL); the connecting process's token user is checked too | can connect and call every method | can open the directory but is refused unless running as the daemon's user |
 
-On Windows nothing re-checks the caller once the directory is reachable (AF_UNIX
-there carries no peer credentials); a named pipe with a current-user ACL, or an
-equivalent peer check, is task T505 (`TestPending_WindowsDaemonPeerRestriction`
-fails CI once T505 is ticked).
+On Windows AF_UNIX carries no peer credentials, so the daemon reads the pid of
+each connecting process (`SIO_AF_UNIX_GETPEERPID`), opens its token and refuses
+the connection unless the token's user SID is the daemon's own (anything that
+cannot be read is refused). The pid is looked up after accept, so a peer that
+exits and whose pid is reused before the lookup is judged as the new process;
+the directory's protected DACL still keeps other users out of the socket.
+Administrators and SYSTEM can still open the directory but are refused unless
+they are the daemon's user.

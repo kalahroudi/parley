@@ -17,7 +17,8 @@
 //     its own state directory;
 //   - wrangler's own logs and registry: per-start directories, so one run never
 //     reads or truncates another's.
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { killTree } from "./killtree.mjs";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -56,7 +57,7 @@ export function stopTree(child) {
     });
     function kill(sig) {
       try {
-        if (isWindows) spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        if (isWindows) killTree(child);
         else process.kill(-child.pid, sig);
       } catch {}
     }

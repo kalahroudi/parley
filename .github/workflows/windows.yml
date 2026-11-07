@@ -1,0 +1,51 @@
+# Copyright 2026 The Parley Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Windows daemon (T505)
+
+# The real parleyd on a real Windows runner, apart from the full CI run so that it answers in minutes: shutdown on
+# CTRL_BREAK with the lock and socket released, the key-memory scan, and the per-user install with autostart. The full
+# suite (including the M1 echo through the real gateway) is ci.yml's Windows job; these tests run there too.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Daemon lifecycle (CTRL_BREAK, single instance, restart)
+        run: go test -count=1 -v -run 'TestWindowsDaemonLifecycle' ./internal/acceptance
+      - name: Key-memory scan (in-process scan, kernel lock state, minidump of the child)
+        run: go test -count=1 -v -run 'TestWindowsKeyMemoryScan' ./internal/acceptance
+      - name: Per-user install, autostart and uninstall (docs/windows/install.ps1)
+        run: go test -count=1 -v -run 'TestWindowsInstall' ./internal/acceptance
+      # M1 (T414) on Windows: two real parleyd.exe and the real parley-cli.exe, a real gateway (wrangler dev with real
+      # Durable Objects), `parley-cli test` between the daemons. It must have run, not been skipped.
+      - name: Gateway install
+        working-directory: gateway
+        run: npm ci
+      - name: M1 echo between two Windows daemons through the real gateway
+        shell: bash
+        run: |
+          node --test tests/m1-echo.test.mjs | tee m1.out
+          grep -q "^# pass 1$" m1.out && grep -q "^# skipped 0$" m1.out && grep -q "^# fail 0$" m1.out
+      - name: Peer check under load (many short-lived peers)
+        run: go test -count=3 -v -run 'TestWindowsPeerCheckUnderLoad' ./internal/localsock
+      - name: T307 ACL matrix against real Windows daemons
+        shell: bash
+        run: |
+          node --test tests/acl-matrix.test.mjs | tee acl.out
+          grep -q "^# pass 1$" acl.out && grep -q "^# skipped 0$" acl.out && grep -q "^# fail 0$" acl.out

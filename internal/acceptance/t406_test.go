@@ -308,7 +308,7 @@ func TestDaemonSocketIsClosedToOtherUsers(t *testing.T) {
 		t.Errorf("the socket directory is not private: %v", err)
 	}
 	if runtime.GOOS == "windows" {
-		return // the Unix modes below do not exist there; the peer-check gap is pinned by TestPending_WindowsDaemonPeerRestriction
+		return // the Unix modes below do not exist there; the Windows peer check (token user SID of the connecting process) is tested in internal/localsock and TestWindowsDaemonServesOnlyItsUser
 	}
 	si, err := os.Stat(sock)
 	if err != nil || si.Mode().Perm() != 0o600 || si.Mode()&os.ModeSocket == 0 {
@@ -630,5 +630,19 @@ func TestBotsStartedByTheDaemonCannotApproveTheirOwnTasks(t *testing.T) {
 	}
 	if err := <-ended; err != nil || held.ran.Load() != 1 {
 		t.Errorf("after the owner approved: %v, ran %d", err, held.ran.Load())
+	}
+}
+
+// The real daemon's control socket serves its own user on every OS (on Windows through the token check: the peer's token user is read from its pid) and
+// its directory passes the DACL check; the refusal of another user's token and of an unreadable peer is in
+// internal/localsock's Windows tests, and the DACL refusal of Everyone, Users and Authenticated Users in internal/fsperm's.
+func TestWindowsDaemonServesOnlyItsUser(t *testing.T) {
+	g := newPipeGW(t)
+	n := g.startOK("win-peer", nodeOpts{})
+	if err := fsperm.CheckDir(filepath.Dir(n.dirs.SocketPath())); err != nil {
+		t.Fatalf("the socket directory is not private: %v", err)
+	}
+	if r, err := localsock.Call(context.Background(), n.dirs.SocketPath(), "status", nil); err != nil || !r.OK {
+		t.Fatalf("the daemon's own user must be served: %+v %v", r, err)
 	}
 }
