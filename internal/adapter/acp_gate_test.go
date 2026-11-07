@@ -357,7 +357,7 @@ func TestACPFileOperationsAreAskedAboutAndConfined(t *testing.T) {
 			}
 			for i := range got {
 				for j := range wantAsked[i].Args {
-					wantAsked[i].Args[j] = strings.ReplaceAll(wantAsked[i].Args[j], "%D", dir)
+					wantAsked[i].Args[j] = strings.ReplaceAll(wantAsked[i].Args[j], "%D/", dir+string(filepath.Separator))
 				}
 				if got[i].Tool != wantAsked[i].Tool || (wantAsked[i].Args != nil && !reflect.DeepEqual(got[i].Args, wantAsked[i].Args)) {
 					t.Fatalf("asked %+v, want %+v", got, wantAsked)
