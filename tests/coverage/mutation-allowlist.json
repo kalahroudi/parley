@@ -559,6 +559,30 @@
       "type": "INVERT_BITWISE",
       "status": "NOT COVERED",
       "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "manifest.go",
+      "line": 21,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "manifest.go",
+      "line": 22,
+      "type": "ARITHMETIC_BASE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
+    },
+    {
+      "package": "internal/update",
+      "file": "manifest.go",
+      "line": 23,
+      "type": "INVERT_BITWISE",
+      "status": "NOT COVERED",
+      "reason": "Constant expression: it has no executable statement, so gremlins cannot cover it; the value is pinned by TestLimitsArePinned in this package."
     }
   ]
 }

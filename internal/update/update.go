@@ -53,7 +53,16 @@ type Updater struct {
 	OS      string   // target of the release assets (runtime.GOOS)
 	Arch    string   // runtime.GOARCH
 
+	Now func() time.Time // default time.Now
+
 	createTemp func(dir, pattern string) (*os.File, error) // tests; default os.CreateTemp
+}
+
+func (u *Updater) now() time.Time {
+	if u.Now != nil {
+		return u.Now()
+	}
+	return time.Now()
 }
 
 // Release is a verified release: its version and the signed checksum of each file.
@@ -88,14 +97,16 @@ func (u *Updater) Check(ctx context.Context) (*Release, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSignature, err)
 	}
-	// The signed comment binds the checksums to one version, so an old signed release cannot be served as a new one.
-	ver, err := ParseVersion(strings.TrimPrefix(comment, commentIs))
+	// The signed comment binds the checksums to one version and a validity window, so an old signed release cannot
+	// be served as a new one and a frozen feed shows up as an expired manifest.
+	man, err := ParseComment(comment)
 	if err != nil {
-		return nil, fmt.Errorf("%w: unexpected signed comment", ErrSignature)
+		return nil, err
 	}
-	if comment != commentIs+ver.String() { // no prefix, or not the canonical form
-		return nil, fmt.Errorf("%w: unexpected signed comment", ErrSignature)
+	if err := man.checkValidity(u.now()); err != nil {
+		return nil, err
 	}
+	ver := man.Version
 	if want != "" && ver.String() != want {
 		return nil, fmt.Errorf("%w: asked for %s, release is %s", ErrSignature, want, ver)
 	}

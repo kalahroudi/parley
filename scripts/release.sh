@@ -9,6 +9,9 @@
 # the project's own Ed25519 key, producing SHA256SUMS.minisig.
 # The key file is encrypted; its password comes from PARLEY_RELEASE_KEY_PASSWORD.
 # <outdir> must be empty or absent so stale files can never be published.
+# PARLEY_VALID_DAYS (default 180, at most 400) is how long the signed manifest stays valid: after that daemons
+# refuse it, so the project re-signs (re-runs the release signing) before then. PARLEY_ISSUED (unix seconds)
+# fixes the issue time for tests.
 # PARLEY_TARGETS overrides the target list (space-separated os/arch).
 # Builds are reproducible for a given Go toolchain; the toolchain version is
 # recorded in the SBOM. Set PARLEY_GO_VERSION (go.mod's toolchain line, currently go1.27.3) to fail unless the
@@ -33,6 +36,17 @@ if [ -n "${PARLEY_GO_VERSION:-}" ]; then
 		echo "release.sh: toolchain $have, want $PARLEY_GO_VERSION" >&2
 		exit 1
 	fi
+fi
+days=${PARLEY_VALID_DAYS:-180}
+case $days in
+'' | *[!0-9]* | 0*)
+	echo "release.sh: PARLEY_VALID_DAYS must be a number of days from 1 to 400" >&2
+	exit 1
+	;;
+esac
+if [ "$days" -gt 400 ]; then
+	echo "release.sh: PARLEY_VALID_DAYS must be a number of days from 1 to 400" >&2
+	exit 1
 fi
 # A relative key path must keep meaning the caller's directory.
 case $key in
@@ -71,5 +85,8 @@ cd "$out"
 # shellcheck disable=SC2086
 "$tool" checksums . SHA256SUMS $files sbom.cdx.json
 if [ -n "$key" ]; then
-	"$tool" sign "$key" SHA256SUMS "parley release $version"
+	# The signed comment is the manifest header the updater enforces (internal/update/manifest.go): the version and
+	# a validity window, so a frozen update feed shows up as an expired manifest.
+	issued=${PARLEY_ISSUED:-$(date +%s)}
+	"$tool" sign "$key" SHA256SUMS "parley release $version issued=$issued expires=$((issued + days * 86400))"
 fi
