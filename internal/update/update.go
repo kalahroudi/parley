@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kalahroudi/parley/internal/fsowner"
 	"github.com/kalahroudi/parley/internal/release"
 )
 
@@ -56,6 +57,7 @@ type Updater struct {
 	Now func() time.Time // default time.Now
 
 	createTemp func(dir, pattern string) (*os.File, error) // tests; default os.CreateTemp
+	inspect    func(string) (fsowner.Info, error)          // tests; default fsowner.Inspect
 }
 
 func (u *Updater) now() time.Time {
@@ -123,6 +125,11 @@ func (u *Updater) Check(ctx context.Context) (*Release, error) {
 // Apply downloads the release's binaries, checks each against the signed checksum, and only then swaps them in,
 // all or none. The running processes keep their old files open; the new version runs from the next start.
 func (u *Updater) Apply(ctx context.Context, r *Release) error {
+	// Before anything is downloaded or written: only replace programs this user owns, in a place only they control.
+	names, err := u.checkOwner()
+	if err != nil {
+		return err
+	}
 	type job struct{ dst, staged string }
 	var jobs []job
 	cleanup := func() {
@@ -130,16 +137,9 @@ func (u *Updater) Apply(ctx context.Context, r *Release) error {
 			os.Remove(j.staged)
 		}
 	}
-	for i, name := range u.Names {
+	for _, name := range names {
 		dst := filepath.Join(u.Dir, name+exeSuffix(u.OS))
 		os.Remove(dst + ".old") // left by an earlier swap on Windows, where a running file cannot be deleted
-		if _, err := os.Stat(dst); err != nil {
-			if i == 0 {
-				cleanup()
-				return err
-			}
-			continue // an optional binary that is not installed here
-		}
 		asset := fmt.Sprintf("%s_%s_%s_%s%s", name, r.Version, u.OS, u.Arch, exeSuffix(u.OS))
 		want, ok := r.sums[asset]
 		if !ok {

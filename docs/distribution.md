@@ -21,6 +21,15 @@ and is compiled into the binaries (`release/key.go`); nothing fetched at run tim
 4. Each downloaded binary matches its checksum in the signed file. `parleyd` and `parley-cli` are replaced together
    or not at all; the old file is renamed aside first, which also works for a running program on Windows.
 
+**Install directory.** Before it downloads anything the updater checks the place it would write to
+(`internal/update/owner.go`): the directory is owned by the user running the update and not writable by group or
+others, each parent is owned by that user or the system and none is world-writable (unless sticky, like `/tmp`), and
+each program is a regular file (not a link) owned by that user and not group- or world-writable. Otherwise it
+replaces nothing and says `ErrNotOwner`. Because it is the *effective* user that counts, a root process refuses a
+user's directory and a user process refuses root's: an update never runs as another user than the install belongs
+to. On Windows only ownership is checked (by the user, or the owner new files get, for the directory and programs;
+the system for parents); ACLs are not read.
+
 The transport (GitHub, a mirror) is untrusted: downloads are size-limited and redirects must stay on https. Source
 and `go install` builds have no release version and are never replaced; files owned by a package manager
 (`/usr/bin`, Homebrew's Cellar, Nix, Snap) are left to it (`update.Locate`).
@@ -28,6 +37,5 @@ and `go install` builds have no release version and are never replaced; files ow
 **Not done yet (tracked by `TestPending_T504WiringAndChannels`):** the daemon's background check, `parley-cli
 update`, the Homebrew formula and tap, the Debian package and apt repository. The new version would run from the
 next start: the updater does not restart a process.
-The updater does not yet check that it runs as the owner of the install directory, and there is no operator opt-out
-yet; both are owed by the wiring above. An attacker who blocks the network can keep a device on an old version until
+There is no operator opt-out yet; it is owed by the wiring above. An attacker who blocks the network can keep a device on an old version until
 the last manifest it saw expires; the gateway's protocol-version check bounds that too.
