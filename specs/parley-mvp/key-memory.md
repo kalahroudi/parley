@@ -48,9 +48,9 @@ backs. The plan calls erasure best effort, and it is.
   file is scanned for each key by fingerprint. Measured on `windows-latest`: no
   erased key in the locked region, at most `maxWinHeapResidue` (2) copies of an erased key in
   the whole address space and in the minidump (the same count from both views),
-  none of a live key in the region after Close and at most `maxWinLiveAfterClose` (3)
-  in the heap, a planted key and every live key found by both scans (so the scans
-  can see). A dump tool, or anything with `PROCESS_VM_READ`, therefore finds the
+  none of a live key in the region after Close (its copies in the Go heap vary from
+  1 to 5 between runs, are logged and not promised), a planted key and every live key
+  found by both scans (so the scans can see). A dump tool, or anything with `PROCESS_VM_READ`, therefore finds the
   Go-heap residue and the live keys while the daemon runs; it does not find an erased
   key in the locked region. What it does not show: a crash dump written by WER (the
   daemon does not prevent it, see above) and the registers and stacks of

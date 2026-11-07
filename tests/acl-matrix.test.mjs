@@ -199,7 +199,7 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
       }
       for (const [who, got] of results) {
         seen.push(`${row.name} / ${who}: ${got}`);
-        assert.equal(got, row[who], `${row.name}: ${who} met ${got}, want ${row[who]}\n${daemons.map((d, i) => `--- daemon ${i}\n${d.output()}`).join("\n")}`);
+        assert.equal(got, row[who], `${row.name}: ${who} met ${got}, want ${row[who]}\n${daemons.map((d, i) => `--- daemon ${i}\n${d.output()}`).join("\n")}\n--- the gateway's log (tail)\n${readFileSync(gw.log, "utf8").split("\n").slice(-80).join("\n")}`);
       }
     }
 
