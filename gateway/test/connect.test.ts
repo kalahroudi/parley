@@ -903,16 +903,18 @@ describe("the prekey relay", () => {
     const H = await daemon(x, honest);
     await lowerBudget(x.t, a.id, "3");
     await lowerBudget(x.t, honest.id, "3");
-    for (let i = 0; i < 12; i++) await A.send(request(`f${i}`, b.id));
+    // Five requests against a budget of three: few enough to finish well inside the one-minute window even on a slow runner
+    // (a window that rolled over mid-test let a second batch through on Windows).
+    for (let i = 0; i < 5; i++) await A.send(request(`f${i}`, b.id));
     expect(B.events()).toHaveLength(3); // the budget, and not one more
     const refusals = A.events().filter((e) => e.t === "prekey_refused");
-    expect(refusals).toHaveLength(9);
+    expect(refusals).toHaveLength(2);
     expect(refusals[0]).toMatchObject({ from: b.id, reason: "rate_limited", retry_after_ms: expect.any(Number) });
     expect(refusals[0].retry_after_ms).toBeGreaterThan(0);
     // The answers a device sends count too: a flood of replies is cut off the same way.
-    for (let i = 0; i < 6; i++) await A.send(reply(`g${i}`, b.id));
+    for (let i = 0; i < 3; i++) await A.send(reply(`g${i}`, b.id));
     expect(B.events().filter((e) => e.t === "prekey_reply")).toHaveLength(0); // A is already out of budget
-    expect(A.events().filter((e) => e.t === "prekey_refused")).toHaveLength(9); // and a refused answer is not "refused" back to anyone
+    expect(A.events().filter((e) => e.t === "prekey_refused")).toHaveLength(2); // and a refused answer is not "refused" back to anyone
     // Another device of the same tenant is served.
     await H.send(request("h1", b.id));
     expect(B.events().at(-1)).toMatchObject({ id: "h1", from: honest.id });
