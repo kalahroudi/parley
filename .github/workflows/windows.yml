@@ -50,29 +50,39 @@ jobs:
           node --test tests/acl-matrix.test.mjs | tee acl.out
           grep -q "^# pass 1$" acl.out && grep -q "^# skipped 0$" acl.out && grep -q "^# fail 0$" acl.out
 
-  # Which Windows test, run before the node suite, makes real daemons die in it? (T505 investigation; the full CI's Windows
-  # job fails the ACL matrix and M1 only when the Go tests have run first.) Each variant runs one set, then the whole node suite.
+  # Do real daemons die in the node suite on main (no T505 code), with the Windows peer check turned off, and on this branch?
+  # (T505 investigation: main's own Windows job failed the ACL matrix and M1 after T507, so the cause may not be this branch.)
   bisect:
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        before: ["none", "TestWindowsDaemonLifecycle", "TestWindowsKeyMemoryScan", "TestWindowsInstall", "TestWindowsPeerCheckUnderLoad"]
+        variant: [main, nopeer, branch]
+        rep: [1, 2]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: main's code instead of this branch's
+        if: matrix.variant == 'main'
+        shell: bash
+        run: git checkout origin/main -- cmd internal tests gateway scripts go.mod go.sum docs specs
+      - name: The peer check turned off
+        if: matrix.variant == 'nopeer'
+        shell: bash
+        run: |
+          sed -i 's/^func checkPeer(c net.Conn, _ int) error {$/func checkPeer(c net.Conn, _ int) error {\n\tif true {\n\t\treturn nil\n\t}/' internal/localsock/peer_windows.go
+          grep -n -A4 '^func checkPeer' internal/localsock/peer_windows.go
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Run the chosen Windows test first
-        if: matrix.before != 'none'
-        run: go test -count=1 -run '${{ matrix.before }}' ./internal/acceptance ./internal/localsock
       - name: Gateway install
         working-directory: gateway
         run: npm ci
-      - name: The whole node suite
+      - name: The two real-daemon tests among the whole node suite
         shell: bash
-        run: node --test "tests/**/*.test.mjs" 2>&1 | tee suite.out; ! grep -q "^not ok" suite.out
+        run: node --test "tests/**/*.test.mjs" 2>&1 | tee suite.out; ! grep -E "^not ok (28|210) " suite.out
