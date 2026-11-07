@@ -128,7 +128,7 @@ test("M1/T414: parley-cli test between two real daemons through the real gateway
       d.child.kill("SIGKILL");
     }
     await gw.close();
-    for (const dir of [bin, ...homes, gw.state, gw.log]) rmSync(dir, { recursive: true, force: true });
+    for (const dir of [bin, ...homes, gw.state, gw.log]) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); // workerd may still hold a file for a moment after the gateway is killed (EBUSY on Windows)
     if (!isWindows) assert.deepEqual(codes.filter((c) => c !== 0 && c !== null), [], "a daemon did not shut down cleanly");
   }
 });

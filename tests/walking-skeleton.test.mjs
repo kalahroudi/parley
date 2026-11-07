@@ -336,7 +336,7 @@ test("JD-02 and JE-02, walking skeleton (T405): a real MCP client calls a bot on
     }
     await gw.close();
     const dirs = [bin, scratch, gw.state, gw.log, ...(tenant ? tenant.homes : [])];
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); // workerd may still hold a file for a moment after the gateway is killed (EBUSY on Windows)
     assert.deepEqual(codes.filter((c) => c !== 0 && c !== null), [], "a process did not shut down cleanly");
   }
 });
