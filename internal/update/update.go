@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kalahroudi/parley/internal/fsowner"
 	"github.com/kalahroudi/parley/internal/release"
 )
 
@@ -39,7 +40,7 @@ var (
 	// ErrSignature means the checksums were not signed by the pinned release key for the expected version.
 	ErrSignature = errors.New("update: release signature rejected")
 	// ErrManaged means a package manager owns the binaries; it must update them.
-	ErrManaged = errors.New("update: installed by a package manager; update with it")
+	ErrManaged = errors.New("update: installed by a package manager (Homebrew, apt, snap, Nix, the Windows installer); update it with that, not here")
 )
 
 // Updater installs releases signed by Key over the running binaries in Dir.
@@ -56,6 +57,7 @@ type Updater struct {
 	Now func() time.Time // default time.Now
 
 	createTemp func(dir, pattern string) (*os.File, error) // tests; default os.CreateTemp
+	inspect    func(string) (fsowner.Info, error)          // tests; default fsowner.Inspect
 }
 
 func (u *Updater) now() time.Time {
@@ -123,6 +125,11 @@ func (u *Updater) Check(ctx context.Context) (*Release, error) {
 // Apply downloads the release's binaries, checks each against the signed checksum, and only then swaps them in,
 // all or none. The running processes keep their old files open; the new version runs from the next start.
 func (u *Updater) Apply(ctx context.Context, r *Release) error {
+	// Before anything is downloaded or written: only replace programs this user owns, in a place only they control.
+	names, dir, err := u.checkOwner()
+	if err != nil {
+		return err
+	}
 	type job struct{ dst, staged string }
 	var jobs []job
 	cleanup := func() {
@@ -130,23 +137,16 @@ func (u *Updater) Apply(ctx context.Context, r *Release) error {
 			os.Remove(j.staged)
 		}
 	}
-	for i, name := range u.Names {
-		dst := filepath.Join(u.Dir, name+exeSuffix(u.OS))
+	for _, name := range names {
+		dst := filepath.Join(dir, name+exeSuffix(u.OS))
 		os.Remove(dst + ".old") // left by an earlier swap on Windows, where a running file cannot be deleted
-		if _, err := os.Stat(dst); err != nil {
-			if i == 0 {
-				cleanup()
-				return err
-			}
-			continue // an optional binary that is not installed here
-		}
 		asset := fmt.Sprintf("%s_%s_%s_%s%s", name, r.Version, u.OS, u.Arch, exeSuffix(u.OS))
 		want, ok := r.sums[asset]
 		if !ok {
 			cleanup()
 			return fmt.Errorf("update: %s is not in the signed checksums", asset)
 		}
-		staged, err := u.download(ctx, r.Version, asset, want)
+		staged, err := u.download(ctx, dir, r.Version, asset, want)
 		if staged != "" {
 			jobs = append(jobs, job{dst, staged})
 		}
@@ -154,6 +154,11 @@ func (u *Updater) Apply(ctx context.Context, r *Release) error {
 			cleanup()
 			return err
 		}
+	}
+	// The downloads took time: look again right before the swap, and only swap into the same directory.
+	if _, again, err := u.checkOwner(); err != nil || again != dir {
+		cleanup()
+		return errors.Join(ErrNotOwner, err)
 	}
 	for i, j := range jobs {
 		if err := swap(j.dst, j.staged); err != nil {
@@ -184,12 +189,12 @@ func (u *Updater) Update(ctx context.Context) (Version, error) {
 
 // download fetches asset into a private temporary file next to its destination and verifies it. The returned
 // path is set even on failure when a file was created, so the caller removes it.
-func (u *Updater) download(ctx context.Context, v Version, asset, wantHex string) (string, error) {
+func (u *Updater) download(ctx context.Context, dir string, v Version, asset, wantHex string) (string, error) {
 	create := u.createTemp
 	if create == nil {
 		create = os.CreateTemp
 	}
-	f, err := create(u.Dir, ".parley-update-*")
+	f, err := create(dir, ".parley-update-*")
 	if err != nil {
 		return "", err
 	}

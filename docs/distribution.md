@@ -22,6 +22,20 @@ and is compiled into the binaries (`release/key.go`); nothing fetched at run tim
 4. Each downloaded binary matches its checksum in the signed file. `parleyd` and `parley-cli` are replaced together
    or not at all; the old file is renamed aside first, which also works for a running program on Windows.
 
+**Install directory.** Before it downloads anything the updater resolves links in the directory and checks the place it
+would write to (`internal/update/owner.go`): the directory is owned by the user running the update and not writable by
+group or others, each parent is owned by that user or the system and none is writable by everyone (or by a group, unless
+the system owns it, like `/Library` on macOS) unless sticky, like `/tmp`, and each program is a regular file (not a
+link) owned by that user, not group- or world-writable, and not setuid or setgid. Otherwise it replaces nothing and says
+`ErrNotOwner`. The downloads go into the resolved directory, and the same check runs again right before the swap, so a
+link or file changed in between stops the update with nothing replaced. Because it is the *effective* user that counts,
+a root process refuses a user's directory and a user process refuses root's: an update never runs as another user than
+the install belongs to. A directory under Homebrew, Nix, snap, `/usr/bin`, `Program Files` or `WindowsApps` is refused
+with `ErrManaged`, which says to update with the package manager or installer. On Windows ownership is checked as
+above, and the access list of the directory, its programs and each parent is read: an allow entry for Everyone, Users or
+Authenticated Users that writes (parents: deletes entries or changes permissions) refuses the update; what the system owns (such as `C:\`) keeps the access list the system gave it. What remains is a
+process of the same user (or root) racing the swap, which already owns the programs.
+
 The transport (GitHub, a mirror) is untrusted: downloads are size-limited and redirects must stay on https. Source
 and `go install` builds have no release version and are never replaced; files owned by a package manager
 (`/usr/bin`, Homebrew's Cellar, Nix, Snap) are left to it (`update.Locate`).
@@ -29,6 +43,5 @@ and `go install` builds have no release version and are never replaced; files ow
 **Not done yet (tracked by `TestPending_T504WiringAndChannels`):** the daemon's background check, `parley-cli
 update`, the Homebrew formula and tap, the Debian package and apt repository. The new version would run from the
 next start: the updater does not restart a process.
-The updater does not yet check that it runs as the owner of the install directory, and there is no operator opt-out
-yet; both are owed by the wiring above. An attacker who blocks the network can keep a device on an old version until
+There is no operator opt-out yet; it is owed by the wiring above. An attacker who blocks the network can keep a device on an old version until
 the last manifest it saw expires; the gateway's protocol-version check bounds that too.
