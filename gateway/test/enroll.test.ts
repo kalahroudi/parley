@@ -176,8 +176,8 @@ describe("limits, validation and retention", () => {
     });
     await withTime(DECIDED_RETENTION_MS + 1000, async () => {
       await runDurableObjectAlarm(env.TENANT.get(env.TENANT.idFromName(x.t)));
-      expect(await storageKeys(x.t)).toEqual([]);
-      expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(404);
+      expect(await storageKeys(x.t)).toEqual([`enr:${id}`]); // an approved device is the roster (its seat and binding): never purged
+      expect((await post("/v1/enroll/status", { tenant: x.t, id, poll })).status).toBe(200);
     });
   });
 });

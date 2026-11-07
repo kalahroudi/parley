@@ -5,7 +5,7 @@
 // when an admin approves a device, the 7-day grace period, and the Checkout and Portal calls. Events are signed with the
 // test webhook secret exactly as Stripe signs them; Stripe's API is replaced by a spy on fetch.
 
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FREE_SEATS,
@@ -24,6 +24,7 @@ import {
   type SubUpdate,
 } from "../src/billing";
 import type { Env } from "../src/index";
+import { DECIDED_RETENTION_MS } from "../src/tenant";
 import { gw } from "./wire";
 
 afterEach(() => vi.restoreAllMocks());
@@ -415,6 +416,8 @@ describe("the webhook endpoint", () => {
     expect(await json(await w.hook({}, { created: t }))).toMatchObject({ applied: true });
     expect(await json(await w.hook({ status: "canceled" }, { created: t - 100 }))).toMatchObject({ applied: false }); // older, arrived later
     expect(await json(await w.hook({}, { created: t }))).toMatchObject({ applied: true }); // a redelivery
+    const audits = async () => (await (await w.adminPost("/v1/admin/audit/csv", { kind: "admin" })).text()).split("billing.put").length - 1;
+    expect(await audits()).toBe(1); // the redelivery was not audited again
     expect(await w.view()).toMatchObject({ status: "active", limit: 5 });
   });
 
@@ -468,6 +471,28 @@ describe("seat enforcement at enrollment", () => {
     expect(r.status).toBe(200);
     expect(await w.view()).toMatchObject({ used: FREE_SEATS - 1 });
     expect((await w.decide(extra)).status).toBe(200);
+  });
+
+  it("keeps counting an approved device after the enrollment retention, and drops a revoked one", async () => {
+    const w = fresh();
+    const ids = await approveN(w, FREE_SEATS);
+    await w.adminPost("/v1/admin/revocations", { list: { tenant: w.t, version: 1, revoked: [ids[0]], signature: "x" } });
+    vi.useFakeTimers({ now: Date.now() + DECIDED_RETENTION_MS + 1000, toFake: ["Date"] });
+    try {
+      await runDurableObjectAlarm(w.stub);
+    } finally {
+      vi.useRealTimers();
+    }
+    const keys = Object.keys(await storageOf(w)).filter((k) => k.startsWith("enr:"));
+    expect(keys.sort()).toEqual([`enr:${ids[1]}`, `enr:${ids[2]}`].sort());
+    // The alarm also purged the admin session; sign in again.
+    const a = await w.session("admin");
+    const call = (path: string, body: unknown) => SELF.fetch(`https://gw${path}`, { method: "POST", headers: { Authorization: a.auth, "x-csrf-token": a.csrf }, body: JSON.stringify(body) });
+    expect(await json(await call("/v1/admin/billing", {}))).toMatchObject({ used: FREE_SEATS - 1 });
+    // The two seats still held are still counted: one approval fits, the next is refused.
+    const decide = async (owner: string) => (await call("/v1/admin/enrollments/decide", { id: await w.enroll(owner), decision: "approved" })).status;
+    expect(await decide("x@example.test")).toBe(200);
+    expect(await decide("y@example.test")).toBe(402);
   });
 
   it("does not let two approvals share the last seat", async () => {

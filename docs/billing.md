@@ -32,6 +32,6 @@ Set the key and the secret with `wrangler secret put`, never in a file. Local te
 ## What this does not cover
 
 - Stripe sees the tenant name, the admin's billing details and the seat count. It sees no task data; the gateway holds none.
-- The seat count is the number of approved, non-revoked enrollment records. Today the Tenant alarm purges every decided record, approved ones included, 30 days after the decision (`DECIDED_RETENTION_MS`), which also frees the seat. That behavior predates billing and is an open question for the author (see the T502 review notes).
+- The seat count is the number of approved, non-revoked enrollment records. An approved device that is not revoked is never purged (the 30-day retention applies to rejected and revoked records and expired requests), so a seat cannot be freed by waiting. Offboarding (T503) frees a seat by revoking the device.
 - Checkout and Portal are tested against a stand-in for Stripe's API. T510 runs them against Stripe's test environment.
 - Deleting a tenant (T503) does not cancel its Stripe subscription or delete its Stripe customer.

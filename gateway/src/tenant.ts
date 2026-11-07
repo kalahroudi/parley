@@ -454,6 +454,8 @@ export class Tenant extends DurableObject<Env> {
       if (await this.isDeleting()) return false;
       const next = reduce(await this.ctx.storage.get<Billing>("billing"), u);
       if (!next) return false;
+      // A redelivery of what is already recorded changes nothing and is not audited again.
+      if (JSON.stringify(next) === JSON.stringify(await this.ctx.storage.get("billing"))) return true;
       await this.commit({ billing: next }, [], { action: "billing.put", actor: "stripe", subject: next.status, detail: { seats: next.seats } });
       return true;
     });
@@ -1051,7 +1053,10 @@ export class Tenant extends DurableObject<Env> {
       if (at <= now) await this.ctx.storage.delete(k);
       else if (next === undefined || at < next) next = at;
     };
+    const revoked = await this.revokedIds();
     for (const [k, r] of await this.ctx.storage.list<StoredEnrollment>({ prefix: "enr:" })) {
+      // An approved device that is not revoked is the roster: its record is its seat and its binding, so it is kept.
+      if (r.status === "approved" && !revoked.has(k.slice(4))) continue;
       await due(k, r.status === "pending" ? r.created + REQUEST_TTL_MS : (r.decided ?? r.created) + DECIDED_RETENTION_MS);
     }
     for (const [k, t] of await this.ctx.storage.list<StoredToken>({ prefix: "tok:" })) await due(k, t.exp);
