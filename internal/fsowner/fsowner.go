@@ -10,7 +10,8 @@ type Info struct {
 	IsDir, IsRegular  bool
 	Owned             bool // owned by the user running this process
 	Trusted           bool // owned by the system (root, SYSTEM, Administrators): fine as a parent of the install directory
-	GroupOrOtherWrite bool // writable by the group or by everyone (Unix mode bits; Windows ACLs are not read)
-	WorldWrite        bool // writable by everyone
+	GroupOrOtherWrite bool // writable by the group or by everyone (Unix mode bits; on Windows, an allow entry for Everyone, Users or Authenticated Users that writes)
+	WorldWrite        bool // entries can be removed, renamed or the access list changed by everyone (Windows: delete, delete-child, change permissions or owner, generic write/all)
 	Sticky            bool // only the owner of an entry may remove or rename it
+	Setid             bool // setuid or setgid (Unix): replacing the file would silently drop the bit
 }

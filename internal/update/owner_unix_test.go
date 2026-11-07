@@ -86,3 +86,84 @@ func TestCheckInstallRefusesDirectoryOfAnotherUserOnUnix(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// The attack: after the check passed and the downloads began, the directory path is repointed (a link swapped) at
+// a directory the attacker controls. The writes went to the directory that was checked, and the check before the
+// swap sees the change, so nothing lands in the attacker's directory and nothing is replaced.
+func TestApplyDirectoryLinkSwappedDuringUpdate(t *testing.T) {
+	r := newRelease(t)
+	os.Chmod(r.dir, 0o700)
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
+	base := t.TempDir()
+	link := filepath.Join(base, "bin")
+	if err := os.Symlink(r.dir, link); err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(base, "evil")
+	os.Mkdir(evil, 0o700)
+	for _, n := range []string{"parleyd", "parley-cli"} {
+		os.WriteFile(filepath.Join(evil, n), []byte("evil"), 0o700)
+	}
+	u := r.updater("v1.0.0", "")
+	u.Dir = link
+	rel, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	u.Source = watchSource{u.Source, func() {
+		if !swapped {
+			swapped = true
+			os.Remove(link)
+			os.Symlink(evil, link)
+		}
+	}}
+	if err := u.Apply(context.Background(), rel); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("got %v", err)
+	}
+	for d, want := range map[string]string{evil: "evil", r.dir: "old"} {
+		for _, n := range []string{"parleyd", "parley-cli"} {
+			if b, _ := os.ReadFile(filepath.Join(d, n)); string(b) != want && !(want == "old" && string(b) == "old "+n) {
+				t.Fatalf("%s/%s is %q", d, n, b)
+			}
+		}
+		if ents, _ := os.ReadDir(d); len(ents) != 2 {
+			t.Fatalf("%s: files left behind: %v", d, ents)
+		}
+	}
+	if r.read(t, "parleyd") != "old parleyd" {
+		t.Fatal("program replaced")
+	}
+}
+
+// The attack on a program: after the check passed, it is swapped for a link to a file the attacker controls.
+func TestApplyProgramLinkSwappedDuringUpdate(t *testing.T) {
+	r := newRelease(t)
+	os.Chmod(r.dir, 0o700)
+	r.publish(t, "v1.1.0", true, r.key, cm("v1.1.0"), newBins("v1.1.0"))
+	u := r.updater("v1.0.0", "")
+	rel, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "evil")
+	os.WriteFile(target, []byte("evil"), 0o700)
+	swapped := false
+	u.Source = watchSource{u.Source, func() {
+		if !swapped {
+			swapped = true
+			p := filepath.Join(r.dir, "parleyd")
+			os.Remove(p)
+			os.Symlink(target, p)
+		}
+	}}
+	if err := u.Apply(context.Background(), rel); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("got %v", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "evil" {
+		t.Fatalf("the link target was written: %q", b)
+	}
+	if r.read(t, "parley-cli") != "old parley-cli" {
+		t.Fatal("program replaced")
+	}
+}

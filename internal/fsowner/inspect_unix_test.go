@@ -35,6 +35,14 @@ func TestInspectModesAndOwner(t *testing.T) {
 	if got, _ := Inspect(f); got != (Info{IsRegular: true, Owned: true}) {
 		t.Errorf("file: %+v", got)
 	}
+	os.Chmod(f, 0o755|os.ModeSetuid)
+	if got, _ := Inspect(f); !got.Setid {
+		t.Errorf("setuid file: %+v", got)
+	}
+	os.Chmod(f, 0o755|os.ModeSetgid)
+	if got, _ := Inspect(f); !got.Setid {
+		t.Errorf("setgid file: %+v", got)
+	}
 	os.Chmod(f, 0o664)
 	if got, _ := Inspect(f); !got.GroupOrOtherWrite || got.WorldWrite {
 		t.Errorf("group-writable file: %+v", got)

@@ -11,17 +11,17 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Inspect reports the owner (from the security descriptor) and the kind of file. Windows ACLs are not read:
-// GroupOrOtherWrite and WorldWrite stay false, so on Windows the check is ownership by the current user (or the
-// system, for parents). "Ours" is owned by the user or by the owner new files get from this process (the
-// Administrators group for an elevated token). install.ps1 puts programs under the user's profile, whose ACL grants only the user, SYSTEM
-// and Administrators.
+// Inspect reports the owner and the access list (from the security descriptor) and the kind of file. "Ours" is
+// owned by the user or by the owner new files get from this process (the Administrators group for an elevated
+// token). GroupOrOtherWrite and WorldWrite come from the allow entries for Everyone, Users and Authenticated
+// Users that apply to the object itself (entries that only pass to children are skipped), the same groups
+// fsperm treats as other users. A missing access list is open to everyone.
 func Inspect(path string) (Info, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return Info{}, err
 	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return Info{}, err
 	}
@@ -39,12 +39,56 @@ func Inspect(path string) (Info, error) {
 		return Info{}, err
 	}
 	defer runtime.KeepAlive(buf)
+	any, strong, err := othersWrite(sd)
+	if err != nil {
+		return Info{}, err
+	}
 	return Info{
 		IsDir:     fi.IsDir(),
 		IsRegular: fi.Mode().IsRegular(),
 		Owned:     windows.EqualSid(owner, me.User.Sid) || windows.EqualSid(owner, def),
 		Trusted:   owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid),
+
+		GroupOrOtherWrite: any,
+		WorldWrite:        strong,
 	}, nil
+}
+
+// Access rights that let others change a file's contents (dataWrite) or take it over, delete it or its entries
+// (takeOver). Creating a subdirectory in a parent (FILE_APPEND_DATA alone is not enough to rename an entry away)
+// is deliberately not takeOver.
+const (
+	dataWrite   = 0x2 | 0x4 | 0x10000 | 0x40000000                             // FILE_WRITE_DATA, FILE_APPEND_DATA, DELETE, GENERIC_WRITE
+	takeOver    = 0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000 // FILE_DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE
+	inheritOnly = 0x08
+)
+
+// othersWrite reads the access list: any is true when Everyone, Users or Authenticated Users are allowed to write
+// or take over the object, strong when they may delete it or its entries or change its permissions.
+func othersWrite(sd *windows.SECURITY_DESCRIPTOR) (any, strong bool, err error) {
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, false, err
+	}
+	if dacl == nil {
+		return true, true, nil
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return false, false, err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&inheritOnly != 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if !(sid.IsWellKnown(windows.WinWorldSid) || sid.IsWellKnown(windows.WinBuiltinUsersSid) || sid.IsWellKnown(windows.WinAuthenticatedUserSid)) {
+			continue
+		}
+		strong = strong || uint32(ace.Mask)&takeOver != 0
+		any = any || uint32(ace.Mask)&(takeOver|dataWrite) != 0
+	}
+	return any, strong, nil
 }
 
 // defaultOwner is the owner new files get from this process: the user, or Administrators for an elevated token.
