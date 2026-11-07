@@ -191,8 +191,7 @@ func (c *acpConv) call(ctx context.Context, id int, line []byte) (json.RawMessag
 		if err == nil {
 			var m rpcMessage
 			if m, err = parseRPC(raw); err == nil {
-				switch {
-				case m.isResponse():
+				if m.isResponse() {
 					if string(m.ID) != strconv.Itoa(id) {
 						return nil, errProtocol
 					}
@@ -200,12 +199,11 @@ func (c *acpConv) call(ctx context.Context, id int, line []byte) (json.RawMessag
 						return nil, errACPRemote
 					}
 					return m.Result, nil
-				case m.isRequest():
+				}
+				if m.isRequest() {
 					err = c.serve(ctx, m)
-				case m.Method == "session/update" && c.sid != "":
-					err = c.update(m.Params)
-				default:
-					err = c.ignore()
+				} else {
+					err = c.notify(m)
 				}
 			}
 		}
@@ -216,6 +214,14 @@ func (c *acpConv) call(ctx context.Context, id int, line []byte) (json.RawMessag
 			return nil, err
 		}
 	}
+}
+
+// notify handles a notification: the text of a message chunk of our session is kept, everything else is counted and dropped.
+func (c *acpConv) notify(m rpcMessage) error {
+	if m.Method == "session/update" && c.sid != "" {
+		return c.update(m.Params)
+	}
+	return c.ignore()
 }
 
 func (c *acpConv) ignore() error {
@@ -340,14 +346,15 @@ func promptLine(sid string, t bot.Task) []byte {
 func appendJSONText(dst, s []byte) []byte {
 	const hexDigits = "0123456789abcdef"
 	for _, b := range s {
-		switch {
-		case b == '"' || b == '\\':
+		if b == '"' || b == '\\' {
 			dst = append(dst, '\\', b)
-		case b < 0x20:
-			dst = append(dst, '\\', 'u', '0', '0', hexDigits[b>>4], hexDigits[b&15])
-		default:
-			dst = append(dst, b)
+			continue
 		}
+		if b < 0x20 {
+			dst = append(dst, '\\', 'u', '0', '0', hexDigits[b>>4], hexDigits[b&15])
+			continue
+		}
+		dst = append(dst, b)
 	}
 	return dst
 }
@@ -356,10 +363,9 @@ func appendJSONText(dst, s []byte) []byte {
 func jsonTextLen(s []byte) int {
 	n := len(s)
 	for _, b := range s {
-		switch {
-		case b == '"' || b == '\\':
+		if b == '"' || b == '\\' {
 			n++
-		case b < 0x20:
+		} else if b < 0x20 {
 			n += 5
 		}
 	}
