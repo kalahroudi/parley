@@ -663,3 +663,97 @@ func TestFormatCommentIsThePublishedFormat(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// The window edges, to the millisecond: expiry is exclusive (no skew allowance, so a slow clock never extends a
+// manifest past what was signed), and an issue time is accepted up to maxSkew ahead and refused one ms beyond it.
+func TestUpdateWindowBoundariesToTheMillisecond(t *testing.T) {
+	ms := time.Millisecond
+	r := newRelease(t)
+	exp := testNow.Add(24 * time.Hour)
+	r.publishWindow(t, testNow.Add(-time.Hour), exp)
+	u := r.updater("v1.0.0", "")
+	for name, c := range map[string]struct {
+		at   time.Time
+		want error
+	}{
+		"1ms before expiry": {exp.Add(-ms), nil},
+		"at expiry":         {exp, ErrExpired},
+		"1ms after expiry":  {exp.Add(ms), ErrExpired},
+	} {
+		u.Now = func() time.Time { return c.at }
+		if _, err := u.Check(context.Background()); !errors.Is(err, c.want) {
+			t.Fatalf("%s: got %v, want %v", name, err, c.want)
+		}
+	}
+	issued := testNow.Add(time.Hour)
+	r.publishWindow(t, issued, issued.Add(24*time.Hour))
+	for name, c := range map[string]struct {
+		at   time.Time
+		want error
+	}{
+		"1ms before the skew edge": {issued.Add(-maxSkew).Add(ms), nil},
+		"at the skew edge":         {issued.Add(-maxSkew), nil},
+		"1ms beyond the skew edge": {issued.Add(-maxSkew).Add(-ms), ErrNotYetValid},
+	} {
+		u.Now = func() time.Time { return c.at }
+		if _, err := u.Check(context.Background()); !errors.Is(err, c.want) {
+			t.Fatalf("%s: got %v, want %v", name, err, c.want)
+		}
+	}
+}
+
+// An expired manifest never installs, even when every binary matches its signed checksum.
+func TestUpdateExpiredManifestInstallsNothingEvenWithMatchingHashes(t *testing.T) {
+	r := newRelease(t)
+	r.publishWindow(t, testNow.Add(-48*time.Hour), testNow.Add(-time.Hour))
+	if _, err := r.updater("v1.0.0", "").Update(context.Background()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("got %v", err)
+	}
+	if r.read(t, "parleyd") != "old parleyd" || r.read(t, "parley-cli") != "old parley-cli" {
+		t.Fatal("installed from an expired manifest")
+	}
+}
+
+// The manifest is read only after its signature verifies: a forged, unsigned or foreign-key header yields
+// ErrSignature and never ErrExpired/ErrNotYetValid/ErrUpToDate, whatever it claims.
+func TestUpdateSignatureIsCheckedBeforeAnyManifestField(t *testing.T) {
+	r := newRelease(t)
+	other, _, _ := release.GenerateKey()
+	r.publish(t, "v1.1.0", true, other, FormatComment(Version{1, 0, 0}, testNow.Add(-48*time.Hour), testNow.Add(-time.Hour)), newBins("x"))
+	if _, err := r.updater("v1.0.0", "").Check(context.Background()); !errors.Is(err, ErrSignature) || errors.Is(err, ErrExpired) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// FuzzParseComment: the parser never panics, and what it accepts is exactly the canonical text, inside the
+// timestamp bounds, so it round-trips.
+func FuzzParseComment(f *testing.F) {
+	f.Add("parley release v1.2.3 issued=1800000000 expires=1802592000")
+	f.Add("parley release v1.2.3 issued=0 expires=1099511627776")
+	f.Add("parley release v1.2.3 issued=+1 expires=2")
+	f.Add("parley release v1.2.3 issued=01 expires=2")
+	f.Add("parley release v1.2.3 issued=1 expires=2 ")
+	f.Add("parley release v1.2.3 issued=1 expires=2\nparley release v9.9.9 issued=1 expires=2")
+	f.Add("parley release v1.2.3 issued=-1 expires=99999999999999999999")
+	f.Add("parley release v1.2.3  issued=1 expires=2")
+	f.Add("parley release v1.2.3 expires=2 issued=1")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, c string) {
+		m, err := ParseComment(c)
+		if err != nil {
+			if !errors.Is(err, ErrSignature) {
+				t.Fatalf("unexpected error kind: %v", err)
+			}
+			return
+		}
+		if FormatComment(m.Version, m.Issued, m.Expires) != c {
+			t.Fatalf("accepted a non-canonical comment %q", c)
+		}
+		if m.Issued.Unix() < 0 || m.Issued.Unix() > maxUnix || m.Expires.Unix() < 0 || m.Expires.Unix() > maxUnix {
+			t.Fatalf("timestamp out of bounds in %q", c)
+		}
+		if err := m.checkValidity(time.Unix(1_800_000_000, 0)); err != nil && !errors.Is(err, ErrSignature) && !errors.Is(err, ErrExpired) && !errors.Is(err, ErrNotYetValid) {
+			t.Fatalf("unexpected validity error: %v", err)
+		}
+	})
+}
