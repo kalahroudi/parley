@@ -247,6 +247,7 @@ func TestACPHostileAgentsEndTheTaskWithoutTheirWords(t *testing.T) {
 		"a refusal":                            {mode: "acp-refuse"},
 		"updates for another session":          {mode: "acp-wrongsession"},
 		"a reply with the wrong id":            {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":7,"result":{"protocolVersion":1}}`},
+		"a duplicate key":                      {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1},"id":7}`},
 		"an unknown field":                     {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1},"x":"SECRET-CANARY"}`},
 		"two messages in a line":               {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":1,"result":{}} {"jsonrpc":"2.0","id":1,"result":{}}`},
 		"trailing text":                        {mode: "acp-raw", raw: `{"jsonrpc":"2.0","id":1,"result":{}} SECRET-CANARY`},

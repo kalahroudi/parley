@@ -55,6 +55,10 @@ func TestParseRPCRefusesWhatIsNotJSONRPC(t *testing.T) {
 		"wrong version":           `{"jsonrpc":"1.0","id":1,"result":{}}`,
 		"no version":              `{"id":1,"result":{}}`,
 		"unknown field":           `{"jsonrpc":"2.0","id":1,"result":{},"x":1}`,
+		"duplicate key":           `{"jsonrpc":"2.0","id":1,"result":{},"id":2}`,
+		"duplicate result":        `{"jsonrpc":"2.0","id":1,"result":{"a":1},"result":{}}`,
+		"miscased key":            `{"jsonrpc":"2.0","id":1,"Result":{}}`,
+		"miscased duplicate":      `{"jsonrpc":"2.0","id":1,"result":{},"RESULT":{}}`,
 		"two values":              `{"jsonrpc":"2.0","id":1,"result":{}} {"jsonrpc":"2.0","id":2,"result":{}}`,
 		"trailing text":           `{"jsonrpc":"2.0","id":1,"result":{}} x`,
 		"response without id":     `{"jsonrpc":"2.0","result":{}}`,
@@ -174,5 +178,19 @@ func TestDenialPicksTheRejectOptionTheAgentOffered(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("%s: %s", name, got)
 		}
+	}
+}
+
+// An empty message chunk adds no text, so it counts against the ignored messages: a flood of them ends the task.
+func TestEmptyChunksAreCounted(t *testing.T) {
+	c := &acpConv{sid: "s"}
+	empty := json.RawMessage(`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}}}`)
+	for i := 0; i < MaxACPIgnored; i++ {
+		if err := c.update(empty); err != nil {
+			t.Fatalf("chunk %d: %v", i, err)
+		}
+	}
+	if err := c.update(empty); err != errProtocol {
+		t.Fatalf("one past the limit: %v", err)
 	}
 }

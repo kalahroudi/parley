@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kalahroudi/parley/internal/bot"
+	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/pipeline"
 )
 
@@ -157,7 +158,11 @@ func (m *rpcMessage) isRequest() bool  { return m.Method != "" && m.ID != nil }
 func parseRPC(line []byte) (rpcMessage, error) {
 	var m rpcMessage
 	dec := json.NewDecoder(bytes.NewReader(line))
-	dec.DisallowUnknownFields()
+	// ExactKeys refuses a duplicate key and a key that differs from a field only in case (encoding/json would fold it into
+	// the field and keep the last value).
+	if !localsock.ExactKeys(line, "jsonrpc", "id", "method", "params", "result", "error") {
+		return rpcMessage{}, errProtocol
+	}
 	if dec.Decode(&m) != nil || dec.More() || m.JSONRPC != "2.0" {
 		return rpcMessage{}, errProtocol
 	}
@@ -245,8 +250,8 @@ func (c *acpConv) update(params json.RawMessage) error {
 	if json.Unmarshal(u.Update.Content, &chunk) != nil {
 		return errProtocol
 	}
-	if chunk.Type != "text" {
-		return c.ignore() // an image or a link is not part of a text result
+	if chunk.Type != "text" || chunk.Text == "" {
+		return c.ignore() // an image or a link is not part of a text result; an empty chunk adds nothing, so it is counted
 	}
 	c.text = append(c.text, chunk.Text...)
 	if len(c.text) > pipeline.MaxContent {
