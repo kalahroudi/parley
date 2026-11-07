@@ -153,7 +153,7 @@ jobs:
   # mutates only the tier 1 packages and files it changes. The full run, which also fails on a stale allowlist entry,
   # is mutation.yml, on every push to main and nightly. Job names (for the required checks):
   #   workflow lint, test (ubuntu-latest), test (macos-latest), test (windows-latest),
-  #   mutation: changed code (linux, go-1) .. (linux, go-4), mutation: changed code (linux, typescript), mutation: this OS's Go files (macos-latest), mutation: this OS's Go files (windows-latest),
+  #   mutation: changed code (linux, go-01) .. (linux, go-12), mutation: changed code (linux, typescript), mutation: this OS's Go files (macos-latest), mutation: this OS's Go files (windows-latest),
   #   mutation: crash points (linux)
   mutation-changed:
     name: "mutation: changed code (linux, ${{ matrix.label }})"
@@ -162,16 +162,24 @@ jobs:
     timeout-minutes: 90
     # One job over all the changed tier 1 code died on its runner after 46 minutes whenever the whole of tier 1 was in scope
     # (a change to the mutation gates or this file puts it all in scope; the nightly full run on main dies the same way),
-    # so the work is split: the Go packages into four jobs by position in the selected list, and the TypeScript files into
-    # one. scripts/mutation-scope.mjs gives each its share (MUTATION_PART); together they are exactly what one job did.
+    # so the work is split: the Go packages into twelve jobs by position in the selected list (so that a package that kills its runner
+    # shows up alone), and the TypeScript files into one. scripts/mutation-scope.mjs gives each its share (MUTATION_PART); together they are exactly what one job did.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { label: go-1, part: "go:0/4" }
-          - { label: go-2, part: "go:1/4" }
-          - { label: go-3, part: "go:2/4" }
-          - { label: go-4, part: "go:3/4" }
+          - { label: go-01, part: "go:0/12" }
+          - { label: go-02, part: "go:1/12" }
+          - { label: go-03, part: "go:2/12" }
+          - { label: go-04, part: "go:3/12" }
+          - { label: go-05, part: "go:4/12" }
+          - { label: go-06, part: "go:5/12" }
+          - { label: go-07, part: "go:6/12" }
+          - { label: go-08, part: "go:7/12" }
+          - { label: go-09, part: "go:8/12" }
+          - { label: go-10, part: "go:9/12" }
+          - { label: go-11, part: "go:10/12" }
+          - { label: go-12, part: "go:11/12" }
           - { label: typescript, part: "ts" }
     steps:
       # Full history: the scope is the files changed since the merge base with the base branch.
