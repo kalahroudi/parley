@@ -218,3 +218,63 @@ func TestDebControlOmitsUnknownSize(t *testing.T) {
 		t.Fatal("Installed-Size")
 	}
 }
+
+func TestAptIndex(t *testing.T) {
+	d := t.TempDir()
+	if _, _, err := AptIndex(d, time.Now()); err == nil {
+		t.Fatal("empty repository accepted")
+	}
+	if _, _, err := AptIndex(filepath.Join(d, "nope"), time.Now()); err == nil {
+		t.Fatal("missing directory accepted")
+	}
+	files := map[string]string{
+		"parley_1.2.3_amd64.deb": "one", "parley_1.2.3_arm64.deb": "two", "parley_1.10.0_amd64.deb": "three",
+		"parley_1.2.3_i386.deb": "ignored", "other.txt": "ignored", "parley_v1.2.3_amd64.deb": "ignored",
+	}
+	for n, b := range files {
+		os.WriteFile(filepath.Join(d, n), []byte(b), 0o644)
+	}
+	os.Mkdir(filepath.Join(d, "parley_9.9.9_amd64.deb"), 0o755) // a directory by that name cannot be read
+	if _, _, err := AptIndex(d, time.Now()); err == nil {
+		t.Fatal("unreadable entry accepted")
+	}
+	os.Remove(filepath.Join(d, "parley_9.9.9_amd64.deb"))
+	date := time.Date(2026, 11, 7, 12, 30, 0, 0, time.UTC)
+	pk, rel, err := AptIndex(d, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := string(pk)
+	for _, want := range []string{
+		"Package: parley\nVersion: 1.2.3\nArchitecture: amd64\n", "Version: 1.10.0\n", "Architecture: arm64\n",
+		"Filename: ./parley_1.2.3_arm64.deb\nSize: 3\nSHA256: " + sha("two") + "\n",
+		"SHA256: " + sha("three") + "\n\n",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("Packages lacks %q:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "ignored") || strings.Contains(p, "i386") || strings.Contains(p, "Installed-Size") || strings.Count(p, "Package: parley") != 3 {
+		t.Fatalf("Packages: %s", p)
+	}
+	// Versions are listed in file name order: 1.10.0 before 1.2.3 as strings, which apt does not mind (it sorts).
+	r := string(rel)
+	for _, want := range []string{"Date: Sat, 07 Nov 2026 12:30:00 UTC\n", "Architectures: amd64 arm64\n", " " + sha(p) + " " + strconv.Itoa(len(p)) + " Packages\n", "Suite: stable\n", "Components: main\n"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("Release lacks %q:\n%s", want, r)
+		}
+	}
+	pk2, rel2, _ := AptIndex(d, date)
+	if !bytes.Equal(pk, pk2) || !bytes.Equal(rel, rel2) {
+		t.Fatal("not deterministic")
+	}
+	// Package files really built by BuildDeb are indexed with their true size and hash.
+	real := fakeRelease(t, "v2.0.0")
+	deb, _ := BuildDeb("v2.0.0", "amd64", real)
+	rd := t.TempDir()
+	os.WriteFile(filepath.Join(rd, "parley_2.0.0_amd64.deb"), deb, 0o644)
+	pk3, _, _ := AptIndex(rd, date)
+	if !strings.Contains(string(pk3), "Size: "+strconv.Itoa(len(deb))+"\nSHA256: "+sha(string(deb))+"\n") {
+		t.Fatalf("real package: %s", pk3)
+	}
+}

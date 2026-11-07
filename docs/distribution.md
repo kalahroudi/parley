@@ -9,7 +9,7 @@ Parley depends on no app store and no signing vendor. Every release is signed wi
 |---|---|---|
 | GitHub release | Download `parleyd_<tag>_<os>_<arch>` and `parley-cli_<tag>_<os>_<arch>` (`.exe` on Windows) and check them (below). | The programs update themselves (below). |
 | Homebrew (macOS, Linux) | `brew install kalahroudi/parley/parley` | `brew upgrade`. Self-update stays out of Homebrew's files. |
-| Debian package (amd64, arm64) | `sudo apt install ./parley_<version>_<arch>.deb` after checking it. | Install the next `.deb`. Self-update stays out of `/usr/bin`. |
+| Linux package repository (apt; amd64, arm64) | See below. | `apt upgrade`. Self-update stays out of `/usr/bin`. |
 | `go install` | `go install github.com/kalahroudi/parley/cmd/parleyd@latest` (and `cmd/parley-cli`) | Run `go install` again. A Go-built binary is not a release build and never replaces itself. |
 | Source | `git clone`, then `go build ./cmd/parleyd ./cmd/parley-cli` | Pull and rebuild. Same: never self-updates. |
 | Windows | See [windows/install.md](windows/install.md). | Self-update, or reinstall. |
@@ -18,6 +18,22 @@ The Homebrew formula (`parley.rb`) and the Debian packages are built by `scripts
 that `SHA256SUMS` covers, so the signed checksums cover them too. The formula carries each binary's SHA-256, which
 Homebrew checks on download. The package holds `/usr/bin/parleyd` and `/usr/bin/parley-cli` and runs no scripts; it
 starts nothing. Enroll the device with `parley-cli login`, then start the daemon the way your site starts services.
+
+### apt
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://kalahroudi.github.io/parley/apt/parley.asc | sudo tee /etc/apt/keyrings/parley.asc >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/parley.asc] https://kalahroudi.github.io/parley/apt ./" | sudo tee /etc/apt/sources.list.d/parley.list
+sudo apt update && sudo apt install parley
+```
+
+The repository is signed with **the project release key**, the same Ed25519 key that signs releases and the update
+manifests, written in OpenPGP form (`parley-release apt-key`; apt can verify nothing else). Check the fingerprint
+printed by `gpg --show-keys parley.asc` against the one in this repository's release notes before trusting the
+download. One key means one thing to protect and rotate; it also means a stolen release key could sign packages as
+well as updates. A single `.deb` can also be installed directly after checking it: `sudo apt install
+./parley_<version>_<arch>.deb`.
 
 ### Check a download
 
@@ -38,6 +54,14 @@ before it writes anything, takes no credentials of its own, and has a `--dry-run
 - `scripts/publish-tap.sh <dist-dir> <tap-checkout> [--dry-run]` checks the signature against the project key, every
   checksum, that `parley.rb` is covered and is the formula of the signed version, then commits `Formula/parley.rb`
   to the tap checkout and pushes with the checkout's own git credentials.
+- `scripts/publish-apt.sh <dist-dir> <repo-checkout> [--dry-run]` does the same verification, adds the release's `.deb`
+  files to the `apt/` folder of the checkout (older versions stay), rebuilds `Packages` and `Release` (dated by the
+  signed `issued` time, so publishing twice changes nothing), signs them with the project key
+  (`PARLEY_RELEASE_KEY`: the encrypted key file, `PARLEY_RELEASE_KEY_PASSWORD`: its password; both from the
+  environment of whoever runs it, never stored), writes `parley.asc`, then commits and pushes.
+
+Release workflow wiring (running these two scripts from `release.yml` with the repository secrets, and the one-time
+creation of the tap repository and the Pages branch) is done by the project owner; the scripts take no other input.
 
 ## Self-update
 
