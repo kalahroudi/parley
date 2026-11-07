@@ -89,13 +89,26 @@ test("CI runs mutation on changed tier 1 code per pull request and in full on ma
 test("CI runs the mutation parts as separate jobs with their own time limits", () => {
   const ci = read(".github/workflows/ci.yml");
   const jobs = Object.fromEntries([...ci.slice(ci.indexOf("\njobs:\n")).matchAll(/^  ([a-z-]+):\n((?:(?:    .*)?\n)+)/gm)].map((m) => [m[1], m[2]]));
-  assert.deepEqual(Object.keys(jobs).sort(), ["mutation-changed", "mutation-crash-points", "mutation-os", "test", "workflows"]);
+  assert.deepEqual(Object.keys(jobs).sort(), ["all-mutation-gates", "mutation-changed", "mutation-crash-points", "mutation-os", "test", "workflows"]);
   assert.ok(!/mutation\.sh|malgw-mutations\.sh/.test(jobs.test), "the test job must not run mutation");
   const want = {
     "mutation-changed": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /MUTATION_PART: \$\{\{ matrix\.part \}\}/, ...Array.from({ length: 12 }, (_, i) => new RegExp(`part: "go:${i}/12"`)), /part: "ts"/, /runs-on: ubuntu-latest/, /npm ci/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
     "mutation-os": [/scripts\/mutation\.sh/, /MUTATION_SCOPE: changed/, /MUTATION_TS: "0"/, /os: \[macos-latest, windows-latest\]/, /fetch-depth: 0/, /if: github\.event_name == 'pull_request'/],
     "mutation-crash-points": [/scripts\/malgw-mutations\.sh/, /runs-on: ubuntu-latest/],
   };
+  // One stable required name: it needs every mutation job, runs even when one fails, and treats a skipped job as a failure
+  // where the job must have run (pull requests), so a dropped gate cannot pass.
+  const all = jobs["all-mutation-gates"];
+  assert.match(all, /needs: \[mutation-changed, mutation-os, mutation-crash-points\]/);
+  assert.match(all, /if: always\(\)/);
+  assert.match(all, /name: all-mutation-gates\n/);
+  assert.match(all, /CHANGED: \$\{\{ needs\.mutation-changed\.result \}\}/);
+  assert.match(all, /OS: \$\{\{ needs\.mutation-os\.result \}\}/);
+  assert.match(all, /CRASH: \$\{\{ needs\.mutation-crash-points\.result \}\}/);
+  assert.match(all, /\[ "\$EVENT" = pull_request \] \|\| want_changed=skipped/);
+  assert.match(all, /\[ "\$CRASH" = success \] && \[ "\$CHANGED" = "\$want_changed" \] && \[ "\$OS" = "\$want_changed" \]/);
+  assert.ok(!/continue-on-error/.test(ci), "no job may be allowed to fail");
+  assert.match(ci, /^permissions:\n  contents: read\n/m);
   for (const [name, res] of Object.entries(want)) {
     assert.match(jobs[name], /timeout-minutes: 90\n/, `${name} needs its own time limit`);
     for (const re of res) assert.match(jobs[name], re, `${name} lacks ${re}`);

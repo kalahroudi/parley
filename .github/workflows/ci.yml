@@ -155,6 +155,8 @@ jobs:
   #   workflow lint, test (ubuntu-latest), test (macos-latest), test (windows-latest),
   #   mutation: changed code (linux, go-01) .. (linux, go-12), mutation: changed code (linux, typescript), mutation: this OS's Go files (macos-latest), mutation: this OS's Go files (windows-latest),
   #   mutation: crash points (linux)
+  # and one stable name that covers them all: all-mutation-gates (require that one, not the list above, which changes
+  # whenever the split changes).
   mutation-changed:
     name: "mutation: changed code (linux, ${{ matrix.label }})"
     if: github.event_name == 'pull_request'
@@ -257,3 +259,27 @@ jobs:
           go-version-file: go.mod
       - name: Mutation testing (malicious gateway and prekey crash points)
         run: scripts/malgw-mutations.sh
+
+  # One required check for every mutation job. It fails when a needed job failed, was cancelled or was skipped where it
+  # must have run (a skipped job counts as passing for a required check, which would silently drop a gate): on a pull
+  # request all three must succeed; on a push to main only the crash points run, the changed-code jobs are skipped.
+  all-mutation-gates:
+    name: all-mutation-gates
+    if: always()
+    needs: [mutation-changed, mutation-os, mutation-crash-points]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every mutation job ran and passed
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGED: ${{ needs.mutation-changed.result }}
+          OS: ${{ needs.mutation-os.result }}
+          CRASH: ${{ needs.mutation-crash-points.result }}
+        run: |
+          set -eu
+          echo "event=$EVENT changed=$CHANGED os=$OS crash=$CRASH"
+          want_changed=success
+          [ "$EVENT" = pull_request ] || want_changed=skipped
+          [ "$CRASH" = success ] && [ "$CHANGED" = "$want_changed" ] && [ "$OS" = "$want_changed" ]
