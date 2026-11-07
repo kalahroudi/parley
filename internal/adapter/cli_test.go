@@ -6,6 +6,7 @@ package adapter_test
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -75,6 +76,35 @@ func helper(mode string) {
 		child.Env = []string{helperEnv + "=beat", "PARLEY_BEAT=" + os.Getenv("PARLEY_BEAT")}
 		child.Start()
 		time.Sleep(time.Minute)
+	case "out": // PARLEY_OUT, then exit with status PARLEY_EXIT; its environment is printed too if PARLEY_ENV is set
+		os.Stdout.WriteString(os.Getenv("PARLEY_OUT"))
+		n, _ := strconv.Atoi(os.Getenv("PARLEY_EXIT"))
+		os.Exit(n)
+	case "spawnexit": // a grandchild that keeps writing, then it exits at once
+		exe, _ := os.Executable()
+		child := exec.Command(exe)
+		child.Env = []string{helperEnv + "=beat", "PARLEY_BEAT=" + os.Getenv("PARLEY_BEAT")}
+		child.Start()
+		for end := time.Now().Add(20 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+			if fi, err := os.Stat(os.Getenv("PARLEY_BEAT")); err == nil && fi.Size() >= 3 {
+				break
+			}
+		}
+		os.Stdout.WriteString("done")
+	case "tooler": // asks for the tool PARLEY_TOOL with the arguments in PARLEY_ARGS (comma separated) PARLEY_N times, answers with the last reply
+		r := bufio.NewReaderSize(os.Stdin, 1<<22)
+		r.ReadBytes('\n')
+		var last []byte
+		for i, _ := strconv.Atoi(os.Getenv("PARLEY_N")); i > 0; i-- {
+			args, _ := json.Marshal(strings.Split(os.Getenv("PARLEY_ARGS"), ","))
+			fmt.Printf(`{"type":"tool","tool":%q,"args":%s}`+"\n", os.Getenv("PARLEY_TOOL"), args)
+			if last, _ = r.ReadBytes('\n'); len(last) == 0 {
+				return
+			}
+		}
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: last})
+	case "toolgone": // asks for a tool and leaves without reading the reply
+		fmt.Println(`{"type":"tool","tool":"t"}`)
 	case "beat":
 		f, _ := os.OpenFile(os.Getenv("PARLEY_BEAT"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		for {

@@ -106,7 +106,19 @@ type Config struct {
 	MaxPending   int
 	MaxPerCaller int
 	Now          func() time.Time
+	// Audit, if set, is told each step of a task's approval with its id and one of the State constants (never the
+	// task's text). It must not block for long.
+	Audit func(id [16]byte, state string)
 }
+
+// States reported to Audit (all are in logx.States).
+const (
+	StateWaiting  = "APPROVAL_WAITING"
+	StateApproved = "APPROVAL_APPROVED"
+	StateDenied   = "APPROVAL_DENIED"
+	StateNoAnswer = "APPROVAL_NO_ANSWER"
+	StateRefused  = "APPROVAL_REFUSED" // too many waiting, or the id already waits
+)
 
 // Gate is a bot.Bot that asks the owner first.
 type Gate struct {
@@ -160,6 +172,9 @@ func New(cfg Config) (*Gate, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Audit == nil {
+		cfg.Audit = func([16]byte, string) {}
+	}
 	return &Gate{cfg: cfg, waiting: map[[16]byte]*entry{}}, nil
 }
 
@@ -170,9 +185,11 @@ func (g *Gate) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, e
 	}
 	e, why := g.enter(t)
 	if why != "" {
+		g.cfg.Audit(t.ID, StateRefused)
 		return nil, &bot.Failure{Message: why}
 	}
 	defer g.leave(e)
+	g.cfg.Audit(t.ID, StateWaiting)
 	// Best effort: the caller learns the task is waiting for a person. If the
 	// send fails the task is ending anyway, and the wait below sees its context.
 	_ = s.Status(ctx, []byte(TextWaiting))
@@ -189,10 +206,13 @@ func (g *Gate) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, e
 	}
 	switch d {
 	case approved:
+		g.cfg.Audit(t.ID, StateApproved)
 		return g.cfg.Bot.Handle(ctx, t, s)
 	case timedOut:
+		g.cfg.Audit(t.ID, StateNoAnswer)
 		return nil, &bot.Failure{Message: TextTimedOut}
 	}
+	g.cfg.Audit(t.ID, StateDenied)
 	return nil, &bot.Failure{Message: TextDenied}
 }
 

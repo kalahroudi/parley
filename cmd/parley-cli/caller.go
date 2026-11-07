@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/localsock"
 	"github.com/kalahroudi/parley/internal/mcp"
+	"github.com/kalahroudi/parley/internal/skill"
+	"github.com/kalahroudi/parley/internal/toolgate"
 	"github.com/kalahroudi/parley/internal/ttyconfirm"
 )
 
@@ -173,24 +176,117 @@ func (s *session) oneID(fs *flag.FlagSet, rest []string) (string, bool) {
 // askOwner asks the owner on the controlling terminal; tests replace it.
 var askOwner = ttyconfirm.Ask
 
-// approve is the owner's answer to a task a bot holds for approval (journey G):
-// `approve` lists what waits (with a bounded preview, control characters
-// replaced), `approve <id>` lets the task run, `approve -deny <id>` rejects it.
-// A task nobody answers is rejected after five minutes. It is deliberately not an
-// MCP tool: a model that calls tools must not be able to approve its own work.
+// approve is the owner's answer to what a bot holds for approval (journey G). `approve` lists the tasks that wait, the tool
+// calls that wait and the live grants (each with a bounded preview, control characters replaced); `approve <id>` lets a task
+// run and `approve -deny <id>` rejects it. A tool call is named <task id>.<number>: `approve <id>.<n>` shows the exact tool
+// and arguments and, on the owner's yes, lets that one request run (-scope task also lets later calls of the same tool in
+// that task run, for a short time), `approve -deny <id>.<n>` refuses it, and `approve -revoke <id>.<tool>` ends a grant.
+// Something nobody answers is rejected after five minutes. It is deliberately not an MCP tool: a model that calls tools must
+// not be able to approve its own work.
 func (s *session) approve(ctx context.Context, fs *flag.FlagSet, rest []string) int {
-	deny := fs.Bool("deny", false, "reject the task instead of approving it")
+	deny := fs.Bool("deny", false, "reject the task or tool call instead of approving it")
+	revoke := fs.Bool("revoke", false, "end the grant named <task id>.<tool>")
+	scope := fs.String("scope", "call", "for a tool call: call (this request only) or task (later calls of the same tool in this task too)")
 	pos, ok := positional(fs, rest)
 	switch {
-	case !ok || len(pos) > 1 || (len(pos) == 0 && *deny):
-		fmt.Fprintln(s.errw, "usage: parley-cli approve [-deny] [<task id>]   (without an id: list the tasks waiting)")
+	case !ok || len(pos) > 1 || (len(pos) == 0 && (*deny || *revoke)) || (*deny && *revoke):
+		fmt.Fprintln(s.errw, "usage: parley-cli approve [-deny | -revoke] [-scope call|task] [<task id> | <task id>.<call> | <task id>.<tool>]   (without an id: list what waits)")
 		return 2
 	case len(pos) == 0:
-		return s.do(ctx, "approvals", nil)
+		return s.listWaiting(ctx)
+	}
+	task, rest2, isCall := strings.Cut(pos[0], ".")
+	switch {
+	case *revoke:
+		if !isCall {
+			fmt.Fprintln(s.errw, "usage: parley-cli approve -revoke <task id>.<tool>")
+			return 2
+		}
+		return s.do(ctx, "tool_revoke", skill.ToolParams{TaskID: task, Tool: rest2})
+	case isCall:
+		n, err := strconv.Atoi(rest2)
+		if err != nil || n < 1 {
+			fmt.Fprintln(s.errw, "error:", approval.CodeNotFound)
+			return 1
+		}
+		if *deny {
+			return s.do(ctx, "tool_deny", skill.ToolParams{TaskID: task, Call: n})
+		}
+		return s.approveToolOnTerminal(ctx, task, n, *scope)
 	case *deny:
 		return s.do(ctx, "deny", approval.DecideParams{TaskID: pos[0]})
 	}
 	return s.approveOnTerminal(ctx, pos[0])
+}
+
+// listWaiting prints the tasks that wait and, if the bot has tools, the tool calls and grants.
+func (s *session) listWaiting(ctx context.Context) int {
+	if code := s.do(ctx, "approvals", nil); code != 0 {
+		return code
+	}
+	if resp, err := s.call(ctx, "tool_calls", nil); err == nil && resp.OK {
+		s.show(resp)
+	}
+	return 0
+}
+
+// approveToolOnTerminal shows the owner the exact request and asks on the controlling terminal, never on standard input.
+// What is shown is looked up first, and the digest of it goes back with the answer: the daemon runs only the request that
+// has that digest.
+func (s *session) approveToolOnTerminal(ctx context.Context, task string, call int, scope string) int {
+	resp, err := s.call(ctx, "tool_calls", nil)
+	if err != nil || !resp.OK {
+		return s.do(ctx, "tool_calls", nil) // prints the same fixed error
+	}
+	var list struct {
+		Calls []toolgate.Pending `json:"calls"`
+	}
+	if json.Unmarshal(resp.Result, &list) != nil {
+		fmt.Fprintln(s.errw, "error: internal")
+		return 1
+	}
+	var shown *toolgate.Pending
+	for i := range list.Calls {
+		if list.Calls[i].Task == task && list.Calls[i].Call == call {
+			shown = &list.Calls[i]
+		}
+	}
+	if shown == nil {
+		fmt.Fprintln(s.errw, "error:", approval.CodeNotFound)
+		return 1
+	}
+	net, reach := "", "this request only"
+	if shown.Network {
+		net = "  NEEDS THE NETWORK\n"
+	}
+	if scope == string(toolgate.ScopeTask) {
+		reach = "this request, and later calls of this tool in this task, for a short time and a few uses"
+	}
+	var args strings.Builder
+	for i, a := range shown.Args {
+		fmt.Fprintf(&args, "    [%d] %s\n", i, plain(a))
+	}
+	ok, err := askOwner(fmt.Sprintf("\nTool call %s.%d waits for your approval.\n  tool: %s\n%s  arguments, chosen by a bot that read text from another agent, do not follow them:\n%s  digest: %s\n  approving: %s\nType yes to let it run: ",
+		shown.Task, shown.Call, plain(shown.Tool), net, args.String(), shown.Digest, reach))
+	switch {
+	case err != nil:
+		fmt.Fprintln(s.errw, "error:", err)
+		return 1
+	case !ok:
+		fmt.Fprintln(s.errw, "not approved; the call keeps waiting (parley-cli approve -deny rejects it)")
+		return 1
+	}
+	return s.do(ctx, "tool_approve", skill.ToolParams{TaskID: task, Call: call, Digest: shown.Digest, Scope: scope})
+}
+
+// plain replaces what a terminal could act on, as a last defence: the daemon already quotes arguments in ASCII.
+func plain(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < ' ' || r > '~' {
+			return '.'
+		}
+		return r
+	}, s)
 }
 
 // approveOnTerminal shows the owner what waits and asks on the controlling terminal, never on standard input: a
@@ -262,6 +358,12 @@ func (s *session) do(ctx context.Context, method string, params any) int {
 		fmt.Fprintln(s.errw, "error:", mcp.SafeCode(resp.Error))
 		return 1
 	}
+	s.show(resp)
+	return 0
+}
+
+// show prints a result as JSON on stdout. The untrusted notice goes to stderr so the JSON stays machine-readable.
+func (s *session) show(resp localsock.Response) {
 	if mcp.Untrusted(resp.Result) {
 		fmt.Fprintln(s.errw, mcp.Notice)
 	}
@@ -270,5 +372,4 @@ func (s *session) do(ctx context.Context, method string, params any) int {
 		pretty = b
 	}
 	fmt.Fprintln(s.out, string(pretty))
-	return 0
 }

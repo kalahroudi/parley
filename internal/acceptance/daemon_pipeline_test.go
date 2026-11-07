@@ -444,6 +444,8 @@ type nodeOpts struct {
 	owner         string // the owner its binding names (default: <id>@acme.test)
 	deny          func(owner string) bool
 	methods       map[string]localsock.Method // extra local socket methods, registered before the daemon runs
+	botCfg        *daemon.BotConfig           // run the configured bot (its approval gate and tools) instead of the test's own bot
+	log           io.Writer                   // the daemon's log (default: discarded)
 }
 
 func (g *pipeGW) shortDir() string {
@@ -485,8 +487,12 @@ func (g *pipeGW) start(id string, o nodeOpts) (*pipeNode, error) {
 		}
 		o.prepare(n.dirs)
 	}
-	cfg := daemon.Config{Format: 1, Tenant: pipeTenant, DeviceID: id, GatewayURL: g.srv.URL, RootPublicKey: g.rootPub(), KeyStore: daemon.KeyStoreFile, DisableTestBot: !o.testBot}
-	deps := daemon.Deps{Log: logx.New(io.Discard), Harden: func() error { return nil }, Keys: memKeys{key}, MinBackoff: time.Millisecond,
+	cfg := daemon.Config{Format: 1, Tenant: pipeTenant, DeviceID: id, GatewayURL: g.srv.URL, RootPublicKey: g.rootPub(), KeyStore: daemon.KeyStoreFile, DisableTestBot: !o.testBot, Bot: o.botCfg}
+	logw := o.log
+	if logw == nil {
+		logw = io.Discard
+	}
+	deps := daemon.Deps{Log: logx.New(logw), Harden: func() error { return nil }, Keys: memKeys{key}, MinBackoff: time.Millisecond,
 		ShutdownTimeout: 5 * time.Second, Now: n.clk.now, Directory: g.directory, AllowUnlockedMemory: true,
 		OnEvent: func(tunnel.Event) { n.taps.Add(1) },
 		OnUpdate: func(u pipeline.Update) {
@@ -499,7 +505,7 @@ func (g *pipeGW) start(id string, o nodeOpts) (*pipeNode, error) {
 	if o.realDirectory {
 		deps.Directory = nil
 	}
-	if !o.noBot && !o.testBot {
+	if !o.noBot && !o.testBot && o.botCfg == nil {
 		deps.Allow = func(owner string) bool { return o.deny == nil || !o.deny(owner) }
 		deps.OnInbound = func(in pipeline.Inbound) {
 			rec := got{Type: in.Type, Task: in.TaskID, Caller: in.Caller, Owner: in.Owner, Content: string(in.Content)}

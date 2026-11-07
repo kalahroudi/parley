@@ -28,6 +28,14 @@
 //   - lines are parsed strictly: unknown fields, a second value or trailing text
 //     are protocol errors.
 //
+// Tool requests: at most MaxToolRequests per task, MaxToolArgs arguments each. The adapter does not run anything: it hands
+// the request to Tools (internal/toolgate decides, the owner approves the exact call, internal/toolrun runs it in a
+// sandbox) and writes the reply. outcome is ok, exit (the tool ran and exited nonzero), denied (the owner said no or did not
+// answer, or a grant was revoked), refused (the request broke the manifest or a limit), failed or timeout; content is the
+// tool's output, cut, neutralised and framed by a random boundary (it is always data, never instructions), and is only there
+// if the tool ran. The caller sees a status while a request waits for the owner. RunContained gives a tool the same
+// containment as a CLI bot: own session or job, registered so it can never approve anything, killed and reaped with its tree.
+//
 // Everything in a task line is data from a remote caller (content, context, and
 // the caller and owner names from its binding): a bot that gives it to a model
 // must treat it as untrusted data and never as instructions or tool calls. The
@@ -45,11 +53,16 @@
 //	{"v":1,"type":"task","id":"<32 hex>","context":"..","caller":"..","owner":"..","expires":"<RFC 3339 UTC>","content":"<base64>"}
 //	{"v":1,"type":"answer","id":"<32 hex>","turn":N,"content":"<base64>"}   the caller's answer to question N (1, 2, ..)
 //	{"v":1,"type":"cancel","id":"<32 hex>"}                                 HTTP only, best effort: the task ended without a final message
+//	{"v":1,"type":"tool_result","id":"<32 hex>","turn":N,"outcome":"..","exit":N,"truncated":bool,"untrusted":true,"content":"<base64>"}
+//	                                                                       CLI only: the reply to tool request N (see below)
 //
 // From the bot (a turn ends with a question, result or error):
 //
 //	{"type":"status","content":"<base64>"}     any number up to MaxStatuses
 //	{"type":"question","content":"<base64>"}   the caller's answer follows as an "answer" line
+//	{"type":"tool","tool":"name","args":["a","b"]}   CLI only, and only if the adapter was given Tools: a request for a
+//	                                           tool the skill declared; the tool_result line follows. Without Tools a
+//	                                           request is a protocol error and ends the task (the bot is tool-less).
 //	{"type":"result","content":"<base64>"}     final
 //	{"type":"error","message":"text for the caller"}   final; no task content or secrets
 //

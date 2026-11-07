@@ -86,6 +86,8 @@ type Config struct {
 	LogLevel   string `json:"log_level,omitempty"`        // debug, info, warn, error
 	// DisableTestBot turns off the built-in bot that answers `parley-cli test` (testbot.go).
 	DisableTestBot bool `json:"disable_test_bot,omitempty"`
+	// Bot is the bot this device runs for its owners' callers (botconfig.go). Without it only the test bot runs.
+	Bot *BotConfig `json:"bot,omitempty"`
 
 	refresh time.Duration
 }
@@ -164,6 +166,11 @@ func (c *Config) validate() error {
 	case "", "debug", "info", "warn", "error":
 	default:
 		return bad("log_level must be debug, info, warn or error")
+	}
+	if c.Bot != nil {
+		if err := c.Bot.validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrConfig, err)
+		}
 	}
 	return nil
 }
