@@ -1,0 +1,101 @@
+{
+  "_fixture": {
+    "source": [
+      "https://docs.stripe.com/api/events/types",
+      "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json"
+    ],
+    "api_version": "2026-09-30.endive",
+    "recorded": "2026-11-07",
+    "kind": "composed from the published reference",
+    "note": "seats raised in the Portal, five to eight"
+  },
+  "event": {
+    "id": "evt_1Seats",
+    "object": "event",
+    "api_version": "2026-09-30.endive",
+    "created": 1791000000,
+    "data": {
+      "object": {
+        "id": "sub_1Acme",
+        "object": "subscription",
+        "automatic_tax": {
+          "enabled": false,
+          "liability": null
+        },
+        "billing_cycle_anchor": 1790000100,
+        "billing_mode": {
+          "type": "classic"
+        },
+        "billing_schedules": [],
+        "cancel_at_period_end": false,
+        "collection_method": "charge_automatically",
+        "created": 1790000100,
+        "currency": "usd",
+        "customer": "cus_1Acme",
+        "discounts": [],
+        "invoice_settings": {
+          "issuer": {
+            "type": "self"
+          }
+        },
+        "items": {
+          "object": "list",
+          "data": [
+            {
+              "id": "si_1Seat",
+              "object": "subscription_item",
+              "created": 1790000100,
+              "current_period_start": 1790000100,
+              "current_period_end": 1792592100,
+              "discounts": [],
+              "metadata": {},
+              "price": {
+                "id": "price_1Seat",
+                "object": "price",
+                "active": true,
+                "billing_scheme": "per_unit",
+                "created": 1790000000,
+                "currency": "usd",
+                "livemode": false,
+                "metadata": {},
+                "product": "prod_Seat",
+                "type": "recurring",
+                "unit_amount": 500,
+                "recurring": {
+                  "interval": "month",
+                  "interval_count": 1
+                }
+              },
+              "quantity": 8,
+              "subscription": "sub_1Acme"
+            }
+          ],
+          "has_more": false,
+          "url": "/v1/subscription_items?subscription=sub_1Acme"
+        },
+        "livemode": false,
+        "metadata": {
+          "tenant": "acme"
+        },
+        "start_date": 1790000100,
+        "status": "active"
+      },
+      "previous_attributes": {
+        "items": {
+          "data": [
+            {
+              "quantity": 5
+            }
+          ]
+        }
+      }
+    },
+    "livemode": false,
+    "pending_webhooks": 1,
+    "request": {
+      "id": null,
+      "idempotency_key": null
+    },
+    "type": "customer.subscription.updated"
+  }
+}

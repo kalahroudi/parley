@@ -16,7 +16,11 @@ Flat per-device seats. The seat limit is checked once, when an admin **approves*
 - `POST /v1/admin/billing`: the plan, the limit, seats used, and the grace deadline. Admin only.
 - `POST /v1/admin/billing/checkout {"seats": n}`: a Stripe Checkout session for this tenant. The tenant name travels in the subscription's metadata, which only the gateway sets.
 - `POST /v1/admin/billing/portal`: a Stripe Customer Portal session (card, seat count, cancel).
-- `POST /v1/stripe/webhook`: Stripe's `customer.subscription.created|updated|deleted`. The body is verified against `Stripe-Signature` (HMAC-SHA256, 5 minute tolerance) before anything in it is read. Events apply in Stripe's order, not arrival order; any event that is not about our price, our tenants, or the right mode is acknowledged and ignored.
+- `POST /v1/stripe/webhook`: Stripe's `customer.subscription.created|updated|deleted`. The body is verified against `Stripe-Signature` (HMAC-SHA256, 5 minute tolerance) before anything in it is read. Two layers keep an event from being applied twice or out of order:
+  1. **Event ids.** The ids of processed events are kept in the tenant's storage (`billing_events`, oldest first), for 7 days (Stripe retries for up to 3) and at most 1000 per tenant; the oldest is evicted first. A delivery whose id is kept is a no-op (`{"applied": false, "duplicate": true}`), whatever its content or timestamp, including two deliveries at once (the tenant serializes them). Stale events are remembered too.
+  2. **Event time.** An event older than the one applied is ignored, and of two events in the same second the one that lapses the subscription wins. This covers a replay after the id was evicted or expired.
+
+  Any event that is not about our price, our tenants, or the right mode is acknowledged and ignored. Only `customer.subscription.created|updated|deleted` change state; `invoice.paid`, `invoice.payment_failed`, `checkout.session.completed` and `customer.deleted` are acknowledged and ignored, because the subscription events that Stripe sends with them carry the status and the quantity (a deleted customer's subscriptions are canceled with their own `deleted` events).
 
 ## Configuration (secrets and variables on the gateway Worker)
 
@@ -35,4 +39,5 @@ Set the key and the secret with `wrangler secret put`, never in a file. Local te
 - Stripe sees the tenant name, the admin's billing details and the seat count. It sees no task data; the gateway holds none.
 - The seat count is the number of approved, non-revoked enrollment records. An approved device that is not revoked is never purged (the 30-day retention applies to rejected and revoked records and expired requests), so a seat cannot be freed by waiting. Offboarding (T503) frees a seat by revoking the device.
 - Checkout and Portal are tested against a stand-in for Stripe's API. T510 runs them against Stripe's test environment.
+- The event fixtures (`gateway/test/fixtures/stripe/`) are composed from Stripe's published API reference (events page and OpenAPI specification, API version `2026-09-30.endive`, 2026-11-07), not captured from a live account; each names its sources, version and date, and the tests fail if one lacks a property the reference marks required. T510 replaces them with real Stripe test events.
 - Deleting a tenant (T503) does not cancel its Stripe subscription or delete its Stripe customer.

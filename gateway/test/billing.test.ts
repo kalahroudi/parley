@@ -8,8 +8,10 @@
 import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  EVENT_TTL_MS,
   FREE_SEATS,
   GRACE_MS,
+  MAX_EVENT_IDS,
   MAX_SEATS,
   MAX_WEBHOOK_BYTES,
   WEBHOOK_TOLERANCE_S,
@@ -18,6 +20,7 @@ import {
   limitOf,
   parseEvent,
   reduce,
+  remember,
   returnUrl,
   verifySignature,
   type Billing,
@@ -110,7 +113,7 @@ const sub = (over: Partial<Record<string, unknown>> = {}, items: unknown = [{ pr
 
 describe("parseEvent", () => {
   it("reads a subscription event", () => {
-    expect(parseEvent(sub(), PRICE, false)).toEqual({ tenant: "bil1", customer: "cus_1", subscription: "sub_1", status: "active", seats: 5, created: 1_800_000_000_000 });
+    expect(parseEvent(sub(), PRICE, false)).toEqual({ event: "evt_1", tenant: "bil1", customer: "cus_1", subscription: "sub_1", status: "active", seats: 5, created: 1_800_000_000_000 });
   });
   it("counts only our price, summed", () => {
     const items = [{ price: { id: PRICE }, quantity: 2 }, { price: { id: "price_addon" }, quantity: 50 }, { price: { id: PRICE }, quantity: 3 }, null, { price: null, quantity: 1 }, { price: { id: PRICE }, quantity: 1.5 }, { price: { id: PRICE }, quantity: 0 }, { price: { id: PRICE } }];
@@ -144,6 +147,14 @@ describe("parseEvent", () => {
       { ...e, data: null },
       { ...e, data: { object: null } },
       { ...e, data: { object: [] } },
+      { ...e, id: 5 },
+      { ...e, id: "sub_1" },
+      { ...e, id: "evt_" },
+      { ...e, id: ["evt_1"] },
+      { ...e, id: "xevt_1" },
+      { ...e, id: "evt_a b" },
+      { ...e, id: `evt_${"a".repeat(65)}` },
+      { ...e, id: undefined },
       { ...e, created: -1 },
       { ...e, created: 1.5 },
       { ...e, created: "1" },
@@ -177,13 +188,45 @@ describe("parseEvent", () => {
     ];
     for (const c of cases) expect(parseEvent(c, PRICE, false)).toBeNull();
     expect(parseEvent(sub({}, [{ price: { id: PRICE }, quantity: MAX_SEATS }]), PRICE, false)?.seats).toBe(MAX_SEATS);
+    expect(parseEvent({ ...e, id: `evt_${"a".repeat(64)}` }, PRICE, false)).not.toBeNull();
     expect(parseEvent(sub({ id: `sub_${"a".repeat(64)}`, metadata: { tenant: "a".repeat(64) } }), PRICE, false)).not.toBeNull();
   });
 });
 
 const T0 = 1_800_000_000_000;
-const upd = (over: Partial<SubUpdate> = {}): SubUpdate => ({ tenant: "t", customer: "cus_1", subscription: "sub_1", status: "active", seats: 10, created: T0, ...over });
+const upd = (over: Partial<SubUpdate> = {}): SubUpdate => ({ event: "evt_1", tenant: "t", customer: "cus_1", subscription: "sub_1", status: "active", seats: 10, created: T0, ...over });
 const rec = (over: Partial<Billing> = {}): Billing => ({ customer: "cus_1", subscription: "sub_1", status: "active", seats: 10, as_of: T0, ...over });
+
+describe("remember", () => {
+  it("keeps an id for 7 days", () => expect(EVENT_TTL_MS).toBe(604_800_000));
+  it("adds an id, and says null for one it already holds", () => {
+    expect(remember(undefined, "evt_a", T0)).toEqual([["evt_a", T0]]);
+    const one = remember(undefined, "evt_a", T0)!;
+    expect(remember(one, "evt_a", T0 + 1)).toBeNull();
+    expect(remember(one, "evt_b", T0 + 1)).toEqual([["evt_a", T0], ["evt_b", T0 + 1]]);
+  });
+  it("forgets an id when its time to live is over, to the millisecond, and then takes it again", () => {
+    const one = remember(undefined, "evt_a", T0)!;
+    expect(remember(one, "evt_a", T0 + EVENT_TTL_MS - 1)).toBeNull();
+    expect(remember(one, "evt_a", T0 + EVENT_TTL_MS)).toEqual([["evt_a", T0 + EVENT_TTL_MS]]);
+    expect(remember([["evt_a", T0], ["evt_b", T0 + 10]], "evt_c", T0 + EVENT_TTL_MS)).toEqual([["evt_b", T0 + 10], ["evt_c", T0 + EVENT_TTL_MS]]); // the expired one is dropped
+  });
+  it("drops the oldest first at the cap, and the dropped id is then taken again", () => {
+    let seen = remember(undefined, "evt_1", T0, 3)!;
+    for (const id of ["evt_2", "evt_3"]) seen = remember(seen, id, T0 + 1, 3)!;
+    expect(seen.map(([e]) => e)).toEqual(["evt_1", "evt_2", "evt_3"]);
+    seen = remember(seen, "evt_4", T0 + 2, 3)!;
+    expect(seen.map(([e]) => e)).toEqual(["evt_2", "evt_3", "evt_4"]);
+    expect(remember(seen, "evt_2", T0 + 3, 3)).toBeNull();
+    expect(remember(seen, "evt_1", T0 + 3, 3)?.map(([e]) => e)).toEqual(["evt_3", "evt_4", "evt_1"]);
+  });
+  it("holds MAX_EVENT_IDS by default, and a full list stays small enough for one storage value", () => {
+    let seen: ReturnType<typeof remember> = undefined as any;
+    for (let i = 0; i < MAX_EVENT_IDS + 5; i++) seen = remember(seen ?? undefined, `evt_${String(i).padStart(64, "0")}`, T0 + i)!;
+    expect(seen).toHaveLength(MAX_EVENT_IDS);
+    expect(JSON.stringify(seen).length).toBeLessThan(128 * 1024);
+  });
+});
 
 describe("limitOf", () => {
   it("is not limited for a tenant that never had a subscription", () => expect(limitOf(undefined, T0)).toBe(Infinity));
@@ -280,9 +323,9 @@ const fresh = () => {
   };
   const events = { n: 0 };
   // A webhook delivery as Stripe sends it: the tenant is in the subscription's metadata.
-  const hook = async (over: Partial<Record<string, unknown>> = {}, o: { created?: number; type?: string; items?: unknown; sig?: string; raw?: string } = {}) => {
+  const hook = async (over: Partial<Record<string, unknown>> = {}, o: { id?: string; created?: number; type?: string; items?: unknown; sig?: string; raw?: string } = {}) => {
     const e = sub(over, o.items);
-    e.id = `evt_${++events.n}`;
+    e.id = o.id ?? `evt_${++events.n}`;
     e.created = o.created ?? nowS();
     e.type = o.type ?? "customer.subscription.updated";
     (e.data.object as any).metadata = { tenant: t };
@@ -421,15 +464,67 @@ describe("the webhook endpoint", () => {
     }
   });
 
-  it("applies deliveries in Stripe's order, not arrival order, and repeats harmlessly", async () => {
+  const audits = async (w: World) => (await (await w.adminPost("/v1/admin/audit/csv", { kind: "admin" })).text()).split("billing.put").length - 1;
+
+  it("applies deliveries in Stripe's order, not arrival order", async () => {
     const w = fresh();
     const t = nowS();
-    expect(await json(await w.hook({}, { created: t }))).toMatchObject({ applied: true });
-    expect(await json(await w.hook({ status: "canceled" }, { created: t - 100 }))).toMatchObject({ applied: false }); // older, arrived later
-    expect(await json(await w.hook({}, { created: t }))).toMatchObject({ applied: true }); // a redelivery
-    const audits = async () => (await (await w.adminPost("/v1/admin/audit/csv", { kind: "admin" })).text()).split("billing.put").length - 1;
-    expect(await audits()).toBe(1); // the redelivery was not audited again
+    expect(await json(await w.hook({ status: "past_due" }, { created: t }))).toEqual({ received: true, applied: true });
+    expect(await json(await w.hook({}, { created: t - 100 }))).toEqual({ received: true, applied: false }); // older, arrived later
+    expect(await json(await w.hook({}, { created: t + 100 }))).toEqual({ received: true, applied: true });
+    expect(await json(await w.hook({ status: "canceled" }, { created: t + 50 }))).toEqual({ received: true, applied: false }); // older than the last applied
     expect(await w.view()).toMatchObject({ status: "active", limit: 5 });
+    expect(await audits(w)).toBe(2);
+  });
+
+  it("makes a redelivered event id a no-op whatever its content or time, and does not audit it", async () => {
+    const w = fresh();
+    const t = nowS();
+    expect(await json(await w.hook({}, { id: "evt_R1", created: t }))).toEqual({ received: true, applied: true });
+    expect(await json(await w.hook({}, { id: "evt_R1", created: t }))).toEqual({ received: true, applied: false, duplicate: true });
+    // The same id with another status and a later time is still the one event: by id, not by timestamp.
+    expect(await json(await w.hook({ status: "canceled" }, { id: "evt_R1", created: t + 1000 }))).toEqual({ received: true, applied: false, duplicate: true });
+    expect(await w.view()).toMatchObject({ status: "active", limit: 5 });
+    expect(await audits(w)).toBe(1);
+    // A new id with the same content changes nothing and is not audited either, but it is not a duplicate.
+    expect(await json(await w.hook({}, { id: "evt_R2", created: t }))).toEqual({ received: true, applied: false });
+    expect(await audits(w)).toBe(1);
+  });
+
+  it("remembers the id of an event that was ignored as stale, so its replay is a no-op by id", async () => {
+    const w = fresh();
+    const t = nowS();
+    await w.hook({}, { id: "evt_N", created: t });
+    expect(await json(await w.hook({ status: "canceled" }, { id: "evt_S", created: t - 500 }))).toEqual({ received: true, applied: false });
+    expect(await json(await w.hook({ status: "canceled" }, { id: "evt_S", created: t - 500 }))).toEqual({ received: true, applied: false, duplicate: true });
+  });
+
+  it("counts two deliveries of one event at once as one", async () => {
+    const w = fresh();
+    const t = nowS();
+    const results = await Promise.all(Array.from({ length: 6 }, () => w.hook({ status: "past_due" }, { id: "evt_C", created: t }).then(json)));
+    expect(results.filter((r) => r.applied)).toHaveLength(1);
+    expect(results.filter((r) => r.duplicate)).toHaveLength(5);
+    expect(await audits(w)).toBe(1);
+    expect(await w.view()).toEqual({ status: "past_due", limit: FREE_SEATS, used: 0, subscribed: false }); // a first event already lapsed grants no grace
+  });
+
+  it("holds the ids in the tenant's storage, bounded: once the cap evicts an id its replay is no longer caught by id, and the order rule still keeps it from doing anything", async () => {
+    const w = fresh();
+    const t = nowS();
+    await w.hook({ status: "past_due" }, { id: "evt_OLD", created: t - 100 });
+    expect(((await storageOf(w)).billing_events as [string, number][]).map(([id]) => id)).toEqual(["evt_OLD"]);
+    // Fill the list to the cap with other ids; the next event pushes the oldest out.
+    await runInDurableObject(w.stub, (_i, ctx) => ctx.storage.put("billing_events", [["evt_OLD", Date.now()], ...Array.from({ length: MAX_EVENT_IDS - 1 }, (_, i) => [`evt_F${i}`, Date.now()])]));
+    expect(await json(await w.hook({}, { id: "evt_NEW", created: t }))).toEqual({ received: true, applied: true });
+    const ids = ((await storageOf(w)).billing_events as [string, number][]).map(([id]) => id);
+    expect(ids).toHaveLength(MAX_EVENT_IDS);
+    expect(ids).not.toContain("evt_OLD");
+    expect(ids.at(-1)).toBe("evt_NEW");
+    // The replay of the evicted one is not a duplicate by id, and does nothing: it is older than the state.
+    expect(await json(await w.hook({ status: "past_due" }, { id: "evt_OLD", created: t - 100 }))).toEqual({ received: true, applied: false });
+    expect(await w.view()).toMatchObject({ status: "active", limit: 5 });
+    expect(await audits(w)).toBe(2);
   });
 
   it("does not apply events to a tenant that is being deleted", async () => {

@@ -24,6 +24,7 @@ export const MAX_WEBHOOK_BYTES = 256 * 1024;
 const MAX_SIGNATURE_HEADER = 512;
 const STRIPE_TIMEOUT_MS = 10_000;
 const TENANT = /^[A-Za-z0-9_-]{1,64}$/;
+const EVT = /^evt_[A-Za-z0-9]{1,64}$/;
 const SUB = /^sub_[A-Za-z0-9]{1,64}$/;
 const CUS = /^cus_[A-Za-z0-9]{1,64}$/;
 
@@ -42,8 +43,23 @@ export interface Billing {
   grace_until?: number;
 }
 
+// Event ids already processed for a tenant, oldest first, with the time each was seen. Stripe delivers at least once and
+// retries for up to 3 days (live mode), so an id is remembered for a week; the list holds at most MAX_EVENT_IDS and drops
+// the oldest first, so it cannot grow without bound. A delivery whose id is remembered is a no-op whatever its timestamp.
+export type SeenEvents = ReadonlyArray<readonly [string, number]>;
+export const EVENT_TTL_MS = 7 * 24 * 3600_000;
+export const MAX_EVENT_IDS = 1000;
+
+// The list after `id` is processed at `now`, or null when `id` is already in it (and has not expired).
+export function remember(seen: SeenEvents | undefined, id: string, now: number, cap = MAX_EVENT_IDS): SeenEvents | null {
+  const live = seen?.filter(([, at]) => now - at < EVENT_TTL_MS) ?? [];
+  if (live.some(([e]) => e === id)) return null;
+  return [...live, [id, now] as const].slice(-cap);
+}
+
 // What one subscription event says about one tenant.
 export interface SubUpdate {
+  event: string; // Stripe's event id
   tenant: string;
   customer: string;
   subscription: string;
@@ -85,7 +101,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 // live), or one that is not shaped as expected or names no tenant, or none of our price. `seats` is the quantity of our
 // price only, so an item added in the portal cannot raise it.
 export function parseEvent(raw: unknown, priceId: string, live: boolean): SubUpdate | null {
-  if (!isObj(raw) || !SUB_EVENTS.includes(raw.type as string) || raw.livemode !== live) return null;
+  if (!isObj(raw) || !SUB_EVENTS.includes(raw.type as string) || raw.livemode !== live || typeof raw.id !== "string" || !EVT.test(raw.id)) return null;
   const sub = isObj(raw.data) ? raw.data.object : undefined;
   if (!isObj(sub) || typeof sub.id !== "string" || !SUB.test(sub.id) || typeof sub.customer !== "string" || !CUS.test(sub.customer)) return null;
   const tenant = isObj(sub.metadata) ? sub.metadata.tenant : undefined;
@@ -97,7 +113,7 @@ export function parseEvent(raw: unknown, priceId: string, live: boolean): SubUpd
     if (isObj(it) && isObj(it.price) && it.price.id === priceId && Number.isSafeInteger(it.quantity)) seats += Math.max(0, it.quantity as number);
   }
   if (seats < 1 || seats > MAX_SEATS) return null;
-  return { tenant, customer: sub.customer, subscription: sub.id, status: sub.status as SubStatus, seats, created: (raw.created as number) * 1000 };
+  return { event: raw.id, tenant, customer: sub.customer, subscription: sub.id, status: sub.status as SubStatus, seats, created: (raw.created as number) * 1000 };
 }
 
 const unhex = (s: string) => Uint8Array.from({ length: Math.ceil(s.length / 2) }, (_, i) => parseInt(s.slice(2 * i, 2 * i + 2), 16));
@@ -173,7 +189,8 @@ async function webhook(req: Request, env: Env): Promise<Response> {
   }
   const update = parseEvent(event, env.STRIPE_PRICE_ID, keyMode(env.STRIPE_SECRET_KEY, env.STRIPE_ALLOW_LIVE === "1") === "live");
   // 200 for anything we do not act on, so Stripe does not retry it; a failure inside throws and becomes a 500, which it does retry.
-  return json(200, { received: true, applied: update ? await tenantStub(env, update.tenant).applyBilling(update) : false });
+  const outcome = update ? await tenantStub(env, update.tenant).applyBilling(update) : null;
+  return json(200, { received: true, applied: outcome === "applied", ...(outcome === "duplicate" ? { duplicate: true } : {}) });
 }
 
 // The admin's side: the plan and seats in use, and the two hosted pages (Checkout to subscribe, the Portal to change

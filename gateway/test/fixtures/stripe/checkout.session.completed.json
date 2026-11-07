@@ -1,0 +1,58 @@
+{
+  "_fixture": {
+    "source": [
+      "https://docs.stripe.com/api/events/types",
+      "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json"
+    ],
+    "api_version": "2026-09-30.endive",
+    "recorded": "2026-11-07",
+    "kind": "composed from the published reference",
+    "note": "the Checkout session that created the subscription"
+  },
+  "event": {
+    "id": "evt_1CheckoutDone",
+    "object": "event",
+    "api_version": "2026-09-30.endive",
+    "created": 1790000100,
+    "data": {
+      "object": {
+        "id": "cs_test_a1Acme",
+        "object": "checkout.session",
+        "automatic_tax": {
+          "enabled": false,
+          "liability": null,
+          "status": null
+        },
+        "created": 1790000050,
+        "custom_fields": [],
+        "custom_text": {
+          "after_submit": null,
+          "shipping_address": null,
+          "submit": null,
+          "terms_of_service_acceptance": null
+        },
+        "expires_at": 1790086450,
+        "livemode": false,
+        "mode": "subscription",
+        "payment_method_types": [
+          "card"
+        ],
+        "payment_status": "paid",
+        "shipping_options": [],
+        "status": "complete",
+        "client_reference_id": "acme",
+        "customer": "cus_1Acme",
+        "subscription": "sub_1Acme",
+        "success_url": "https://dash.example.test/billing",
+        "cancel_url": "https://dash.example.test/billing"
+      }
+    },
+    "livemode": false,
+    "pending_webhooks": 1,
+    "request": {
+      "id": null,
+      "idempotency_key": null
+    },
+    "type": "checkout.session.completed"
+  }
+}

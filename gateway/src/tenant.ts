@@ -19,7 +19,7 @@ import {
   type Card,
   type Page,
 } from "./acl";
-import { limitOf, reduce, type Billing, type SubUpdate } from "./billing";
+import { limitOf, reduce, remember, type Billing, type SeenEvents, type SubUpdate } from "./billing";
 import { b64bytes, CHALLENGE_TTL_MS, connectMessage, randomChallenge, verifyBinding, verifyEd25519, type ConnectScope } from "./connect";
 import type { Env } from "./index";
 import type { Device } from "./device";
@@ -449,16 +449,23 @@ export class Tenant extends DurableObject<Env> {
     return (await this.ctx.storage.get<Billing>("billing"))?.customer ?? null;
   }
 
-  // Applies a verified Stripe subscription event (see reduce for what is ignored). Serialized with approvals.
-  applyBilling(u: SubUpdate): Promise<boolean> {
+  // Applies a verified Stripe subscription event (see reduce for what is ignored). Serialized with approvals. An event id
+  // already processed is a no-op ("duplicate") whatever its timestamp; the ids are kept in the tenant's storage (see
+  // remember for the bound), so a redelivery, a replay and two deliveries at once are all the same single event.
+  applyBilling(u: SubUpdate): Promise<"applied" | "ignored" | "duplicate"> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      if (await this.isDeleting()) return false;
-      const next = reduce(await this.ctx.storage.get<Billing>("billing"), u);
-      if (!next) return false;
-      // A redelivery of what is already recorded changes nothing and is not audited again.
-      if (JSON.stringify(next) === JSON.stringify(await this.ctx.storage.get("billing"))) return true;
-      await this.commit({ billing: next }, [], { action: "billing.put", actor: "stripe", subject: next.status, detail: { seats: next.seats } });
-      return true;
+      if (await this.isDeleting()) return "ignored";
+      const seen = remember(await this.ctx.storage.get<SeenEvents>("billing_events"), u.event, Date.now());
+      if (!seen) return "duplicate";
+      const cur = await this.ctx.storage.get<Billing>("billing");
+      const next = reduce(cur, u);
+      // An event that changes nothing (stale, another customer's, a repeat of what is recorded) is remembered and not audited.
+      if (!next || JSON.stringify(next) === JSON.stringify(cur)) {
+        await this.ctx.storage.put("billing_events", seen);
+        return "ignored";
+      }
+      await this.commit({ billing: next, billing_events: seen }, [], { action: "billing.put", actor: "stripe", subject: next.status, detail: { seats: next.seats } });
+      return "applied";
     });
   }
 

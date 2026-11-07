@@ -1,0 +1,32 @@
+{
+  "_fixture": {
+    "source": [
+      "https://docs.stripe.com/api/events/types",
+      "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json"
+    ],
+    "api_version": "2026-09-30.endive",
+    "recorded": "2026-11-07",
+    "kind": "composed from the published reference",
+    "note": "Stripe cancels the customer's subscriptions and sends their deleted events"
+  },
+  "event": {
+    "id": "evt_1CustDeleted",
+    "object": "event",
+    "api_version": "2026-09-30.endive",
+    "created": 1793000100,
+    "data": {
+      "object": {
+        "id": "cus_1Acme",
+        "object": "customer",
+        "deleted": true
+      }
+    },
+    "livemode": false,
+    "pending_webhooks": 1,
+    "request": {
+      "id": null,
+      "idempotency_key": null
+    },
+    "type": "customer.deleted"
+  }
+}
