@@ -180,8 +180,6 @@ jobs:
           - { label: go-10, part: "go:9/12" }
           - { label: go-11, part: "go:10/12" }
           - { label: go-12, part: "go:11/12" }
-          - { label: bisect-envelope, part: "go:1/24" }
-          - { label: bisect-frames, part: "go:13/24" }
           - { label: typescript, part: "ts" }
     steps:
       # Full history: the scope is the files changed since the merge base with the base branch.
