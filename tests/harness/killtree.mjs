@@ -2,23 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Ends a child process started by a test, with its descendants, on Windows (where there are no process groups).
-// `taskkill /pid N /T /F` ends whatever process holds the pid N now, and Windows reuses a pid as soon as its process
-// has gone. So: a child that has exited is never killed, the image behind the pid is read first and logged, and a
-// pid that now belongs to a Parley program is refused with a loud message (it is not the child this test started).
+// A child that has already exited is never killed: its pid may belong to another process by now, and Windows reuses
+// pids at once. Every kill is logged with the image behind the pid and what taskkill reports it ended (it names each
+// process of the tree), so that a process that dies for no visible reason can be matched to a kill by its time.
 import { spawnSync } from "node:child_process";
-
-const parley = /^parley(d|-cli)\.exe$/i;
 
 export function killTree(child, log = (m) => process.stderr.write(m + "\n")) {
   if (child.exitCode !== null || child.signalCode !== null) return false;
   const pid = String(child.pid);
   const q = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
   const image = (q.stdout ?? "").trim().split(",")[0]?.replace(/"/g, "") ?? "";
-  if (parley.test(image)) {
-    log(`[harness] REFUSED to taskkill pid ${pid}: it is ${image}, not the process this test started`);
-    return false;
-  }
-  log(`[harness] taskkill pid ${pid} (${image || "no such process"})`);
-  spawnSync("taskkill", ["/pid", pid, "/T", "/F"], { stdio: "ignore" });
+  const k = spawnSync("taskkill", ["/pid", pid, "/T", "/F"], { encoding: "utf8" });
+  log(`[harness] taskkill pid ${pid} (${image || "no such process"}): ${(k.stdout ?? "").replace(/\s+/g, " ").trim()}`);
   return true;
 }
