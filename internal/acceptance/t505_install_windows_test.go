@@ -25,6 +25,14 @@ import (
 
 const runKeyPath = `Software\Microsoft\Windows\CurrentVersion\Run`
 
+// killInstalled terminates the daemon that runs from exactly this path, and no other: other tests (and the node suite,
+// which runs this package's tests) have daemons of their own, which a kill by image name would end.
+func killInstalled(exe string) bool {
+	out, _ := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+		`$n = 0; Get-Process -Name parleyd -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '`+exe+`' } | ForEach-Object { Stop-Process -Id $_.Id -Force; $n++ }; $n`).Output()
+	return strings.TrimSpace(string(out)) != "0" && strings.TrimSpace(string(out)) != ""
+}
+
 func installScript(t *testing.T) string {
 	t.Helper()
 	p, err := filepath.Abs(filepath.Join("..", "..", "docs", "windows", "install.ps1"))
@@ -89,7 +97,7 @@ func TestWindowsInstallAutostartUninstall(t *testing.T) {
 			k.DeleteValue(runName)
 			k.Close()
 		}
-		exec.Command("taskkill", "/F", "/IM", "parleyd.exe", "/FI", "IMAGENAME eq parleyd.exe").Run()
+		killInstalled(filepath.Join(inst, "parleyd.exe"))
 	})
 	script := installScript(t)
 
@@ -142,8 +150,8 @@ func TestWindowsInstallAutostartUninstall(t *testing.T) {
 	}
 
 	// A terminated daemon leaves its lock file and socket; the next logon must start cleanly on them.
-	if out, err := exec.Command("taskkill", "/F", "/IM", "parleyd.exe").CombinedOutput(); err != nil {
-		t.Fatalf("taskkill: %v\n%s", err, out)
+	if !killInstalled(filepath.Join(inst, "parleyd.exe")) {
+		t.Fatal("no installed daemon to terminate")
 	}
 	for deadline := time.Now().Add(30 * time.Second); up.answers() && time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
 	}
