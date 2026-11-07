@@ -67,33 +67,11 @@ func NewCLI(cfg CLIConfig) (*CLI, error) {
 
 // Handle implements bot.Bot.
 func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, error) {
-	cmd := exec.Command(c.cfg.Command, c.cfg.Args...) // no shell, no PATH lookup (the path is absolute)
-	cmd.Env, cmd.Dir, cmd.WaitDelay = c.cfg.Env, c.cfg.Dir, reapDelay
-	prepare(cmd)
-	stdin, _ := cmd.StdinPipe()   // cannot fail: no Stdin is set and the command is not started
-	stdout, _ := cmd.StdoutPipe() // likewise
-	// The bot is registered before the daemon can see a connection from it, so it can never approve its own tasks (see botproc).
-	var kill func()
-	var err error
-	remove, serr := botproc.Default.Launch(func() (int, error) {
-		if err := cmd.Start(); err != nil {
-			return 0, err
-		}
-		kill, err = contain(cmd)
-		return cmd.Process.Pid, nil
-	})
-	if serr != nil {
-		return nil, errors.New("adapter: the bot command could not be started") // the OS text names the path
-	}
-	defer remove() // after the command is reaped (close runs first)
-	p := &cliPeer{cmd: cmd, id: t.ID, in: stdin, r: bufio.NewReaderSize(stdout, readBuffer), kill: kill}
-	defer p.close()
+	p, stop, err := startBot(ctx, c.cfg, t.ID, nil)
 	if err != nil {
-		_ = cmd.Process.Kill() // a bot that cannot be contained does not run
-		return nil, errors.New("adapter: the bot command could not be contained")
+		return nil, err
 	}
-	// Canceling (or the deadline) kills the command, which unblocks a read or write that is waiting on it.
-	defer context.AfterFunc(ctx, p.terminate)()
+	defer stop()
 	line := taskLine(t)
 	p.scrub = append(p.scrub, line)
 	if err := p.write(ctx, line); err != nil {
@@ -108,6 +86,56 @@ func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, er
 		}}
 	}
 	return converse(ctx, p, s, tc)
+}
+
+// startBot starts the command of cfg for one task, contained and registered (see botproc), and returns it with the
+// function that ends the task's use of it: the command is killed with everything it started, reaped and unregistered,
+// and the lines written to it are scrubbed. Canceling ctx (or its deadline) kills the command, which unblocks a read or
+// write that is waiting on it; onCancel, if given, does that itself (it must see to the kill) and stop waits for it. A
+// command that cannot be started or contained does not run.
+func startBot(ctx context.Context, cfg CLIConfig, id [16]byte, onCancel func(*cliPeer)) (*cliPeer, func(), error) {
+	cmd := exec.Command(cfg.Command, cfg.Args...) // no shell, no PATH lookup (the path is absolute)
+	cmd.Env, cmd.Dir, cmd.WaitDelay = cfg.Env, cfg.Dir, reapDelay
+	prepare(cmd)
+	stdin, _ := cmd.StdinPipe()   // cannot fail: no Stdin is set and the command is not started
+	stdout, _ := cmd.StdoutPipe() // likewise
+	// The bot is registered before the daemon can see a connection from it, so it can never approve its own tasks (see botproc).
+	var kill func()
+	var err error
+	remove, serr := botproc.Default.Launch(func() (int, error) {
+		if err := cmd.Start(); err != nil {
+			return 0, err
+		}
+		kill, err = contain(cmd)
+		return cmd.Process.Pid, nil
+	})
+	if serr != nil {
+		return nil, nil, errors.New("adapter: the bot command could not be started") // the OS text names the path
+	}
+	p := &cliPeer{cmd: cmd, id: id, in: stdin, r: bufio.NewReaderSize(stdout, readBuffer), kill: kill}
+	if err != nil {
+		_ = cmd.Process.Kill() // a bot that cannot be contained does not run
+		p.close()
+		remove()
+		return nil, nil, errors.New("adapter: the bot command could not be contained")
+	}
+	fired := make(chan struct{})
+	unhook := context.AfterFunc(ctx, func() {
+		defer close(fired)
+		if onCancel == nil {
+			p.terminate()
+			return
+		}
+		onCancel(p)
+	})
+	return p, func() {
+		started := !unhook()
+		p.close() // the command is reaped before it is unregistered
+		if started {
+			<-fired
+		}
+		remove()
+	}, nil
 }
 
 type cliPeer struct {

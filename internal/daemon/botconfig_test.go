@@ -51,6 +51,11 @@ func TestBotConfigIsValidatedAtParseTime(t *testing.T) {
 	if err := good(withTool(t, goodBot(t))); err != nil {
 		t.Fatalf("a valid tool-using bot: %v", err)
 	}
+	acp := goodBot(t)
+	acp.Adapter, acp.Dir = "acp", t.TempDir()
+	if err := good(acp); err != nil {
+		t.Fatalf("a valid ACP bot: %v", err)
+	}
 	owners := make([]string, maxAllowOwners+1)
 	for i := range owners {
 		owners[i] = "o@x.test"
@@ -59,6 +64,8 @@ func TestBotConfigIsValidatedAtParseTime(t *testing.T) {
 	for name, edit := range map[string]func(*BotConfig){
 		"no adapter":         func(b *BotConfig) { b.Adapter = "" },
 		"api adapter":        func(b *BotConfig) { b.Adapter = "api" },
+		"acp without dir":    func(b *BotConfig) { b.Adapter = "acp" },
+		"acp with tools":     func(b *BotConfig) { withTool(t, b).Adapter, b.Dir = "acp", t.TempDir() },
 		"relative command":   func(b *BotConfig) { b.Command = "bot" },
 		"relative dir":       func(b *BotConfig) { b.Dir = "d" },
 		"no owners":          func(b *BotConfig) { b.AllowOwners = nil },
@@ -146,6 +153,30 @@ func TestConfiguredBotIsWiredWithItsAllowlistAndOwnerCommands(t *testing.T) {
 		if !d.srv.Sensitive[m] {
 			t.Errorf("method %s is not sensitive", m)
 		}
+	}
+}
+
+// An ACP bot is built from the same configuration, with the same allowlist and owner commands, and is the bot the host runs.
+func TestACPBotIsWiredLikeACLIBot(t *testing.T) {
+	b := goodBot(t)
+	b.Adapter, b.Dir = "acp", t.TempDir()
+	d, err := newBotDaemon(t, b, func(deps *Deps) { deps.ToolRunner = nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.closeHost()
+	if d.host == nil || d.deps.Allow == nil || !d.deps.Allow("a@x.test") || d.deps.Allow("b@x.test") || d.srv.Methods["approve"] == nil {
+		t.Fatal("the ACP bot is not wired")
+	}
+	b = goodBot(t)
+	b.Adapter, b.Dir, b.ToolUsing = "acp", t.TempDir(), true
+	if d, err = newBotDaemon(t, b, func(deps *Deps) { deps.OS = "windows" }); !errors.Is(err, skill.ErrUnsupportedOS) || d != nil {
+		t.Fatalf("a tool-using ACP bot on Windows: %v", err)
+	}
+	b = goodBot(t)
+	b.Adapter, b.Dir, b.Env = "acp", t.TempDir(), []string{"NOEQUALS"}
+	if d, err = newBotDaemon(t, b, nil); !errors.Is(err, ErrConfig) || d != nil {
+		t.Fatalf("an unusable ACP command: %v", err)
 	}
 }
 

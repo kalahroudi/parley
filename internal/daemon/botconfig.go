@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -40,13 +41,13 @@ const (
 	maxOwnerLen    = 128
 )
 
-// BotConfig configures the bot. Only the CLI adapter is configurable here: the API adapter needs a bearer token, which
-// does not belong in a public configuration file.
+// BotConfig configures the bot. The CLI and ACP adapters are configurable here (a program the daemon runs per task); the
+// API adapter needs a bearer token, which does not belong in a public configuration file.
 type BotConfig struct {
-	Adapter string   `json:"adapter"` // "cli"
+	Adapter string   `json:"adapter"` // "cli" or "acp"
 	Command string   `json:"command"` // absolute path
 	Args    []string `json:"args,omitempty"`
-	Dir     string   `json:"dir,omitempty"` // the bot's working directory (absolute)
+	Dir     string   `json:"dir,omitempty"` // the bot's working directory (absolute); required for "acp", whose session is rooted in it
 	Env     []string `json:"env,omitempty"` // the whole environment of the bot ("NAME=value")
 	// AllowOwners are the owners (binding identities) whose callers may use the bot. Required.
 	AllowOwners []string `json:"allow_owners"`
@@ -73,8 +74,11 @@ type ToolConfig struct {
 }
 
 func (b *BotConfig) validate() error {
-	if b.Adapter != "cli" {
-		return errors.New(`bot.adapter must be "cli"`)
+	if b.Adapter != "cli" && b.Adapter != "acp" {
+		return errors.New(`bot.adapter must be "cli" or "acp"`)
+	}
+	if b.Adapter == "acp" && (b.Dir == "" || len(b.Tools) > 0) {
+		return errors.New(`bot.adapter "acp" needs bot.dir and takes no bot.tools (an ACP agent has no way to ask the daemon for one)`)
 	}
 	if !filepath.IsAbs(b.Command) || (b.Dir != "" && !filepath.IsAbs(b.Dir)) {
 		return errors.New("bot.command and bot.dir must be absolute paths")
@@ -177,7 +181,7 @@ func (d *Daemon) allowListed(owner string) bool {
 	return false
 }
 
-// initBot builds the configured bot: the CLI adapter, its tools if any, the approval gate and the host, and registers the
+// initBot builds the configured bot: the CLI or ACP adapter, its tools if any, the approval gate and the host, and registers the
 // owner's commands. It does nothing without a bot in the configuration.
 func (d *Daemon) initBot() error {
 	bc := d.cfg.Bot
@@ -209,12 +213,27 @@ func (d *Daemon) initBot() error {
 			d.srv.Methods[name] = m
 		}
 	}
-	cli, err := adapter.NewCLI(adapter.CLIConfig{Command: bc.Command, Args: bc.Args, Dir: bc.Dir, Env: bc.Env, Tools: tools})
+	var program bot.Bot
+	if bc.Adapter == "acp" {
+		b, err := d.newACPBroker()
+		if err != nil {
+			return err
+		}
+		for name, m := range skill.ToolMethods(b) {
+			d.srv.Methods[name] = m
+		}
+		program, err = adapter.NewACP(adapter.ACPConfig{Command: bc.Command, Args: bc.Args, Dir: bc.Dir, Env: bc.Env, Gate: skill.Bridge(b)})
+		if err != nil {
+			return fmt.Errorf("%w: bot command, directory or environment", ErrConfig)
+		}
+	} else {
+		program, err = adapter.NewCLI(adapter.CLIConfig{Command: bc.Command, Args: bc.Args, Dir: bc.Dir, Env: bc.Env, Tools: tools})
+	}
 	if err != nil {
 		return fmt.Errorf("%w: bot command, directory or environment", ErrConfig)
 	}
 	// Gate fails only for a skill Check refused (checked above), without a bot, or with an unknown mode (Check again).
-	gate, _ := skill.Gate(cli, sk, goos, approval.Config{Now: d.deps.Now, Audit: d.auditApproval})
+	gate, _ := skill.Gate(program, sk, goos, approval.Config{Now: d.deps.Now, Audit: d.auditApproval})
 	for name, m := range gate.Methods() {
 		d.srv.Methods[name] = m
 	}
@@ -236,6 +255,20 @@ func (d *Daemon) newBroker(list []toolgate.Tool) (*toolgate.Broker, error) {
 		}
 	}
 	return toolgate.New(toolgate.Config{Manifest: m, Runner: runner, Now: d.deps.Now, Audit: d.auditTool})
+}
+
+// newACPBroker builds the broker through which an ACP agent's permission requests and file operations reach the owner. Its
+// tools only ask: the runner does nothing, the adapter does what the owner allowed (and only inside the agent's directory).
+func (d *Daemon) newACPBroker() (*toolgate.Broker, error) {
+	m, _ := toolgate.NewManifest([]toolgate.Tool{{Name: adapter.ToolACPPermission}, {Name: adapter.ToolACPRead}, {Name: adapter.ToolACPWrite}}) // valid names
+	return toolgate.New(toolgate.Config{Manifest: m, Runner: askOnly{}, Now: d.deps.Now, Audit: d.auditTool})
+}
+
+// askOnly is the runner of the ACP broker: an allowed request needs nothing run.
+type askOnly struct{}
+
+func (askOnly) Run(context.Context, toolgate.Tool, []string) (toolgate.Output, error) {
+	return toolgate.Output{}, nil
 }
 
 // auditApproval logs one step of a task's approval: the task id and a state, nothing else.

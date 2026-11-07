@@ -195,3 +195,51 @@ func TestToolMethods(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+type askOnlyRunner struct{}
+
+func (askOnlyRunner) Run(context.Context, toolgate.Tool, []string) (toolgate.Output, error) {
+	return toolgate.Output{}, nil
+}
+
+// What the ACP adapter asks the owner about goes through the same broker and bridge as a tool: the three names it uses are
+// in a manifest, an approval comes back as the outcome the adapter reads as yes, and a denial, a request that breaks the
+// manifest (an argument that is not printable) or a name that is not there comes back as something else.
+func TestACPRequestsGoThroughTheBridgeAndOnlyAnApprovalIsYes(t *testing.T) {
+	if string(toolgate.OutcomeOK) != adapter.OutcomeOK {
+		t.Fatalf("the adapter reads %q as yes, the gate says %q", adapter.OutcomeOK, toolgate.OutcomeOK)
+	}
+	m, err := toolgate.NewManifest([]toolgate.Tool{{Name: adapter.ToolACPPermission}, {Name: adapter.ToolACPRead}, {Name: adapter.ToolACPWrite}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := toolgate.New(toolgate.Config{Manifest: m, Runner: askOnlyRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	br := skill.Bridge(b)
+	task := bot.Task{ID: [16]byte{7}, Expiry: time.Now().Add(time.Hour)}
+	for _, tool := range []string{adapter.ToolACPPermission, adapter.ToolACPRead, adapter.ToolACPWrite} {
+		for _, approve := range []bool{true, false} {
+			done := make(chan adapter.ToolReply, 1)
+			waited := make(chan struct{})
+			go func() {
+				r, _ := br.Call(context.Background(), task, tool, []string{"edit", "x"}, func() { close(waited) })
+				done <- r
+			}()
+			<-waited
+			p := b.Pending()[0]
+			if err := b.Decide(task.ID, p.Call, p.Digest, approve, ""); err != nil {
+				t.Fatal(err)
+			}
+			if r := <-done; (r.Outcome == adapter.OutcomeOK) != approve {
+				t.Fatalf("%s approve=%v: %+v", tool, approve, r)
+			}
+		}
+	}
+	br.End(task.ID)
+	task.ID = [16]byte{8}
+	if r, _ := br.Call(context.Background(), task, adapter.ToolACPRead, []string{"a\x07b"}, nil); r.Outcome == adapter.OutcomeOK {
+		t.Fatal("an argument that is not printable reached the owner")
+	}
+}

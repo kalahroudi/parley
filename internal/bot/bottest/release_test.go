@@ -17,7 +17,9 @@ func TestNoShippedProgramLinksBottest(t *testing.T) {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
 	for _, p := range strings.Fields(string(out)) {
-		if strings.HasSuffix(p, "/internal/bot/bottest") || p == "testing" {
+		// The ACP SDK is the conformance tests' reference peer (a test-only dependency), the adaptertest package their agents.
+		if strings.HasSuffix(p, "/internal/bot/bottest") || strings.HasSuffix(p, "/internal/adapter/adaptertest") ||
+			strings.HasPrefix(p, "github.com/coder/acp-go-sdk") || p == "testing" {
 			t.Fatalf("a shipped program depends on %s", p)
 		}
 	}
