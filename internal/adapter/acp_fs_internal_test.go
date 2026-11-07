@@ -5,11 +5,11 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -129,10 +129,8 @@ func TestFSEdges(t *testing.T) {
 		return convIn(dir, g).fs(context.Background(), []byte(params), write)
 	}
 	big := func(n int) string {
-		return `{"sessionId":"s","path":"` + filepath.ToSlash(filepath.Join(dir, "w")) + `","content":"` + strings.Repeat("a", n) + `"}`
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("paths in JSON need escaping on Windows; the external tests cover them")
+		path, _ := json.Marshal(filepath.Join(dir, "w"))
+		return `{"sessionId":"s","path":` + string(path) + `,"content":"` + strings.Repeat("a", n) + `"}`
 	}
 	g := &ownerSays{ok: true}
 	if _, e, err := run(g, big(MaxACPFile), true); e != nil || err != nil || g.asked != 1 {
