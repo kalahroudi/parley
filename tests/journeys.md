@@ -41,11 +41,39 @@ Not covered by this journey, and why:
 
 ## T509 journeys A to L on all three systems: state
 
-T509 is **not complete**. `tests/journeys-e2e.test.mjs` (macOS, Linux and Windows) runs JH-01 only. The other phase 5 rows cannot pass yet, and each blocked row has a named pending test in `tests/pending-t509.test.mjs` that fails CI once the task that builds the missing product is ticked:
+**T509 stays open.** Only JH-01 is an executable journey so far. Every other phase 5 journey, and the unblocked earlier ones, is a named pending test in `tests/pending-t509.test.mjs` that fails CI once its task is ticked (ticking T509 fails the nine unblocked ones until they are written).
 
-- JA-02 and JL-01 (admin page, setup flow, install command, per-bot call log, kill-switch): T501.
-- JA-02 and JK-01 (free tier of 3 devices, seat limit, subscription): T502, T510.
-- JJ-01 (auto-update from the pinned key, pin-to-version): T504.
-- JB-02 (install channels): T504, T511.
+### JH-01 (pods): `tests/journeys-e2e.test.mjs`
 
-Rows with no product blocker that still have no journey test, to be written before T509 is ticked: JB-01 (`login --root` through SSO to a device that shows online), JC-01, JD-01, JE-01, JF-01, JF-02, JG-01 (the five-minute timeout and the reference-bot cases), JG-02 (macOS and Linux only; on Windows it must show the skill refused) and JI-01 (the gateway cascade and the 24 h session limit are tested in `gateway/test/offboarding.test.ts`; the 72 h grace and a daemon-level journey are not).
+Real gateway (`wrangler dev`), real `parley-cli`, `parleyd` and the botd harness; no pseudo-terminal, so it is the same test on all three systems. The test holds the root key and plays the admin (the admin's daemon does not sign bindings yet). It asserts: the pod enrolls under the named service owner; the token is never printed; the signed binding is stored; a reused token enrolls nothing (bounded at 30 s, and it fails if the second enrollment waits for approval); a second pod of the same owner finds and calls the first pod's bot; the result is marked untrusted; the canary scan of the gateway's storage and log and of both daemons' output is clean. The scan runs after every process has stopped (on Windows a running gateway holds its storage files open, which failed the first CI run with EBUSY).
+
+Last run on head 28ca61a (CI, all 22 checks green):
+
+| System | Result | Test time |
+|---|---|---|
+| macOS (macos-latest) | pass | 17.7 s |
+| Linux (ubuntu-latest) | pass | 16.3 s |
+| Windows (windows-latest) | pass | 24.3 s |
+
+Runtime budget: the test's own timeout is 300 s (about 12 times the slowest run); it runs inside the `test` job of each OS, which has its own job limit and is not near it because of this test. Ports are ephemeral and every process, temp dir and gateway state is removed in `finally`.
+
+Mutation spot-check (run on macOS; each change reverted afterwards):
+
+| Defence disabled | Result |
+|---|---|
+| `gateway/src/tenant.ts`: a used enrollment token is not deleted | red: "a used token was accepted again: the second enrollment is waiting for approval" |
+| `gateway/src/tenant.ts`: the pod's owner is not taken from its token | red: "the pod enrolls under the named service owner, not under a person" |
+
+The canary scan is checked by a planted control in the same test. Not mutation-checked here: the daemon-side checks (covered by the Go tests and `scripts/malgw-mutations.sh`).
+
+### Not yet executable tests, unblocked (pending on T509)
+
+JB-01, JC-01, JD-01, JE-01, JF-01, JF-02, JG-01, JG-02 (macOS and Linux only; on Windows it must show the skill refused) and JI-01 (the gateway cascade and the 24 h session limit are tested in `gateway/test/offboarding.test.ts`; the daemon-level journey and the 72 h grace are not; T503 is also open).
+
+### Blocked by unbuilt tasks (pending on that task)
+
+- JA-02: T501 (admin page, setup flow, install command) and T502 (free tier of 3 devices).
+- JB-02: T504 (update and channel verification) and T511 (install channels).
+- JJ-01: T504.
+- JK-01: T502 and T510.
+- JL-01: T501 (per-bot call log, kill-switch).
