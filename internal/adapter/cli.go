@@ -39,6 +39,9 @@ type CLIConfig struct {
 	// Env is the whole environment of the command ("NAME=value"). The daemon's own environment, which may hold
 	// credentials, is never inherited.
 	Env []string
+	// Tools, if set, runs the tools the bot asks for (only after the owner approved them, see internal/toolgate). Without
+	// it a request for a tool is a protocol error and ends the task: the bot is tool-less.
+	Tools Tools
 }
 
 // CLI is a bot run as a child process per task: the task goes to its standard input and its answers come back on its
@@ -96,7 +99,15 @@ func (c *CLI) Handle(ctx context.Context, t bot.Task, s bot.Session) ([]byte, er
 	if err := p.write(ctx, line); err != nil {
 		return nil, err
 	}
-	return converse(ctx, p, s)
+	var tc *toolConv
+	if c.cfg.Tools != nil {
+		defer c.cfg.Tools.End(t.ID)
+		tc = &toolConv{tools: c.cfg.Tools, task: t, send: func(ctx context.Context, line []byte) error {
+			p.scrub = append(p.scrub, line)
+			return p.write(ctx, line)
+		}}
+	}
+	return converse(ctx, p, s, tc)
 }
 
 type cliPeer struct {
@@ -141,13 +152,21 @@ func (p *cliPeer) answer(ctx context.Context, turn int, content []byte) error {
 // close ends the exchange: the command is killed whether or not it finished (a final message has been delivered, or
 // the task is over), then reaped, so no process, pipe or goroutine outlives the task.
 func (p *cliPeer) close() {
-	p.in.Close()
+	if p.in != nil {
+		p.in.Close()
+	}
+	_ = p.reap()
+	for _, l := range p.scrub {
+		clear(l)
+	}
+}
+
+// reap kills the command and everything it started (once), marks it reaped so that its pid is never signaled again, and
+// waits for it. It returns Wait's error.
+func (p *cliPeer) reap() error {
 	p.terminate()
 	p.mu.Lock()
 	p.done = true
 	p.mu.Unlock()
-	_ = p.cmd.Wait()
-	for _, l := range p.scrub {
-		clear(l)
-	}
+	return p.cmd.Wait()
 }

@@ -14,4 +14,4 @@ SYSTEM and Administrators, so another standard user should not be able to open i
 .\windows.ps1 -Bot C:\path\to\bot.exe
 ```
 
-Tool-using skills are unsupported on Windows until a sandbox exists (T507).
+Tool-using skills are unsupported on Windows until a sandbox exists; `internal/skill` refuses them there, whatever the approval mode. On Linux and macOS the tools a skill declares are run in this kind of sandbox by the daemon itself (`internal/toolrun`); the profiles here are for the bot's own process.

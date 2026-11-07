@@ -23,6 +23,7 @@ package acceptance
 // sandbox covers those; the profiles are in docs/sandbox and the macOS one is run against the daemon's socket below.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -118,6 +119,31 @@ func t406Bot(mode string) {
 		res, err := cli.Handle(ctx, t406Task, &countSession{})
 		b, _ := json.Marshal(hostReport{HostHasTerminal: ttyErr == nil, Bot: string(res), Failed: err != nil})
 		os.WriteFile(os.Getenv("PARLEY_T406_OUT"), b, 0o600)
+	case "gullible": // a bot that does what the task text says: it asks for the tool that text names after @@TOOL@@
+		r := bufio.NewReaderSize(os.Stdin, 1<<22)
+		line, _ := r.ReadBytes('\n')
+		var task struct{ Content []byte }
+		_ = json.Unmarshal(line, &task)
+		_, after, found := strings.Cut(string(task.Content), "@@TOOL@@")
+		if !found {
+			adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: []byte("no tool requested")})
+			return
+		}
+		var req struct {
+			Tool string   `json:"tool"`
+			Args []string `json:"args"`
+		}
+		_ = json.NewDecoder(strings.NewReader(after)).Decode(&req)
+		args, _ := json.Marshal(req.Args)
+		fmt.Printf(`{"type":"tool","tool":%q,"args":%s}`+"\n", req.Tool, args)
+		reply, _ := r.ReadBytes('\n')
+		adaptertest.WriteLine(os.Stdout, adaptertest.OutLine{Type: "result", Content: bytes.TrimSpace(reply)})
+	case "toolwrite": // a tool: writes the file named by its first argument in its working directory
+		if err := os.WriteFile(os.Args[1], []byte("ran"), 0o600); err != nil {
+			fmt.Print("write failed")
+			os.Exit(1)
+		}
+		fmt.Print("wrote ", os.Args[1])
 	case "noline": // endless output without a newline
 		buf := []byte(strings.Repeat("A", 1<<16))
 		for {

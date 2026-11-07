@@ -32,6 +32,7 @@ import (
 	"github.com/kalahroudi/parley/internal/revocation"
 	"github.com/kalahroudi/parley/internal/root"
 	"github.com/kalahroudi/parley/internal/supervisor"
+	"github.com/kalahroudi/parley/internal/toolgate"
 	"github.com/kalahroudi/parley/internal/trust"
 	"github.com/kalahroudi/parley/internal/tunnel"
 )
@@ -98,6 +99,10 @@ type Deps struct {
 	Allow     func(owner string) bool
 	OnInbound func(pipeline.Inbound)
 	OnUpdate  func(pipeline.Update)
+	// OS and ToolRunner replace the operating system's name and the tool runner (internal/toolrun) in tests of the
+	// configured bot (botconfig.go); both are empty in production.
+	OS         string
+	ToolRunner toolgate.Runner
 	// AllowUnlockedMemory lets the pipeline run when the OS will not lock its key
 	// memory in RAM (a container without the capability). Prekeys could then be
 	// swapped out; the default refuses to start the pipeline instead.
@@ -196,8 +201,12 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	}
 	d.srv = &localsock.Server{Log: deps.Log, UID: os.Geteuid(), Methods: map[string]localsock.Method{"status": d.status},
 		// Approving or denying a task is the owner's alone: a process that belongs to a bot this daemon started is refused (see botproc).
-		Sensitive: map[string]bool{"approve": true, "deny": true}, Guard: botGuard(botproc.Default)}
+		Sensitive: map[string]bool{"approve": true, "deny": true, "tool_approve": true, "tool_deny": true, "tool_revoke": true}, Guard: botGuard(botproc.Default)}
 	d.initCaller()
+	if err := d.initBot(); err != nil {
+		keystore.Zero(signer)
+		return nil, err
+	}
 	d.initTestBot()
 	return d, nil
 }

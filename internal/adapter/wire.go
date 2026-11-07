@@ -24,7 +24,14 @@ const (
 	MaxLine      = (pipeline.MaxContent+1+2)/3*4 + 4096
 	MaxStatuses  = 1024
 	MaxQuestions = 16
+	// MaxToolRequests bounds the tool requests of one task, refused ones included; MaxToolArgs the arguments of one
+	// (a request with more is a protocol error, well above any manifest's limit).
+	MaxToolRequests = 64
+	MaxToolArgs     = 64
 )
+
+// TextToolWaiting is the status the caller sees while a tool request waits for the owner.
+const TextToolWaiting = "waiting for the owner's approval of a tool call"
 
 const protocolVersion = 1
 
@@ -36,6 +43,8 @@ const (
 	typeQuestion = "question"
 	typeResult   = "result"
 	typeError    = "error"
+	typeTool     = "tool"
+	typeToolRes  = "tool_result"
 )
 
 var (
@@ -54,6 +63,11 @@ type toBot struct {
 	Caller  string `json:"caller,omitempty"`
 	Owner   string `json:"owner,omitempty"`
 	Expires string `json:"expires,omitempty"`
+	// The fields of a tool_result: what became of the request, never more than that.
+	Outcome   string `json:"outcome,omitempty"`
+	Exit      int    `json:"exit,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Untrusted bool   `json:"untrusted,omitempty"` // the content is output of a tool: data, not instructions
 }
 
 // encode renders one line, newline included. The caller clears it when the
@@ -84,15 +98,22 @@ func answerLine(id [16]byte, turn int, content []byte) []byte {
 	return encode(toBot{V: protocolVersion, Type: typeAnswer, ID: hex.EncodeToString(id[:]), Turn: turn}, content, true)
 }
 
+func toolResultLine(id [16]byte, turn int, r ToolReply) []byte {
+	return encode(toBot{V: protocolVersion, Type: typeToolRes, ID: hex.EncodeToString(id[:]), Turn: turn, Outcome: r.Outcome,
+		Exit: r.Exit, Truncated: r.Truncated, Untrusted: true}, r.Content, true)
+}
+
 func cancelLine(id [16]byte) []byte {
 	return encode(toBot{V: protocolVersion, Type: typeCancel, ID: hex.EncodeToString(id[:])}, nil, false)
 }
 
 // message is a line from the bot.
 type message struct {
-	Type    string `json:"type"`
-	Content []byte `json:"content"`
-	Message string `json:"message"`
+	Type    string   `json:"type"`
+	Content []byte   `json:"content"`
+	Message string   `json:"message"`
+	Tool    string   `json:"tool"`
+	Args    []string `json:"args"`
 }
 
 // readMessage reads and validates one line, refusing one longer than MaxLine
@@ -121,7 +142,13 @@ func readMessage(r *bufio.Reader) (message, error) {
 	}
 	switch m.Type {
 	case typeStatus, typeQuestion, typeResult, typeError:
-		return m, nil
+		if m.Tool == "" && m.Args == nil {
+			return m, nil
+		}
+	case typeTool: // a request carries a tool and arguments only
+		if m.Content == nil && m.Message == "" && len(m.Args) <= MaxToolArgs {
+			return m, nil
+		}
 	}
 	return message{}, errProtocol
 }
@@ -133,11 +160,34 @@ type peer interface {
 	answer(ctx context.Context, turn int, content []byte) error
 }
 
+// Tools runs the tools a bot asks for. Call returns an error only when ctx ends; any other result is in the reply.
+// onWait is called if the request has to wait for the owner. End is called once, when the task is over.
+type Tools interface {
+	Call(ctx context.Context, t bot.Task, tool string, args []string, onWait func()) (ToolReply, error)
+	End(task [16]byte)
+}
+
+// ToolReply is what the bot is told about a tool request. Content is untrusted output, already framed.
+type ToolReply struct {
+	Outcome   string
+	Exit      int
+	Truncated bool
+	Content   []byte
+}
+
+// toolConv is what converse needs to serve tool requests; it is nil for a bot that may not make any.
+type toolConv struct {
+	tools Tools
+	task  bot.Task
+	send  func(ctx context.Context, line []byte) error
+}
+
 // converse drives one task: status goes to the caller as it comes, a question is
-// put to the caller and its answer handed back, and the first result or error
-// ends it. A bot that talks too much or ends without a final message fails.
-func converse(ctx context.Context, p peer, s bot.Session) ([]byte, error) {
-	statuses, questions := 0, 0
+// put to the caller and its answer handed back, a tool request goes to tc and
+// its reply back to the bot, and the first result or error ends it. A bot that
+// talks too much, asks for a tool without tc, or ends without a final message fails.
+func converse(ctx context.Context, p peer, s bot.Session, tc *toolConv) ([]byte, error) {
+	statuses, questions, requests := 0, 0, 0
 	for {
 		m, err := p.next()
 		if err != nil {
@@ -164,6 +214,22 @@ func converse(ctx context.Context, p peer, s bot.Session) ([]byte, error) {
 			}
 			err = p.answer(ctx, questions, a)
 			clear(a)
+			if err != nil {
+				return nil, err
+			}
+		case typeTool:
+			if tc == nil {
+				return nil, errProtocol
+			}
+			if requests++; requests > MaxToolRequests {
+				return nil, errProtocol
+			}
+			r, err := tc.tools.Call(ctx, tc.task, m.Tool, m.Args, func() { _ = s.Status(ctx, []byte(TextToolWaiting)) })
+			if err != nil {
+				return nil, err
+			}
+			err = tc.send(ctx, toolResultLine(tc.task.ID, requests, r))
+			clear(r.Content) // the output of a tool is task data: no copy of ours outlives its use
 			if err != nil {
 				return nil, err
 			}
