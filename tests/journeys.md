@@ -19,7 +19,7 @@ Status is `planned` until the test exists and passes, then `passing`. Update thi
 | F Not-happy paths | JF-02 | 4 | planned | Recipient restart loses keys and resend succeeds; caller disconnected in Strict; revocation list too old refuses send |
 | G Approval | JG-01 | 4 | planned | `none` runs tool-less skills; `owner` waits for `parley-cli approve <id>`; no answer in 5 min is REJECTED |
 | G Approval | JG-02 | 5 | planned | Approval-gated tool-using skill is labeled and runs only after approval, with the reference reviewer bot |
-| H Pods | JH-01 | 5 | planned | Single-use token enrolls a headless device under a named service owner; binding signed by the admin's daemon; token reuse fails |
+| H Pods | JH-01 | 5 | passing | Single-use token enrolls a headless device under a named service owner; binding signed by the admin's daemon; token reuse fails |
 | I Offboarding | JI-01 | 5 | planned | Deactivation updates the revocation list, closes sockets, cancels tasks, hides bots; IdP re-validation at 24 h with 72 h grace |
 | J Updates | JJ-01 | 5 | planned | Auto-update accepts a release signed by the pinned key, rejects any other; pin-to-version holds; protocol version in handshake |
 | K Billing | JK-01 | 5 | planned | Stripe test-mode Checkout and Portal; seat limit blocks only new enrollment; live tunnels are never cut |
@@ -38,3 +38,14 @@ Not covered by this journey, and why:
 - A task in flight when its recipient restarts: the caller is not told; the task stays WORKING until it expires or is canceled (the journey cancels it). Whether the caller should be told is a product question for the author.
 - The approval timeout (JG-01, "no answer in 5 min is REJECTED"): the gate's timeout is fixed at five minutes and the journey would wait that long; the Go tests cover it (`internal/approval`). Approval itself is in the journey, see above. JG-01 stays `planned` until the timeout and the reference-bot cases have a journey test.
 - Queued retention with a dropped connection: `make queued-ttl` (about 17 minutes; `.github/workflows/queued-ttl.yml` runs it nightly and on demand on macOS and Linux, not as a required check).
+
+## T509 journeys A to L on all three systems: state
+
+T509 is **not complete**. `tests/journeys-e2e.test.mjs` (macOS, Linux and Windows) runs JH-01 only. The other phase 5 rows cannot pass yet, and each blocked row has a named pending test in `tests/pending-t509.test.mjs` that fails CI once the task that builds the missing product is ticked:
+
+- JA-02 and JL-01 (admin page, setup flow, install command, per-bot call log, kill-switch): T501.
+- JA-02 and JK-01 (free tier of 3 devices, seat limit, subscription): T502, T510.
+- JJ-01 (auto-update from the pinned key, pin-to-version): T504.
+- JB-02 (install channels): T504, T511.
+
+Rows with no product blocker that still have no journey test, to be written before T509 is ticked: JB-01 (`login --root` through SSO to a device that shows online), JC-01, JD-01, JE-01, JF-01, JF-02, JG-01 (the five-minute timeout and the reference-bot cases), JG-02 (macOS and Linux only; on Windows it must show the skill refused) and JI-01 (the gateway cascade and the 24 h session limit are tested in `gateway/test/offboarding.test.ts`; the 72 h grace and a daemon-level journey are not).
