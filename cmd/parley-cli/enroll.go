@@ -18,6 +18,7 @@ import (
 	"github.com/kalahroudi/parley/internal/daemon"
 	"github.com/kalahroudi/parley/internal/enroll"
 	"github.com/kalahroudi/parley/internal/logx"
+	"github.com/kalahroudi/parley/internal/update"
 )
 
 // tools are the parts of login and enroll that touch the outside world; tests replace them.
@@ -26,10 +27,11 @@ type tools struct {
 	enroll   func(context.Context, enroll.Options) (enroll.Result, error)
 	sessions enroll.SessionStore
 	open     func(string) error
+	updater  func(pol daemon.UpdatePolicy, stateDir string) (*update.Updater, error)
 }
 
 func defaultTools() tools {
-	return tools{login: enroll.Login, enroll: enroll.Enroll, sessions: enroll.KeyringSessions{KR: OSKeyring{}}, open: openBrowser}
+	return tools{login: enroll.Login, enroll: enroll.Enroll, sessions: enroll.KeyringSessions{KR: OSKeyring{}}, open: openBrowser, updater: defaultUpdater}
 }
 
 // openBrowser shows url in the system browser. The url is the gateway's login address built from validated parts.

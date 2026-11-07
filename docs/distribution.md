@@ -1,8 +1,7 @@
 # Self-update
 
-**Status: updater building blocks, not yet wired, not enabled.** `internal/update` is library code only. Nothing in
-`parleyd` or `parley-cli` calls it, so no installed program updates itself today. What is still owed is listed at the
-end of this page.
+**Status:** `parleyd` checks for updates in the background and `parley-cli update` checks and applies them, both
+through `internal/update`. What is still owed is at the end of this page.
 
 Releases are signed with the project's own Ed25519 key (minisign format). Its public half is `release/release.pub`
 and is compiled into the binaries (`release/key.go`); nothing fetched at run time can replace it.
@@ -34,12 +33,6 @@ The transport (GitHub, a mirror) is untrusted: downloads are size-limited and re
 and `go install` builds have no release version and are never replaced; files owned by a package manager
 (`/usr/bin`, Homebrew's Cellar, Nix, Snap) are left to it (`update.Locate`).
 
-**Not done yet (tracked by `TestPending_T504WiringAndChannels`):** the daemon's background check, `parley-cli
-update`, the Homebrew formula and tap, the Debian package and apt repository. The new version would run from the
-next start: the updater does not restart a process.
-There is no operator opt-out yet; it is owed by the wiring above. An attacker who blocks the network can keep a device on an old version until
-the last manifest it saw expires; the gateway's protocol-version check bounds that too.
-
 ## Configuration (operator opt-out and pin)
 
 In `config.json` (read by `parleyd` and `parley-cli`), all optional:
@@ -60,5 +53,31 @@ The environment variable `PARLEY_UPDATE` (`auto`, `check` or `off`) lets an oper
 unit or container without editing the file. It only tightens: `off` beats everything, `check` beats `auto`, and
 it can never turn on what the configuration turned off. A value it does not understand means `off`.
 
-This is the configuration and its resolution (`daemon.Config.Policy`); the background component and the CLI that
-follow it come next.
+## Running updates
+
+- **The daemon** (`mode` auto or check) runs a cycle shortly after start (a random delay up to 5 minutes) and then
+  every `interval`. In `auto` it installs a verified newer release; in `check` it only records that one exists. The
+  new version is on disk and runs from the next start of `parleyd`: the daemon does not own the service manager,
+  so the log says "update installed; restart parleyd to run it". Logs carry the component, a version
+  (`v1-2-3`) and a fixed reason code; never a URL, path or message from the network. The last cycle is recorded in
+  `update-status.json` in the state directory (state, versions, reason code).
+- **`parley-cli update status`** prints the version, the policy (mode, pin, mirror) and the last recorded cycle.
+  **`check`** verifies the signed feed and reports what is available; **`apply`** installs a verified newer release;
+  `-version vX.Y.Z` selects exactly one version (older included, as a pin does). `off` (file or environment)
+  refuses `check` and `apply` before anything is built or contacted. A `config.json` that exists but is invalid stops
+  the command, so a broken file never silently drops a pin or an opt-out.
+- **Nothing is installed before verification.** The install step only accepts the release object that the check
+  returns after the signature, expiry, version and checksum checks.
+- **Restart safety.** Before swapping, the updater writes a journal naming the programs. If the process is killed
+  or the machine loses power in the middle, the next cycle (daemon or CLI) puts every program that has a `.old`
+  file beside it back, so the two programs are the same old version again, and tries again later; staged downloads
+  are deleted. The daemon and `parley-cli` hold a lock in the state directory, so they never swap at once.
+- **A running program is replaced** by renaming it aside first, which works on Windows (a running `.exe` cannot be
+  overwritten or deleted but can be renamed); the process keeps running the old file, and the leftover `.old` is
+  removed by a later cycle once it has exited.
+- **Never as another user.** See the install directory rules above; the effective user must own the install.
+
+**Not done yet (tracked by `TestPending_T504WiringAndChannels`):** the Homebrew tap and the apt repository as
+scripted publishing steps, the JJ-01 journey (T509) and the fresh-machine checks (T511). An attacker who blocks the
+network can keep a device on an old version until the last manifest it saw expires; the gateway's protocol-version
+check bounds that too.

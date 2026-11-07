@@ -35,6 +35,7 @@ import (
 	"github.com/kalahroudi/parley/internal/toolgate"
 	"github.com/kalahroudi/parley/internal/trust"
 	"github.com/kalahroudi/parley/internal/tunnel"
+	"github.com/kalahroudi/parley/internal/update"
 )
 
 // ErrAlreadyRunning means another parleyd holds this device's instance lock.
@@ -110,6 +111,15 @@ type Deps struct {
 	// Supervisor tuning (tests); zero values use the defaults. SweepEvery is how
 	// often the pipeline ends tasks that ran out of time.
 	MinBackoff, ShutdownTimeout, SweepEvery time.Duration
+	// Self-update (updater.go). Version is the running release (parleyd's -X main.version); empty or "dev" means a
+	// source build, which never updates itself. Getenv reads the operator's PARLEY_UPDATE (default os.Getenv),
+	// Executable finds the running file (default os.Executable). Updater replaces the updater built from them and
+	// UpdateEvery the first delay and the interval; both are for tests.
+	Version     string
+	Getenv      func(string) string
+	Executable  func() (string, error)
+	Updater     *update.Updater
+	UpdateEvery time.Duration
 }
 
 // Daemon is one parleyd. Create it with New, register Methods with Handle,
@@ -126,6 +136,8 @@ type Daemon struct {
 	sup     *supervisor.Supervisor
 	srv     *localsock.Server
 	started time.Time
+
+	policy UpdatePolicy // set when the components are built
 
 	nodeMu sync.Mutex
 	node   *pipeline.Node
@@ -145,6 +157,12 @@ func New(cfg Config, dirs Dirs, deps Deps) (*Daemon, error) {
 	}
 	if deps.Now == nil {
 		deps.Now = time.Now
+	}
+	if deps.Getenv == nil {
+		deps.Getenv = os.Getenv
+	}
+	if deps.Executable == nil {
+		deps.Executable = Executable
 	}
 	if deps.SweepEvery <= 0 {
 		deps.SweepEvery = sweepEvery
@@ -346,11 +364,20 @@ func LockState(stateDir string) (func(), error) {
 }
 
 func (d *Daemon) components() []supervisor.Component {
-	return []supervisor.Component{
+	cs := []supervisor.Component{
 		{Name: "tunnel", Run: d.runTunnel, MaxBackoff: 5 * time.Minute},
 		{Name: "revocations", Run: d.runRefresh},
 		{Name: "sweep", Run: d.runSweep},
 	}
+	pol, err := d.cfg.Policy(d.deps.Getenv)
+	if err != nil { // a value of PARLEY_UPDATE the daemon cannot read: updates are off
+		d.deps.Log.Warn("update policy invalid; self-update is off", logx.ID("component", "update"))
+	}
+	d.policy = pol
+	if pol.Mode != UpdateOff {
+		cs = append(cs, supervisor.Component{Name: "update", Run: d.runUpdate})
+	}
+	return cs
 }
 
 // runTunnel asks for a fresh config on each start (connect tokens are

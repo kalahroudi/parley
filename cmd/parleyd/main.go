@@ -33,7 +33,7 @@ func runIn(ctx context.Context, getenv func(string) string, userConfigDir func()
 	if err != nil {
 		return err
 	}
-	d, err := daemon.New(cfg, dirs, daemon.Deps{Log: daemon.NewLogger(logw, cfg.LogLevel)})
+	d, err := daemon.New(cfg, dirs, daemon.Deps{Log: daemon.NewLogger(logw, cfg.LogLevel), Version: version, Getenv: getenv})
 	if err != nil {
 		return err
 	}
