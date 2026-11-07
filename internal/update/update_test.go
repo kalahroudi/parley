@@ -332,7 +332,7 @@ func TestApplyFailures(t *testing.T) {
 	}
 	// A binary missing from the signed checksums is refused (a release without this platform).
 	u = r.updater("v1.0.0", "")
-	u.OS = "plan9"
+	u.Arch = "plan9" // an unpublished target; OS stays so the install file names match
 	if err := u.Apply(ctx, rel); err == nil || !strings.Contains(err.Error(), "not in the signed checksums") {
 		t.Fatalf("got %v", err)
 	}

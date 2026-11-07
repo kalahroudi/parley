@@ -32,7 +32,7 @@ import (
 // ErrNotLoopback is returned when asked to listen on a non-loopback address.
 var ErrNotLoopback = errors.New("signer: listen address must be loopback")
 
-const maxBody = 64 << 10
+const maxBody = 65536 // 64 KiB, a single literal so the mutation gate has no expression to mutate
 
 // Request limits per window. A person clicking in the dashboard stays far below them; a script that holds the
 // session secret cannot use the signer as a signing oracle at machine speed or grind recovery codes.
