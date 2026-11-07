@@ -68,6 +68,9 @@ export function limitOf(b: Billing | undefined, now: number): number {
 export function reduce(cur: Billing | undefined, u: SubUpdate): Billing | null {
   const same = cur?.subscription === u.subscription;
   if (cur && same && (u.customer !== cur.customer || u.created < cur.as_of)) return null;
+  // Stripe's event time has one-second resolution and event ids carry no order, so of two events in the same second the
+  // one that leaves the subscription lapsed wins whatever order they arrive in: a stale "active" cannot undo a lapse.
+  if (cur && same && u.created === cur.as_of && entitled(u.status) && !entitled(cur.status)) return null;
   if (cur && !same && !(entitled(u.status) && !entitled(cur.status))) return null;
   // The grace period starts when a subscription we saw in good standing stops being so, at Stripe's time, and is never
   // extended by the events that follow (past_due, then unpaid, then canceled). An event for a subscription we never saw

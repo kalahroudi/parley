@@ -224,6 +224,12 @@ describe("reduce", () => {
     expect(reduce(rec(), upd({ status: "canceled", created: T0 - 1 }))).toBeNull();
     expect(reduce(rec(), upd())).toEqual(rec());
   });
+  it("in the same second, a lapse wins over a good standing whatever the arrival order", () => {
+    const lapsedAt = rec({ status: "canceled", as_of: T0, grace_until: T0 + GRACE_MS });
+    expect(reduce(lapsedAt, upd({ created: T0 }))).toBeNull(); // a stale "active" arriving after the cancel
+    expect(reduce(lapsedAt, upd({ created: T0 + 1 }))?.status).toBe("active"); // a later one still applies
+    expect(reduce(rec({ as_of: T0 }), upd({ status: "canceled", created: T0 }))?.status).toBe("canceled"); // the cancel after an active
+  });
   it("ignores another customer's claim on the same subscription", () => expect(reduce(rec(), upd({ customer: "cus_2", created: T0 + 1 }))).toBeNull());
   it("ignores a second subscription while the first is in good standing", () => {
     expect(reduce(rec(), upd({ subscription: "sub_2", customer: "cus_2", created: T0 + 1 }))).toBeNull();
