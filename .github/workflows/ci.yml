@@ -145,6 +145,18 @@ jobs:
         run: node scripts/check-dev-auth.mjs
       - name: Layout tests
         run: node --test "tests/**/*.test.mjs"
+      # A real daemon that vanishes with exit code 1 and no output was killed from outside (found on this OS in T505). When
+      # the node tests fail on Windows, say what the system recorded: Defender detections and actions, application crashes.
+      - name: Windows system events (when the tests failed)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Output '--- Defender threat detections'
+          Get-MpThreatDetection -ErrorAction SilentlyContinue | Format-List ThreatID, ProcessName, Resources, InitialDetectionTime, ActionSuccess
+          Write-Output '--- Defender operational log (detections, remediation, blocks)'
+          Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1006,1007,1008,1015,1116,1117,1118,1119,5007} -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, Id, Message
+          Write-Output '--- Application log: crashes and errors of this job'
+          Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2} -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, ProviderName, Id, Message
 
   # Mutation testing is slow, so each part is a job of its own, running in parallel with the tests and with each other, each
   # with its own time limit (one job holding all three ran into the 90 minute limit of a job). Together they judge exactly

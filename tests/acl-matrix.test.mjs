@@ -182,7 +182,7 @@ test("T307: ACL matrix: gateway visibility x the target daemon's allowlist, real
         }),
       );
       // A daemon that died says so, with its own output, instead of the row failing as "not reachable".
-      daemons.forEach((d, i) => assert.equal(d.child.exitCode, null, `daemon ${i} exited (${d.child.exitCode}, signal ${d.child.signalCode}) during "${row.name}":\n${d.output()}`));
+      daemons.forEach((d, i) => assert.equal(d.child.exitCode, null, `daemon ${i} (pid ${d.child.pid}; all daemon pids ${daemons.map((x) => x.child.pid)}) exited (${d.child.exitCode}, signal ${d.child.signalCode}) at ${new Date().toISOString()} during "${row.name}":\n${d.output()}`));
       for (const [who, got] of results) {
         seen.push(`${row.name} / ${who}: ${got}`);
         assert.equal(got, row[who], `${row.name}: ${who} met ${got}, want ${row[who]}\n${daemons.map((d, i) => `--- daemon ${i}\n${d.output()}`).join("\n")}`);

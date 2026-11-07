@@ -13,6 +13,6 @@ export function killTree(child, log = (m) => process.stderr.write(m + "\n")) {
   const q = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
   const image = (q.stdout ?? "").trim().split(",")[0]?.replace(/"/g, "") ?? "";
   const k = spawnSync("taskkill", ["/pid", pid, "/T", "/F"], { encoding: "utf8" });
-  log(`[harness] taskkill pid ${pid} (${image || "no such process"}): ${(k.stdout ?? "").replace(/\s+/g, " ").trim()}`);
+  log(`[harness] ${new Date().toISOString()} taskkill pid ${pid} (${image || "no such process"}): ${(k.stdout ?? "").replace(/\s+/g, " ").trim()}`);
   return true;
 }
