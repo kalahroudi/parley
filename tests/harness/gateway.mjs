@@ -25,7 +25,11 @@ const freePort = () =>
     });
   });
 
+// Only a child that has not exited: its pid is free once it has, and Windows hands pids out again at once, so
+// `taskkill /pid <old> /T /F` would end whatever process got the number (in the full CI run it ended a daemon of
+// another test, which then exited with code 1 and no output).
 function kill(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
     else process.kill(-child.pid, "SIGKILL");
@@ -52,11 +56,12 @@ export async function startGateway({ admins = "", users = "", userDomains = "", 
     detached: process.platform !== "win32",
   });
   const url = `http://127.0.0.1:${port}`;
-  const close = async () => {
+  let closing;
+  const close = () => (closing ??= (async () => { // once: a second close must not touch a pid that may be someone else's
     kill(gw);
     closeSync(logFd);
     await idp.close();
-  };
+  })());
   try {
     const end = Date.now() + 60000;
     for (;;) {
