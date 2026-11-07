@@ -94,7 +94,7 @@ func readFile(dir, rel string, line, limit *int) (string, *rpcError) {
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
 		return "", errFile
 	}
-	b, err := io.ReadAll(io.LimitReader(f, MaxACPFile+1))
+	b, err := readAll(io.LimitReader(f, MaxACPFile+1))
 	if err != nil {
 		return "", errFile
 	}
@@ -132,14 +132,25 @@ func writeFile(dir, rel, content string) *rpcError {
 		return errFile
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return errFile
-	}
-	if err := f.Truncate(0); err != nil {
-		return errFile
-	}
-	if _, err := f.WriteString(content); err != nil {
+	// No check that it is a regular file: a directory, a named pipe without a reader and a socket cannot be opened for writing
+	// (O_NONBLOCK, see openFlags), and truncating a device the directory happens to hold changes nothing.
+	if writeAll(f, content) != nil {
 		return errFile
 	}
 	return nil
+}
+
+// readAll and writeAll are the reading and writing of a file, replaceable so that their failure can be tested.
+var (
+	readAll  = io.ReadAll
+	writeAll = replaceContent
+)
+
+// replaceContent makes content the whole content of f.
+func replaceContent(f *os.File, content string) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	_, err := f.WriteString(content)
+	return err
 }

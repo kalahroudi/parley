@@ -104,6 +104,10 @@ func TestConstantsArePinned(t *testing.T) {
 	if cancelTimeout != 2*time.Second || reapDelay != 2*time.Second || MaxStatuses != 1024 || MaxQuestions != 16 {
 		t.Fatal("a limit changed")
 	}
+	if MaxACPIgnored != 4096 || MaxACPPermissions != 64 || MaxACPFile != 1<<20 || MaxACPStatus != 1024 || maxACPSession != 256 ||
+		maxACPID != 64 || maxACPPath != 1024 || maxACPTitle != 256 || maxACPKind != 32 || cancelGrace != 250*time.Millisecond {
+		t.Fatal("an ACP limit changed")
+	}
 	if pipeline.MaxContent != 522240 || MaxLine != 174081*4+4096 {
 		t.Fatalf("MaxLine %d", MaxLine)
 	}

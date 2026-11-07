@@ -31,7 +31,7 @@ const (
 	// refused ones included).
 	MaxACPPermissions = 64
 	// MaxACPFile bounds a file the agent reads or writes through us.
-	MaxACPFile = 1 << 20
+	MaxACPFile = 1048576
 	// MaxACPStatus bounds a status text taken from a plan.
 	MaxACPStatus = 1024
 
@@ -43,7 +43,7 @@ const (
 )
 
 // cancelGrace is how long an agent has to end itself after session/cancel before it is killed.
-const cancelGrace = 250 * time.Millisecond
+const cancelGrace = time.Duration(250e6)
 
 // What the owner is asked about, as the names of the tools of the approval broker (internal/toolgate) and the one outcome
 // that means yes.
